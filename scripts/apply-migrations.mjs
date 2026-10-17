@@ -36,12 +36,18 @@ async function query(sql) {
 
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
-await query(`create table if not exists public.builder_schema_migrations (
+// --dry-run：完全不執行 DDL，只讀紀錄表（不存在就當作全部未套用）
+let applied = new Set();
+if (dryRun) {
+  const exists = await query("select to_regclass('public.builder_schema_migrations') is not null as ok");
+  if (exists[0]?.ok) applied = new Set((await query("select name from public.builder_schema_migrations")).map((r) => r.name));
+} else {
+  await query(`create table if not exists public.builder_schema_migrations (
   name text primary key, applied_at timestamptz not null default now());
 alter table public.builder_schema_migrations enable row level security;
 revoke all on table public.builder_schema_migrations from anon, authenticated;`);
-
-const applied = new Set((await query("select name from public.builder_schema_migrations")).map((r) => r.name));
+  applied = new Set((await query("select name from public.builder_schema_migrations")).map((r) => r.name));
+}
 const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
 
 for (const f of files) {

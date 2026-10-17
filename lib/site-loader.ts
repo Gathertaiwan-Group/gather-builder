@@ -42,6 +42,7 @@ export function moduleActive(site: LoadedSite, id: string): boolean {
   return !!m && m.status !== "disabled";
 }
 
+/** 模組設定讀「目前顯示的內容」（已發布快照或預覽中的草稿），不讀即時設定 */
 export function moduleConfig<T = Record<string, unknown>>(site: LoadedSite, id: string): T {
-  return (site.modules.get(id)?.config ?? {}) as T;
+  return (site.content.moduleSettings?.[id] ?? {}) as T;
 }

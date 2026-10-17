@@ -12,7 +12,7 @@ describe("token 雜湊與認證", () => {
     const site = await createSite(admin, { slug: "tok-a", name: "A" });
     expect(site.token).toMatch(/^gbt_/);
     const rows = await store.listTokens("all");
-    expect(rows[0]!.token_hash).toBe(hashToken(site.token));
+    expect(rows[0]!.token_hash).toBe(hashToken(site.token!));
     expect(JSON.stringify(rows)).not.toContain(site.token);
 
     const actor = await authenticateBearer(store, `Bearer ${site.token}`);

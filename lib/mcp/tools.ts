@@ -27,8 +27,10 @@ function fail(e: unknown) {
   if (e instanceof ServiceError) {
     return { content: [{ type: "text" as const, text: `[${e.code}] ${e.message}` }], isError: true };
   }
-  console.error("[mcp] tool error", e);
-  return { content: [{ type: "text" as const, text: `[internal] 伺服器錯誤：${e instanceof Error ? e.message.slice(0, 300) : "未知"}` }], isError: true };
+  // 內部錯誤（可能含 SQL／約束名）只記在 server log，回給客戶端的是通用訊息＋追查碼
+  const ref = Math.random().toString(36).slice(2, 10);
+  console.error(`[mcp] tool error ref=${ref}`, e);
+  return { content: [{ type: "text" as const, text: `[internal] 伺服器發生錯誤，請稍後再試（追查碼 ${ref}）` }], isError: true };
 }
 
 const site = z
@@ -270,7 +272,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     "configure_module",
     {
       description:
-        "設定模組（依模組的 settingsSchema 驗證，立即生效、不經草稿）。例：core {ga4MeasurementId, siteDescription, defaultOgImage, footerText}；contact-form {notifyEmail, rateLimitPerHour}；line {lineUrl, floating, floatingLabel}；blog {listTitle, postsPerPage}。預設與現有設定合併。需要 modules:write。",
+        "設定模組（依模組的 settingsSchema 驗證）。設定存進草稿，preview_changes → publish_site 後才對外生效。例：core {ga4MeasurementId, siteDescription, defaultOgImage, footerText}；contact-form {notifyEmail, rateLimitPerHour}；line {lineUrl, floating, floatingLabel}；blog {listTitle, postsPerPage}。預設與現有設定合併。需要 modules:write。",
       inputSchema: {
         site,
         moduleId: z.string(),
@@ -287,7 +289,8 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   server.registerTool(
     "create_post",
     {
-      description: "新增文章（需 blog 模組）。status 預設 draft；設 published 會立即上線（文章不經網站草稿/發布流程）。bodyMd 為 Markdown（不支援原始 HTML）。需要 content:write。",
+      description:
+        "新增文章（需 blog 模組）。status 預設 draft（不公開）。設 published 會立即上線，因此另外需要 publish scope 並帶 confirm: true（使用者確認後）。bodyMd 為 Markdown（不支援原始 HTML）。需要 content:write。",
       inputSchema: {
         site,
         slug: z.string().describe("文章網址代號，小寫英數與連字號，例如 \"open-house-2026\""),
@@ -297,6 +300,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
         coverUrl: z.string().optional().describe("封面圖 https 網址"),
         status: z.enum(["draft", "published"]).optional(),
         publishedAt: z.string().optional().describe("ISO 8601 發布時間，未來時間 = 排程"),
+        confirm: z.boolean().optional().describe("status 為 published 時必填 true（使用者已確認上線）"),
       },
       annotations: WRITE,
     },
@@ -306,7 +310,8 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   server.registerTool(
     "update_post",
     {
-      description: "修改文章（用 postId 或 slug 指定），只傳要改的欄位。需要 content:write。",
+      description:
+        "修改文章（用 postId 或 slug 指定），只傳要改的欄位。草稿文章只需 content:write；若文章已公開、或要上架／下架，會立即影響線上，需要 publish scope 並帶 confirm: true。",
       inputSchema: {
         site,
         postId: z.string().optional(),
@@ -322,6 +327,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
             publishedAt: z.string().optional(),
           })
           .describe("要修改的欄位"),
+        confirm: z.boolean().optional().describe("影響已公開內容時必填 true"),
       },
       annotations: WRITE,
     },
@@ -346,7 +352,8 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   server.registerTool(
     "create_portfolio_item",
     {
-      description: "新增作品集項目（需 portfolio 模組），會出現在 portfolio_grid 區塊。需要 content:write。",
+      description:
+        "新增作品集項目（需 portfolio 模組）。status 預設 draft；設 published 才會出現在 portfolio_grid，需要 publish scope 並帶 confirm: true。需要 content:write。",
       inputSchema: {
         site,
         title: z.string(),
@@ -356,6 +363,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
         tags: z.array(z.string()).optional(),
         sort: z.number().int().optional().describe("排序，小的在前"),
         status: z.enum(["draft", "published"]).optional(),
+        confirm: z.boolean().optional().describe("status 為 published 時必填 true"),
       },
       annotations: WRITE,
     },
@@ -365,7 +373,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   server.registerTool(
     "update_portfolio_item",
     {
-      description: "修改作品集項目，只傳要改的欄位。需要 content:write。",
+      description: "修改作品集項目，只傳要改的欄位。已公開的作品或上架／下架需要 publish scope 並帶 confirm: true。需要 content:write。",
       inputSchema: {
         site,
         itemId: z.string(),
@@ -378,6 +386,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
           sort: z.number().int().optional(),
           status: z.enum(["draft", "published"]).optional(),
         }),
+        confirm: z.boolean().optional().describe("影響已公開內容時必填 true"),
       },
       annotations: WRITE,
     },
@@ -426,6 +435,11 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
         site,
         confirm: z.boolean().optional().describe("使用者確認後才設 true"),
         note: z.string().optional().describe("版本備註，例如「更新春季菜單」"),
+        expectedDraftVersion: z
+          .number()
+          .int()
+          .optional()
+          .describe("建議帶入 preview_changes 回傳的 draftVersion：若預覽後草稿又被改過，發布會被拒，確保上線的就是使用者看過的那份"),
       },
       annotations: DESTRUCTIVE,
     },

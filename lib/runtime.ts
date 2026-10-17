@@ -1,4 +1,5 @@
 import { getStore } from "./store";
+import type { Store } from "./store/types";
 import { requireSecret } from "./secrets";
 import type { Actor } from "./tokens";
 import type { ServiceContext } from "./services/context";
@@ -12,6 +13,6 @@ export function baseUrlFrom(req?: { headers: Headers } | null): string {
   return "http://localhost:3000";
 }
 
-export function makeContext(actor: Actor, req?: { headers: Headers } | null): ServiceContext {
-  return { actor, store: getStore(), baseUrl: baseUrlFrom(req), previewSecret: requireSecret("PREVIEW_SECRET") };
+export function makeContext(actor: Actor, req?: { headers: Headers } | null, store: Store = getStore()): ServiceContext {
+  return { actor, store, baseUrl: baseUrlFrom(req), previewSecret: requireSecret("PREVIEW_SECRET") };
 }

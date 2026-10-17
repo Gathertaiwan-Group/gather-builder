@@ -15,6 +15,9 @@ export async function issueToken(ctx: ServiceContext, input: { site?: string | n
   if (bad.length) throw new ServiceError("invalid", `未知 scope：${bad.join(", ")}。可用：${ALL_SCOPES.join(", ")}`);
   const scopes = [...new Set(input.scopes)] as Scope[];
   if (!scopes.length) throw new ServiceError("invalid", "至少要選一個 scope");
+  // 不能發出比自己大的 token
+  const exceeding = scopes.filter((s) => !ctx.actor.scopes.includes(s));
+  if (exceeding.length) throw new ServiceError("forbidden", `不能發行超出自己權限的 token：你沒有 ${exceeding.join(", ")}`);
 
   let tenantId: string | null = null;
   if (input.site) {

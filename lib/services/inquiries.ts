@@ -19,6 +19,7 @@ export const inquiryInput = z.object({
 });
 
 const DEFAULT_LIMIT_PER_HOUR = 5;
+export const LINE_CLICK_LIMIT_PER_10MIN = 30;
 
 /**
  * 前台聯絡表單送出（公開入口，無 token）。
@@ -40,14 +41,18 @@ export async function submitInquiry(
   const d = parsed.data;
   if (d.website && d.website.trim() !== "") return { stored: false };
 
-  const config = getModule("contact-form")!.settingsSchema.safeParse(states.get("contact-form")?.config ?? {});
+  // 模組設定讀「已發布」快照（configure_module 只改草稿，發布後才生效）
+  let published: Record<string, unknown> = {};
+  if (tenant.published_revision_id) {
+    const rev = await deps.store.getRevision(tenant.published_revision_id);
+    published = rev?.content.moduleSettings?.["contact-form"] ?? {};
+  }
+  const config = getModule("contact-form")!.settingsSchema.safeParse(published);
   const cfg = (config.success ? config.data : {}) as { notifyEmail?: string; rateLimitPerHour?: number };
   const ipHash = hashIp(input.ip || "unknown", deps.ipSecret);
-  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const count = await deps.store.countInquiriesSince(tenant.id, ipHash, since);
-  if (count >= (cfg.rateLimitPerHour ?? DEFAULT_LIMIT_PER_HOUR)) {
-    throw new ServiceError("rate_limited", "送出太頻繁，請稍後再試");
-  }
+  // 原子計數（DB 端 insert … on conflict … returning），併發送出也無法繞過；被擋的不寫入、不寄信
+  const hit = await deps.store.rateHit(`inquiry:${tenant.id}`, ipHash, 3600, cfg.rateLimitPerHour ?? DEFAULT_LIMIT_PER_HOUR);
+  if (!hit.allowed) throw new ServiceError("rate_limited", "送出太頻繁，請稍後再試");
 
   await deps.store.insertInquiry({
     tenant_id: tenant.id,
@@ -97,11 +102,14 @@ export async function recordLineClick(
   if (!tenant) throw new ServiceError("not_found", "找不到網站");
   const active = activeModuleIds(await moduleStates(deps, tenant.id));
   if (!active.has("line")) throw new ServiceError("forbidden", "此網站未啟用 LINE 模組");
+  const ipHash = hashIp(input.ip || "unknown", deps.ipSecret);
+  const hit = await deps.store.rateHit(`line:${tenant.id}`, ipHash, 600, LINE_CLICK_LIMIT_PER_10MIN);
+  if (!hit.allowed) throw new ServiceError("rate_limited", "點擊紀錄太頻繁");
   await deps.store.insertLineClick({
     tenant_id: tenant.id,
     path: input.path?.slice(0, 200) ?? null,
     placement: input.placement === "floating" ? "floating" : "section",
-    ip_hash: hashIp(input.ip || "unknown", deps.ipSecret),
+    ip_hash: ipHash,
     user_agent: input.userAgent?.slice(0, 300) ?? null,
   });
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ServiceError } from "../errors";
 import type {
   AuditRow,
   DraftRow,
@@ -27,6 +28,7 @@ export function createMemoryStore(): Store {
   const lineClicks: { tenant_id: string }[] = [];
   const tokens = new Map<string, TokenRow>();
   const audit: AuditRow[] = [];
+  const rate = new Map<string, number>();
 
   return {
     async getTenantBySlug(slug) {
@@ -39,7 +41,7 @@ export function createMemoryStore(): Store {
       return clone([...tenants.values()]);
     },
     async insertTenant(t) {
-      if ([...tenants.values()].some((x) => x.slug === t.slug)) throw new Error("duplicate key value violates unique constraint (slug)");
+      if ([...tenants.values()].some((x) => x.slug === t.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
       const row: TenantRow = { ...t, id: randomUUID(), published_revision_id: null, created_at: now() };
       tenants.set(row.id, row);
       return clone(row);
@@ -59,18 +61,28 @@ export function createMemoryStore(): Store {
     async getDraft(tenantId) {
       return clone(drafts.get(tenantId) ?? null);
     },
-    async saveDraft(tenantId, content, by) {
-      drafts.set(tenantId, { tenant_id: tenantId, content: clone(content), updated_at: now(), updated_by: by });
+    async createDraft(tenantId, content, by) {
+      if (drafts.has(tenantId)) throw new ServiceError("conflict", "資料重複：草稿已存在");
+      drafts.set(tenantId, { tenant_id: tenantId, content: clone(content), updated_at: now(), updated_by: by, version: 1 });
     },
-    async publish(tenantId, note, by) {
+    async saveDraft(tenantId, content, by, expectedVersion) {
+      const d = drafts.get(tenantId);
+      if (!d || d.version !== expectedVersion) return null;
+      drafts.set(tenantId, { tenant_id: tenantId, content: clone(content), updated_at: now(), updated_by: by, version: expectedVersion + 1 });
+      return expectedVersion + 1;
+    },
+    async publish(tenantId, note, by, expectedDraftVersion) {
       const t = tenants.get(tenantId);
       const d = drafts.get(tenantId);
       if (!t || !d) throw new Error("tenant or draft not found");
+      if (expectedDraftVersion !== null && d.version !== expectedDraftVersion) {
+        throw new ServiceError("conflict", "草稿在你預覽之後又被修改過了（版本不符）。請重新呼叫 preview_changes 確認最新內容再發布。");
+      }
       const number = Math.max(0, ...[...revisions.values()].filter((r) => r.tenant_id === tenantId).map((r) => r.number)) + 1;
       const rev: RevisionRow = { id: randomUUID(), tenant_id: tenantId, number, content: clone(d.content), note, published_by: by, published_at: now() };
       revisions.set(rev.id, rev);
       tenants.set(tenantId, { ...t, published_revision_id: rev.id, theme: clone(d.content.theme) as Record<string, unknown> });
-      return { id: rev.id, number };
+      return { id: rev.id, number, draftVersion: d.version };
     },
     async rollback(tenantId, number, by) {
       const t = tenants.get(tenantId);
@@ -78,7 +90,8 @@ export function createMemoryStore(): Store {
       const rev = [...revisions.values()].find((r) => r.tenant_id === tenantId && r.number === number);
       if (!rev) return null;
       tenants.set(tenantId, { ...t, published_revision_id: rev.id, theme: clone(rev.content.theme) as Record<string, unknown> });
-      drafts.set(tenantId, { tenant_id: tenantId, content: clone(rev.content), updated_at: now(), updated_by: by });
+      const prev = drafts.get(tenantId);
+      drafts.set(tenantId, { tenant_id: tenantId, content: clone(rev.content), updated_at: now(), updated_by: by, version: (prev?.version ?? 0) + 1 });
       return { id: rev.id, number };
     },
     async listRevisions(tenantId) {
@@ -106,7 +119,7 @@ export function createMemoryStore(): Store {
       return p && p.tenant_id === tenantId ? clone(p) : null;
     },
     async insertPost(row) {
-      if ([...posts.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) throw new Error("duplicate key value violates unique constraint (slug)");
+      if ([...posts.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
       const p: PostRow = { ...row, id: randomUUID(), created_at: now(), updated_at: now() };
       posts.set(p.id, p);
       return clone(p);
@@ -156,9 +169,6 @@ export function createMemoryStore(): Store {
           .slice(0, opts.limit),
       );
     },
-    async countInquiriesSince(tenantId, ipHash, sinceIso) {
-      return inquiries.filter((i) => i.tenant_id === tenantId && i.ip_hash === ipHash && i.created_at >= sinceIso).length;
-    },
     async insertLineClick(row) {
       lineClicks.push({ tenant_id: row.tenant_id });
     },
@@ -189,6 +199,14 @@ export function createMemoryStore(): Store {
     },
     async getToken(id) {
       return clone(tokens.get(id) ?? null);
+    },
+
+    async rateHit(bucket, key, windowSeconds, limit) {
+      const w = Math.floor(Date.now() / 1000 / windowSeconds);
+      const k = `${bucket}|${key}|${w}`;
+      const count = (rate.get(k) ?? 0) + 1; // 單執行緒：讀＋寫在同一個同步區段，等同原子
+      rate.set(k, count);
+      return { count, allowed: count <= limit };
     },
 
     async insertAudit(row) {

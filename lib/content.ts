@@ -38,6 +38,8 @@ export const siteContentSchema = z
     theme: themeSchema,
     pages: z.array(pageSchema).min(1).max(50),
     nav: z.array(navItemSchema).max(12),
+    /** 模組設定（configure_module 寫進草稿，發布後才對外生效） */
+    moduleSettings: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
   })
   .strict()
   .superRefine((c, ctx) => {
@@ -66,6 +68,7 @@ export function defaultContent(siteName: string, preset = DEFAULT_PRESET): SiteC
       },
     ],
     nav: [{ label: "首頁", href: "/" }],
+    moduleSettings: {},
   };
 }
 

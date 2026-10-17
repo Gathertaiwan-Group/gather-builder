@@ -24,7 +24,7 @@ await must("add_section", { path: "/", type: "features", props: { heading: "我�
 await must("add_section", { path: "/", type: "rich_text", props: { heading: "關於山嵐", markdown: "我們相信**好咖啡不需要趕**。\n\n- 每批豆子都有產地與處理法紀錄\n- 烘焙度從淺到中深，依豆子個性調整\n\n[看看最新消息](/blog)" } });
 await must("add_section", { path: "/", type: "portfolio_grid", props: { heading: "合作案例", columns: 3 } });
 for (const [t, id] of [["企業中秋禮盒", "photo-1509042239860-f550ce710b93"], ["市集快閃攤", "photo-1442512595331-e89e73853f31"], ["品牌聯名濾掛", "photo-1497935586351-b67a49e012bf"]]) {
-  await must("create_portfolio_item", { title: t, description: `${t}：從企劃到出貨一條龍。`, imageUrl: img(id), tags: ["案例"] });
+  await must("create_portfolio_item", { title: t, description: `${t}：從企劃到出貨一條龍。`, imageUrl: img(id), tags: ["案例"], status: "published", confirm: true });
 }
 await must("add_section", { path: "/", type: "testimonials", props: { heading: "客人怎麼說", items: [{ quote: "第一次上手沖課就成功沖出喜歡的味道，老師很有耐心。", author: "林小姐", role: "課程學員" }, { quote: "禮盒質感很好，同事都問在哪裡買的。", author: "陳經理", role: "企業客戶" }] } });
 await must("add_section", { path: "/", type: "posts_list", props: { heading: "最新消息", limit: 3 } });
@@ -35,7 +35,7 @@ await must("add_section", { path: "/", type: "contact_form", props: { heading: "
 await must("upsert_page", { path: "/about", title: "關於我們", addToNav: true, seo: { description: "山嵐咖啡的故事" } });
 await must("add_section", { path: "/about", type: "gallery", props: { heading: "店內一隅", images: [{ src: img("photo-1501339847302-ac426a4a7cbb"), alt: "吧台" }, { src: img("photo-1453614512568-c4024d13c247"), alt: "座位區" }, { src: img("photo-1511920170033-f8396924c348"), alt: "咖啡豆" }] } });
 await must("update_nav", { items: [{ label: "首頁", href: "/" }, { label: "關於我們", href: "/about" }, { label: "最新消息", href: "/blog" }, { label: "聯絡", href: "/#contact" }] });
-await must("create_post", { slug: "autumn-beans", title: "秋季新豆上架：古坑日曬", excerpt: "帶有熟成水果與黑糖尾韻。", bodyMd: "今年秋天的古坑日曬批次終於到貨。\n\n## 風味\n\n熟成水果、黑糖、可可。", status: "published" });
-await must("create_post", { slug: "pourover-class-nov", title: "十一月手沖課程開放報名", excerpt: "每週六下午，小班制 6 人。", bodyMd: "名額有限，歡迎用下方表單預約。", status: "published" });
+await must("create_post", { slug: "autumn-beans", title: "秋季新豆上架：古坑日曬", excerpt: "帶有熟成水果與黑糖尾韻。", bodyMd: "今年秋天的古坑日曬批次終於到貨。\n\n## 風味\n\n熟成水果、黑糖、可可。", status: "published", confirm: true });
+await must("create_post", { slug: "pourover-class-nov", title: "十一月手沖課程開放報名", excerpt: "每週六下午，小班制 6 人。", bodyMd: "名額有限，歡迎用下方表單預約。", status: "published", confirm: true });
 const pub = await must("publish_site", { confirm: true, note: "示範站初版" });
 console.log(JSON.stringify({ slug, revision: pub.revision, url: pub.url }));

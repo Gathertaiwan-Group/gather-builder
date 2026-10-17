@@ -53,6 +53,7 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
         {pv && pv.validationErrors.length > 0 && <p className="text-sm text-red-700">發布前需修正：{pv.validationErrors.join("；")}</p>}
         <form action={`/api/admin/tenants/${slug}/publish`} method="post" className="mt-3 flex flex-wrap items-center gap-3 text-sm">
           <input name="note" placeholder="版本備註" className="rounded border px-3 py-1" />
+          {pv && <input type="hidden" name="draftVersion" value={pv.draftVersion} />}
           <label className="flex items-center gap-1">
             <input type="checkbox" name="confirm" required /> 我已預覽並確認
           </label>

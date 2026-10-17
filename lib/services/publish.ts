@@ -7,7 +7,7 @@ import {
   ServiceError,
   activeModuleIds,
   audit,
-  loadDraft,
+  loadDraftRow,
   moduleStates,
   previewUrl,
   publicUrl,
@@ -45,21 +45,23 @@ async function publishedContent(ctx: ServiceContext, tenant: TenantRow): Promise
 export async function previewChanges(ctx: ServiceContext, input: { site?: string | null; path?: string }) {
   requireScope(ctx, "site:read");
   const tenant = await resolveTenant(ctx, input.site);
-  const [draft, published, states] = await Promise.all([loadDraft(ctx, tenant), publishedContent(ctx, tenant), moduleStates(ctx, tenant.id)]);
+  const [draftRow, published, states] = await Promise.all([loadDraftRow(ctx, tenant), publishedContent(ctx, tenant), moduleStates(ctx, tenant.id)]);
+  const draft = draftRow.content;
   const changes = diffContent(published?.content ?? null, draft);
   const token = createPreviewToken(tenant.id, ctx.previewSecret);
   return {
     publishedRevision: published?.number ?? null,
+    draftVersion: draftRow.version,
     hasChanges: published ? changes.length > 0 : true,
     changes,
     validationErrors: validateForPublish(draft, activeModuleIds(states)),
     previewUrl: previewUrl(ctx, tenant.slug, token, input.path ?? "/"),
     previewExpiresInSeconds: PREVIEW_TTL_SECONDS,
-    next: "請使用者打開 previewUrl 確認；確認後呼叫 publish_site 並帶 confirm: true。",
+    next: `請使用者打開 previewUrl 確認；確認後呼叫 publish_site 並帶 confirm: true 與 expectedDraftVersion: ${draftRow.version}（確保發布的就是預覽的這一份）。`,
   };
 }
 
-export async function publishSite(ctx: ServiceContext, input: { site?: string | null; confirm?: boolean; note?: string }) {
+export async function publishSite(ctx: ServiceContext, input: { site?: string | null; confirm?: boolean; note?: string; expectedDraftVersion?: number }) {
   requireScope(ctx, "publish");
   const tenant = await resolveTenant(ctx, input.site);
   if (input.confirm !== true) {
@@ -69,16 +71,24 @@ export async function publishSite(ctx: ServiceContext, input: { site?: string | 
     );
   }
   if (tenant.status === "suspended") throw new ServiceError("forbidden", "網站已停用，無法發布");
-  const [draft, published, states] = await Promise.all([loadDraft(ctx, tenant), publishedContent(ctx, tenant), moduleStates(ctx, tenant.id)]);
+  const [draftRow, published, states] = await Promise.all([loadDraftRow(ctx, tenant), publishedContent(ctx, tenant), moduleStates(ctx, tenant.id)]);
+  const draft = draftRow.content;
+  if (input.expectedDraftVersion !== undefined && input.expectedDraftVersion !== draftRow.version) {
+    throw new ServiceError(
+      "conflict",
+      `草稿在你預覽之後又被修改過了（預覽時版本 ${input.expectedDraftVersion}，目前 ${draftRow.version}）。請重新呼叫 preview_changes 確認後再發布。`,
+    );
+  }
   const errors = validateForPublish(draft, activeModuleIds(states));
   if (errors.length) throw new ServiceError("invalid", `草稿有 ${errors.length} 個問題，無法發布：${errors.join("；")}`);
   const changes = diffContent(published?.content ?? null, draft);
   if (published && changes.length === 0) {
     throw new ServiceError("conflict", `草稿與目前已發布的第 ${published.number} 版相同，沒有可發布的變更`);
   }
-  const rev = await ctx.store.publish(tenant.id, input.note?.slice(0, 300) ?? null, ctx.actor.label);
+  // 一律帶入「剛剛驗證過的那一份」的版本：RPC 內若版本已變就拒絕（驗證與凍結必定是同一份）
+  const rev = await ctx.store.publish(tenant.id, input.note?.slice(0, 300) ?? null, ctx.actor.label, draftRow.version);
   await audit(ctx, tenant.id, "site.publish", { revision: rev.number, changes: changes.length, note: input.note ?? null });
-  return { revision: rev.number, url: publicUrl(ctx, tenant.slug), changes };
+  return { revision: rev.number, draftVersion: rev.draftVersion, url: publicUrl(ctx, tenant.slug), changes };
 }
 
 export async function listRevisions(ctx: ServiceContext, input: { site?: string | null }) {

@@ -13,6 +13,6 @@ export async function POST(req: Request) {
       themePreset: str(f, "themePreset") || undefined,
       test: f.get("test") === "on",
     });
-    return { message: `已建立網站 ${r.slug}，預設 token 只顯示這一次`, flashToken: r.token, redirectTo: `/admin/t/${r.slug}` };
+    return { message: `已建立網站 ${r.slug}，預設 token 只顯示這一次`, flashToken: r.token ?? undefined, redirectTo: `/admin/t/${r.slug}` };
   });
 }

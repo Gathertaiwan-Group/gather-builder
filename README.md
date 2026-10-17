@@ -19,6 +19,7 @@ npm run dev                  # http://localhost:3000
 | `npm run build` / `npm start` | 正式建置 / 啟動 |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | vitest 單元測試（記憶體 Store，不連資料庫） |
+| `npm run test:db` | 整合測試：Supabase 實作與 builder_publish/rollback/rate_hit（建 is_test 租戶，跑完刪除） |
 | `SUPABASE_ACCESS_TOKEN=… npm run migrate` | 透過 Management API 套用 `supabase/migrations/*.sql` |
 | `node --env-file=.env.local scripts/issue-platform-token.mjs "名稱" --save-env .env.local` | 發行平台級 MCP token（原文寫入 env 檔，不印在終端） |
 | `node --env-file=.env.local scripts/e2e-mcp.mjs http://localhost:3100` | MCP 端到端（開站→改→發布→改版→還原）；`--quick` 為精簡版 |

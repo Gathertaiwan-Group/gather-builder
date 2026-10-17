@@ -15,25 +15,8 @@ export interface ServiceContext {
   previewSecret: string;
 }
 
-export type ServiceErrorCode =
-  | "unauthorized"
-  | "forbidden"
-  | "not_found"
-  | "invalid"
-  | "conflict"
-  | "confirm_required"
-  | "rate_limited";
-
-export class ServiceError extends Error {
-  constructor(
-    public code: ServiceErrorCode,
-    message: string,
-    public details?: unknown,
-  ) {
-    super(message);
-    this.name = "ServiceError";
-  }
-}
+export { ServiceError, type ServiceErrorCode } from "../errors";
+import { ServiceError } from "../errors";
 
 export function requireScope(ctx: ServiceContext, scope: Scope): void {
   if (!ctx.actor.scopes.includes(scope)) {
@@ -72,28 +55,40 @@ export async function audit(ctx: ServiceContext, tenantId: string | null, action
 }
 
 export async function loadDraft(ctx: ServiceContext, tenant: TenantRow): Promise<SiteContent> {
-  const d = await ctx.store.getDraft(tenant.id);
-  if (!d) throw new ServiceError("not_found", `網站「${tenant.slug}」沒有草稿`);
-  return d.content;
+  return (await loadDraftRow(ctx, tenant)).content;
 }
 
-/** 讀草稿 → 修改 → 驗證整份結構 → 存回。只動草稿，不影響已發布版本。 */
+export async function loadDraftRow(ctx: ServiceContext, tenant: TenantRow): Promise<{ content: SiteContent; version: number }> {
+  const d = await ctx.store.getDraft(tenant.id);
+  if (!d) throw new ServiceError("not_found", `網站「${tenant.slug}」沒有草稿`);
+  return { content: d.content, version: d.version };
+}
+
+/**
+ * 讀草稿 → 修改 → 驗證整份結構 → 以樂觀鎖存回（version 不符代表期間有人寫過）。
+ * 衝突時重新讀取最新草稿、重套一次修改；再衝突就回 conflict，不會默默蓋掉別人的修改。
+ * 只動草稿，不影響已發布版本。
+ */
 export async function mutateDraft<T>(
   ctx: ServiceContext,
   tenant: TenantRow,
   fn: (draft: SiteContent) => T,
-): Promise<{ result: T; content: SiteContent }> {
-  const draft = structuredClone(await loadDraft(ctx, tenant));
-  const result = fn(draft);
-  const parsed = siteContentSchema.safeParse(draft);
-  if (!parsed.success) {
-    throw new ServiceError(
-      "invalid",
-      `修改後的網站結構不合法：${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("；")}`,
-    );
+): Promise<{ result: T; content: SiteContent; version: number }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const row = await loadDraftRow(ctx, tenant);
+    const draft = structuredClone(row.content);
+    const result = fn(draft);
+    const parsed = siteContentSchema.safeParse(draft);
+    if (!parsed.success) {
+      throw new ServiceError(
+        "invalid",
+        `修改後的網站結構不合法：${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("；")}`,
+      );
+    }
+    const version = await ctx.store.saveDraft(tenant.id, parsed.data, ctx.actor.label, row.version);
+    if (version !== null) return { result, content: parsed.data, version };
   }
-  await ctx.store.saveDraft(tenant.id, parsed.data, ctx.actor.label);
-  return { result, content: parsed.data };
+  throw new ServiceError("conflict", "草稿同時被其他人修改，請重新讀取（get_site / get_page）後再試一次。");
 }
 
 export async function moduleStates(ctx: Pick<ServiceContext, "store">, tenantId: string): Promise<Map<string, TenantModuleRow>> {

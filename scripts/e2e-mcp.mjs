@@ -55,7 +55,9 @@ if (!quick) {
   const th = await site.call("update_theme", { preset: "minimal-modern", overrides: { primary: "#0f766e" } });
   check(th.theme?.preset === "minimal-modern" && th.theme?.overrides?.primary === "#0f766e", "update_theme", th.__error ?? "");
 
-  const post = await site.call("create_post", { slug: `hello-${ts}`, title: POST_TITLE, excerpt: "第一篇", bodyMd: "# 你好\n\n這是 **MCP** 建立的文章。", status: "published" });
+  const noConf = await site.call("create_post", { slug: `nc-${ts}`, title: "未確認", status: "published" });
+  check(noConf.__error?.startsWith("[confirm_required]"), "create_post published 不帶 confirm 被拒", noConf.__error?.slice(0, 40));
+  const post = await site.call("create_post", { slug: `hello-${ts}`, title: POST_TITLE, excerpt: "第一篇", bodyMd: "# 你好\n\n這是 **MCP** 建立的文章。", status: "published", confirm: true });
   check(post.status === "published", "create_post（published）", post.__error ?? post.slug);
 }
 
@@ -70,7 +72,11 @@ if (!quick) {
 
 const noConfirm = await site.call("publish_site", {});
 check(!!noConfirm.__error && noConfirm.__error.startsWith("[confirm_required]"), "publish_site 不帶 confirm 被拒", noConfirm.__error?.slice(0, 60));
-const pub1 = await site.call("publish_site", { confirm: true, note: "e2e 第一版" });
+if (!quick) {
+  const stale = await site.call("publish_site", { confirm: true, expectedDraftVersion: pv.draftVersion - 1 });
+  check(stale.__error?.startsWith("[conflict]"), "publish_site 帶過期的 expectedDraftVersion 被拒", stale.__error?.slice(0, 50));
+}
+const pub1 = await site.call("publish_site", { confirm: true, note: "e2e 第一版", expectedDraftVersion: pv.draftVersion });
 check(pub1.revision === 1, "publish_site confirm:true → 第 1 版", pub1.__error ?? `revision=${pub1.revision}`);
 
 const live1 = await getText(`${base}/s/${slug}`);

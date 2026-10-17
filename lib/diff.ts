@@ -15,6 +15,11 @@ export function diffContent(published: SiteContent | null, draft: SiteContent): 
     out.push(`主題：${published.theme.preset} → ${draft.theme.preset}${same(published.theme.overrides, draft.theme.overrides) ? "" : "（自訂變數有變）"}`);
   }
   if (!same(published.nav, draft.nav)) out.push(`導覽列：${draft.nav.map((n) => n.label).join(" / ")}`);
+  const pm = published.moduleSettings ?? {};
+  const dm = draft.moduleSettings ?? {};
+  for (const id of new Set([...Object.keys(pm), ...Object.keys(dm)])) {
+    if (!same(pm[id] ?? {}, dm[id] ?? {})) out.push(`模組 ${id} 設定有變（發布後生效）`);
+  }
 
   const oldPages = new Map(published.pages.map((p) => [p.path, p]));
   const newPages = new Map(draft.pages.map((p) => [p.path, p]));

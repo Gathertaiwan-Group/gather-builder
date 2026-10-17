@@ -1,5 +1,5 @@
 import { checkDisable, getModule, resolveDependencies, DependencyError } from "@/modules/registry";
-import { ServiceError, activeModuleIds, audit, loadDraft, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
+import { ServiceError, activeModuleIds, audit, loadDraft, moduleStates, mutateDraft, requireScope, resolveTenant, type ServiceContext } from "./context";
 
 function issues(err: { issues: { path: PropertyKey[]; message: string }[] }) {
   return err.issues.map((i) => `${i.path.map(String).join(".") || "(config)"}: ${i.message}`).join("；");
@@ -21,6 +21,7 @@ export async function enableModule(ctx: ServiceContext, input: { site?: string |
     if (!r.success) throw new ServiceError("invalid", `模組 ${input.moduleId} 設定不合法：${issues(r.error)}`);
   }
   const states = await moduleStates(ctx, tenant.id);
+  const draft = await loadDraft(ctx, tenant);
   const now = new Date().toISOString();
   const changed: { id: string; status: string; autoIncluded: boolean }[] = [];
   for (const id of ids) {
@@ -28,10 +29,17 @@ export async function enableModule(ctx: ServiceContext, input: { site?: string |
     const isTarget = id === input.moduleId;
     if (existing && existing.status !== "disabled" && !(isTarget && input.config)) continue;
     const m = getModule(id)!;
-    const config = isTarget && input.config ? input.config : (existing?.config ?? {});
+    const config = isTarget && input.config ? input.config : (draft.moduleSettings?.[id] ?? {});
     const status = m.settingsSchema.safeParse(config).success ? "enabled" : "pending_setup";
-    await ctx.store.upsertTenantModule({ tenant_id: tenant.id, module_id: id, status, config, enabled_at: now });
+    await ctx.store.upsertTenantModule({ tenant_id: tenant.id, module_id: id, status, config: {}, enabled_at: now });
     changed.push({ id, status, autoIncluded: !isTarget });
+  }
+  // 設定一律進草稿，發布後才對外生效
+  if (input.config) {
+    const cfg = input.config;
+    await mutateDraft(ctx, tenant, (d) => {
+      d.moduleSettings = { ...(d.moduleSettings ?? {}), [input.moduleId]: cfg };
+    });
   }
   await audit(ctx, tenant.id, "module.enable", { moduleId: input.moduleId, changed });
   const pending = changed.filter((c) => c.status === "pending_setup").map((c) => c.id);
@@ -75,10 +83,21 @@ export async function configureModule(
   const states = await moduleStates(ctx, tenant.id);
   const row = states.get(input.moduleId);
   if (!row || row.status === "disabled") throw new ServiceError("invalid", `模組 ${input.moduleId} 尚未啟用，請先 enable_module`);
-  const merged = input.replace ? input.config : { ...row.config, ...input.config };
-  const r = m.settingsSchema.safeParse(merged);
-  if (!r.success) throw new ServiceError("invalid", `模組 ${input.moduleId} 設定不合法：${issues(r.error)}`);
-  await ctx.store.upsertTenantModule({ ...row, config: r.data, status: "enabled" });
+  const { result: data } = await mutateDraft(ctx, tenant, (d) => {
+    const current = d.moduleSettings?.[input.moduleId] ?? {};
+    const merged = input.replace ? input.config : { ...current, ...input.config };
+    const r = m.settingsSchema.safeParse(merged);
+    if (!r.success) throw new ServiceError("invalid", `模組 ${input.moduleId} 設定不合法：${issues(r.error)}`);
+    d.moduleSettings = { ...(d.moduleSettings ?? {}), [input.moduleId]: r.data };
+    return r.data;
+  });
+  if (row.status === "pending_setup") await ctx.store.upsertTenantModule({ ...row, status: "enabled" });
   await audit(ctx, tenant.id, "module.configure", { moduleId: input.moduleId, keys: Object.keys(input.config) });
-  return { moduleId: input.moduleId, status: "enabled", config: r.data, note: "模組設定立即生效（不經草稿）。" };
+  return {
+    moduleId: input.moduleId,
+    status: "enabled",
+    config: data,
+    draft: true,
+    note: "設定已存入草稿，要 preview_changes → publish_site（confirm: true）後才會對外生效。",
+  };
 }

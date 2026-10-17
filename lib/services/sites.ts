@@ -89,27 +89,37 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
       props: { heading: data.name, subheading: "網站建置中，敬請期待。", align: "center" },
     });
   }
-  await ctx.store.saveDraft(tenant.id, content, ctx.actor.label);
+  await ctx.store.createDraft(tenant.id, content, ctx.actor.label);
 
-  const tok = generateToken("tenant");
-  const tokenRow = await ctx.store.insertToken({
-    tenant_id: tenant.id,
-    name: "default (create_site)",
-    token_hash: tok.hash,
-    token_prefix: tok.prefix,
-    scopes: TENANT_SCOPES,
-  });
+  // 發出去的 token 不能比呼叫者大：取 TENANT_SCOPES 與呼叫者 scopes 的交集
+  const grantScopes = TENANT_SCOPES.filter((sc) => ctx.actor.scopes.includes(sc));
+  let tok: { raw: string } | null = null;
+  let tokenId: string | null = null;
+  if (grantScopes.length) {
+    const g = generateToken("tenant");
+    const tokenRow = await ctx.store.insertToken({
+      tenant_id: tenant.id,
+      name: "default (create_site)",
+      token_hash: g.hash,
+      token_prefix: g.prefix,
+      scopes: grantScopes,
+    });
+    tok = g;
+    tokenId = tokenRow.id;
+  }
 
-  await audit(ctx, tenant.id, "site.create", { slug: data.slug, modules: moduleIds, tokenId: tokenRow.id, test: !!data.test });
+  await audit(ctx, tenant.id, "site.create", { slug: data.slug, modules: moduleIds, tokenId, tokenScopes: grantScopes, test: !!data.test });
   return {
     siteId: tenant.id,
     slug: tenant.slug,
     modules: statuses,
     previewUrl: previewUrl(ctx, tenant.slug, createPreviewToken(tenant.id, ctx.previewSecret)),
     publicUrl: publicUrl(ctx, tenant.slug),
-    token: tok.raw,
-    tokenScopes: TENANT_SCOPES,
-    note: "token 原文只顯示這一次，請妥善保存。網站尚未發布，修改完成後呼叫 preview_changes 再 publish_site。",
+    token: tok?.raw ?? null,
+    tokenScopes: grantScopes,
+    note: tok
+      ? "token 原文只顯示這一次，請妥善保存。網站尚未發布，修改完成後呼叫 preview_changes 再 publish_site。"
+      : "呼叫者沒有任何網站層級的 scope，因此沒有發行網站 token。",
   };
 }
 
@@ -133,7 +143,7 @@ export async function getSite(ctx: ServiceContext, site?: string | null) {
     slug: tenant.slug,
     name: tenant.name,
     status: tenant.status,
-    modules: [...states.values()].map((m) => ({ id: m.module_id, status: m.status, config: m.config })),
+    modules: [...states.values()].map((m) => ({ id: m.module_id, status: m.status, config: draft.moduleSettings?.[m.module_id] ?? {} })),
     theme: draft.theme,
     nav: draft.nav,
     pages: draft.pages.map((p) => ({

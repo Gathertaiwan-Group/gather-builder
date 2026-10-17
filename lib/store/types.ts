@@ -28,6 +28,8 @@ export interface DraftRow {
   content: SiteContent;
   updated_at: string;
   updated_by: string;
+  /** 樂觀鎖版本，每次寫入 +1 */
+  version: number;
 }
 
 export interface RevisionRow {
@@ -117,9 +119,12 @@ export interface Store {
 
   // draft / revisions
   getDraft(tenantId: string): Promise<DraftRow | null>;
-  saveDraft(tenantId: string, content: SiteContent, by: string): Promise<void>;
-  /** 原子操作：草稿凍結為下一版並設為已發布 */
-  publish(tenantId: string, note: string | null, by: string): Promise<{ id: string; number: number }>;
+  /** 建站時建立第一份草稿（version 1） */
+  createDraft(tenantId: string, content: SiteContent, by: string): Promise<void>;
+  /** 條件更新：只有目前 version 等於 expectedVersion 才寫入；回傳新 version，衝突回 null */
+  saveDraft(tenantId: string, content: SiteContent, by: string, expectedVersion: number): Promise<number | null>;
+  /** 原子操作：把 version = expectedDraftVersion 的草稿凍結為下一版並設為已發布；版本不符丟 ServiceError(conflict) */
+  publish(tenantId: string, note: string | null, by: string, expectedDraftVersion: number | null): Promise<{ id: string; number: number; draftVersion: number }>;
   /** 原子操作：指定版本設為已發布並覆蓋草稿；版本不存在回 null */
   rollback(tenantId: string, number: number, by: string): Promise<{ id: string; number: number } | null>;
   listRevisions(tenantId: string): Promise<RevisionSummary[]>;
@@ -141,7 +146,6 @@ export interface Store {
   // inquiries & line
   insertInquiry(row: Omit<InquiryRow, "id" | "created_at" | "status">): Promise<InquiryRow>;
   listInquiries(tenantId: string, opts: { limit: number; status?: InquiryRow["status"] }): Promise<InquiryRow[]>;
-  countInquiriesSince(tenantId: string, ipHash: string, sinceIso: string): Promise<number>;
   insertLineClick(row: { tenant_id: string; path: string | null; placement: string | null; ip_hash: string | null; user_agent: string | null }): Promise<void>;
   countLineClicks(tenantId: string): Promise<number>;
 
@@ -152,6 +156,9 @@ export interface Store {
   revokeToken(id: string): Promise<TokenRow | null>;
   listTokens(tenantId: string | null | "all"): Promise<TokenRow[]>;
   getToken(id: string): Promise<TokenRow | null>;
+
+  // 原子限流（固定時間窗）
+  rateHit(bucket: string, key: string, windowSeconds: number, limit: number): Promise<{ count: number; allowed: boolean }>;
 
   // audit
   insertAudit(row: Omit<AuditRow, "id" | "at">): Promise<void>;

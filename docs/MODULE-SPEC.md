@@ -20,7 +20,7 @@ modules/<id>/
 | `category` | foundation / content / engagement / commerce |
 | `priceSetup` / `priceMonthly` | 新台幣 |
 | `requires` | 依賴模組 id；開啟時自動帶入，循環會被拒 |
-| `settingsSchema` | zod；`configure_module` 依它驗證。`{}` 不通過 → 啟用後狀態為 `pending_setup` |
+| `settingsSchema` | zod；`configure_module` 依它驗證，設定存進草稿 `moduleSettings`、發布後生效。渲染時用 `moduleConfig(site, id)` 讀（讀的是目前顯示的快照）。`{}` 不通過 → 啟用後狀態為 `pending_setup` |
 | `sectionTypes` | `{ type, label, description, schema, example }[]`；`schema` 是 props 的 zod（`.strict()`），`example` 必須通過 schema |
 | `adminPages?` / `mcpTools` | 宣告用 |
 | `locked?` | 不可停用（只有 core） |

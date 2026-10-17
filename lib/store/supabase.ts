@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Store, TenantRow, TokenRow, RevisionSummary } from "./types";
+import { ServiceError } from "../errors";
 
 /**
  * Supabase 實作。🔴 一律 service role、只在 server 端使用。
@@ -15,8 +16,15 @@ export function createServiceClient(): SupabaseClient {
   });
 }
 
-function must<T>(r: { data: T | null; error: { message: string } | null }, what: string): T {
-  if (r.error) throw new Error(`${what}: ${r.error.message}`);
+function must<T>(r: { data: T | null; error: { message: string; code?: string } | null }, what: string): T {
+  if (r.error) {
+    // unique 衝突轉成友善錯誤，不把約束名回給客戶端
+    if (r.error.code === "23505") throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+    if (/draft version mismatch/.test(r.error.message)) {
+      throw new ServiceError("conflict", "草稿在你預覽之後又被修改過了（版本不符）。請重新呼叫 preview_changes 確認最新內容再發布。");
+    }
+    throw new Error(`${what}: ${r.error.message}`);
+  }
   return r.data as T;
 }
 
@@ -50,22 +58,30 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
     async getDraft(tenantId) {
       return must(await db.from("builder_site_drafts").select("*").eq("tenant_id", tenantId).maybeSingle(), "getDraft");
     },
-    async saveDraft(tenantId, content, by) {
-      must(
+    async createDraft(tenantId, content, by) {
+      must(await db.from("builder_site_drafts").insert({ tenant_id: tenantId, content, updated_by: by, version: 1 }), "createDraft");
+    },
+    async saveDraft(tenantId, content, by, expectedVersion) {
+      // 條件更新＝樂觀鎖：version 不符時 0 列被更新
+      const rows = must(
         await db
           .from("builder_site_drafts")
-          .upsert({ tenant_id: tenantId, content, updated_by: by, updated_at: new Date().toISOString() }, { onConflict: "tenant_id" }),
+          .update({ content, updated_by: by, updated_at: new Date().toISOString(), version: expectedVersion + 1 })
+          .eq("tenant_id", tenantId)
+          .eq("version", expectedVersion)
+          .select("version"),
         "saveDraft",
-      );
+      ) as { version: number }[];
+      return rows[0]?.version ?? null;
     },
-    async publish(tenantId, note, by) {
-      const rows = must(await db.rpc("builder_publish", { p_tenant: tenantId, p_note: note, p_actor: by }), "publish") as {
-        revision_id: string;
-        revision_number: number;
-      }[];
+    async publish(tenantId, note, by, expectedDraftVersion) {
+      const rows = must(
+        await db.rpc("builder_publish", { p_tenant: tenantId, p_note: note, p_actor: by, p_expected_draft_version: expectedDraftVersion }),
+        "publish",
+      ) as { revision_id: string; revision_number: number; draft_version: number }[];
       const r = rows[0];
       if (!r) throw new Error("publish: 沒有回傳版本");
-      return { id: r.revision_id, number: r.revision_number };
+      return { id: r.revision_id, number: r.revision_number, draftVersion: r.draft_version };
     },
     async rollback(tenantId, number, by) {
       const rows = must(await db.rpc("builder_rollback", { p_tenant: tenantId, p_number: number, p_actor: by }), "rollback") as {
@@ -145,16 +161,6 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
       if (opts.status) q = q.eq("status", opts.status);
       return must(await q.order("created_at", { ascending: false }).limit(opts.limit), "listInquiries") ?? [];
     },
-    async countInquiriesSince(tenantId, ipHash, sinceIso) {
-      const r = await db
-        .from("builder_inquiries")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .eq("ip_hash", ipHash)
-        .gte("created_at", sinceIso);
-      if (r.error) throw new Error(`countInquiriesSince: ${r.error.message}`);
-      return r.count ?? 0;
-    },
     async insertLineClick(row) {
       must(await db.from("builder_line_clicks").insert(row), "insertLineClick");
     },
@@ -187,6 +193,16 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
     },
     async getToken(id) {
       return must(await db.from("builder_api_tokens").select("*").eq("id", id).maybeSingle(), "getToken");
+    },
+
+    async rateHit(bucket, key, windowSeconds, limit) {
+      const rows = must(
+        await db.rpc("builder_rate_hit", { p_bucket: bucket, p_key: key, p_window_seconds: windowSeconds, p_limit: limit }),
+        "rateHit",
+      ) as { hit_count: number; allowed: boolean }[];
+      const r = rows[0];
+      if (!r) throw new Error("rateHit: 沒有回傳");
+      return { count: r.hit_count, allowed: r.allowed };
     },
 
     async insertAudit(row) {
