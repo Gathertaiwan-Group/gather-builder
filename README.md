@@ -50,3 +50,16 @@ npm run dev                  # http://localhost:3000
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：多租戶、草稿/發布/版本、一層服務兩個入口、擴充點
 - [docs/MODULE-SPEC.md](docs/MODULE-SPEC.md)：新增模組的檔案與 checklist
 - [docs/MCP.md](docs/MCP.md)：MCP 連線方式與工具清單
+
+## 部署
+
+Vercel 專案（Hobby）無法連結組織私有 repo，所以 push 不會自動部署，需手動部署。
+直接在 repo 目錄 `vercel deploy --prod` 會因為 commit 作者不是 Vercel team 成員而被擋（BLOCKED / TEAM_ACCESS_REQUIRED），
+所以要從不含 `.git` 的匯出目錄部署：
+
+```bash
+D=$(mktemp -d) && git archive HEAD | tar -x -C "$D" && mkdir -p "$D/.vercel" && cp .vercel/project.json "$D/.vercel/"
+(cd "$D" && vercel deploy --prod --yes --scope armands-projects-f3e1a37d)
+```
+
+有 DB 變更時：先 `npm run migrate`，再部署。若變更會讓線上舊版程式壞掉（例如改函式簽章），要先放相容層（參考 migrations 0004/0005）。
