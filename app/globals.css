@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+/* 平台頁（首頁、後台）的基本色 */
+:root {
+  --pf-bg: #f7f7f5;
+  --pf-surface: #ffffff;
+  --pf-text: #1c1c1a;
+  --pf-muted: #6b6b66;
+  --pf-line: #e4e4df;
+  --pf-accent: #c2410c;
+}
+
+html,
+body {
+  margin: 0;
+  overflow-x: hidden;
+}
+body {
+  background: var(--pf-bg);
+  color: var(--pf-text);
+  font-family: "Noto Sans TC", "PingFang TC", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ------------------------------------------------------------ 租戶網站 */
+.gb-site {
+  background: var(--gb-bg);
+  color: var(--gb-text);
+  font-family: var(--gb-font-body);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+.gb-site h1,
+.gb-site h2,
+.gb-site h3 {
+  font-family: var(--gb-font-heading);
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}
+.gb-container {
+  width: 100%;
+  max-width: 72rem;
+  margin-inline: auto;
+  padding-inline: 1rem;
+  box-sizing: border-box;
+}
+@media (min-width: 768px) {
+  .gb-container {
+    padding-inline: 2rem;
+  }
+}
+.gb-section {
+  padding-block: 3.5rem;
+}
+@media (min-width: 768px) {
+  .gb-section {
+    padding-block: 5rem;
+  }
+}
+.gb-h2 {
+  font-size: clamp(1.5rem, 1.2rem + 1.2vw, 2.25rem);
+  font-weight: 700;
+  margin: 0 0 1.75rem;
+}
+.gb-muted {
+  color: var(--gb-muted);
+}
+.gb-card {
+  background: var(--gb-surface);
+  border-radius: var(--gb-radius);
+  border: 1px solid color-mix(in srgb, var(--gb-text) 8%, transparent);
+}
+.gb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.65rem 1.4rem;
+  border-radius: var(--gb-radius);
+  background: var(--gb-primary);
+  color: #fff;
+  font-weight: 600;
+  text-decoration: none;
+  border: 0;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.gb-btn:hover {
+  filter: brightness(1.08);
+}
+.gb-btn:focus-visible,
+.gb-site a:focus-visible,
+.gb-site button:focus-visible,
+.gb-site input:focus-visible,
+.gb-site textarea:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--gb-primary) 60%, transparent);
+  outline-offset: 2px;
+}
+.gb-btn-line {
+  background: #06c755;
+}
+.gb-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 0.6rem 0.8rem;
+  border-radius: calc(var(--gb-radius) * 0.6);
+  border: 1px solid color-mix(in srgb, var(--gb-text) 20%, transparent);
+  background: var(--gb-bg);
+  color: var(--gb-text);
+  font: inherit;
+}
+.gb-prose {
+  line-height: 1.85;
+  font-size: 1.05rem;
+}
+.gb-prose h1,
+.gb-prose h2,
+.gb-prose h3 {
+  margin: 1.8em 0 0.6em;
+}
+.gb-prose p,
+.gb-prose ul,
+.gb-prose ol {
+  margin: 0 0 1.1em;
+}
+.gb-prose a {
+  color: var(--gb-primary);
+}
+.gb-prose img {
+  border-radius: var(--gb-radius);
+}
+.gb-prose pre {
+  overflow-x: auto;
+  padding: 1rem;
+  background: var(--gb-surface);
+  border-radius: var(--gb-radius);
+}
