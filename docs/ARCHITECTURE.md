@@ -118,6 +118,26 @@
 - **電子報**：雙重確認（確認 token sha256、48h、一次性）；群發 `draft → sending` 條件式只成功一次、`sent` 後拒絕；寄送列 unique(broadcast, subscriber) 只建「已確認」者、寄前再查一次狀態；**每批先原子宣告 queued → sending（`builder_claim_deliveries`，FOR UPDATE SKIP LOCKED），只寄自己宣告到的列，併發接續不重寄；宣告超過 15 分鐘仍未完成＝寄了沒有不知道 → 標 failed、不重寄（M-1）**；每次 50 封、逐封記錄結果、`remaining` 再呼叫接續不重寄。退訂 token＝HMAC(PREVIEW_SECRET, broadcast:subscriber)，DB 存 sha256、一次性；退訂頁與**確認頁**都是 GET 只顯示按鈕、POST 才生效（L-3）。**防轟炸（H-2）**：訂閱端點要同源 Origin＋`Content-Type: application/json`；每個信箱（正規化）同站 24 小時最多 1 封確認信、跨所有租戶 24 小時最多 3 封；未確認期間（連結仍有效）重複訂閱不換 token、不再寄。🔴 `is_test` 租戶群發只寄 `gathertaiwan@gmail.com`；RFC 2606 保留網域（example.com、.test…）一律不實際寄出（`lib/mail.ts`）。
 - **AI 客服**：知識＝該租戶已發布頁面文字＋已上架商品＋運費＋設定 `extraKnowledge`；Gemini REST（`gemini-2.5-flash`、`thinkingBudget: 0`，`GEMINI_MODEL` 可覆寫）。限流：每站每 IP 每日、每站每日（`builder_rate_hit`），被擋不呼叫 AI。回覆中不在商品／運費資料內的金額一律遮成「價格請以商品頁為準」——比對 NT$／NT／NTD／TWD／新台幣／＄、數字或中文數字＋元／塊／圓（含「萬」）；折扣語句（打 8 折、85 折、現折、折抵、減 N 元）一律遮（L-2）。對話以 (tenant, session) 存 `builder_ai_chats`；訪客訊息出現 email／電話就寫一筆詢問（每段對話一次）。
 
+## 課程類模組（events／booking／courses）共用規則
+
+- **一律走既有訂單＋付款**：付費報名／預約／課程都是 `builder_orders` 的一張訂單，品項 `builder_order_items.item_kind`（`event_ticket`／`booking`／`course`，`ref_id`＝票種／服務／課程 id，`product_id` 為 null）。建立用 `placeClassOrder()`（`lib/services/class-orders.ts`）→ SQL `builder_place_class_order`：同一交易內編號、寫訂單、優惠券原子扣用（與 `builder_place_order` 同一段，兩邊要一起維護）、**名額預留**（`builder_reserve_for_order` 依 kind 分派）。任一步失敗整筆回滾。
+- 付款方式、sandbox 只限預覽簽章（H1）、線上最低金額、保留時間（刷卡 `onlinePaymentHoldMinutes`、線下 `orderExpireHours`，但**不晚於開始時間**；剩不到 10 分鐘不接受付費）、下單信、notify 權威回查、逾期前回查（H2）全部沿用 shop。第一版不提供 ATM。需要啟用 shop（免費項目不需要）。
+- **取消／逾期**：`builder_cancel_order`（簽章不變）在同一交易呼叫 `builder_release_order_reservations` 釋放名額（冪等，只動 held／confirmed）。所以店主取消、逾期 lazy 取消、每日 cron、金流建單失敗取消，名額都會回來。
+- **付款成功**：只在訂單真正轉成 paid 的那一次（`onOrderPaid`，sandbox 付款不跑）由各模組的 hook 確認報名／預約、開通課程。取消 hook 收到呼叫端的寄信函式（`runCancelHooks(…, deps)`）。
+- **簽章連結不存原文**：簽到碼、候補保留連結、預約自助管理連結都是 `HMAC(PREVIEW_SECRET, 用途:id)`，伺服器可重算；簽到碼 DB 只存 sha256。換 `PREVIEW_SECRET` 會讓舊連結與簽到碼失效。
+- **個資**：名單／預約／學員列表一律遮罩（`maskContact`）；查看完整資料、匯出 CSV 寫 `builder_pii_access_log`（只增不改：service_role 只有 select／insert）＋稽核。CSV 每格經 `csvCell()`：`= + - @`、Tab、CR 開頭前置單引號、全部加雙引號（防 CSV injection）、加 BOM。
+- 時間一律 Asia/Taipei（固定 UTC+8，無夏令時間）。
+
+### events（活動報名）
+
+- 活動（draft／published／cancelled）→ 場次（時間、容量、`offline_seats` 手動保留）→ 票種（價格 0＝免費、每單上限、販售期間、配額）。
+- **名額沒有計數欄位**：一律由報名列（held＋confirmed）＋有效候補保留＋`offline_seats` 即時加總，`builder_reserve_event` 在交易內 `select … for update` 鎖住場次列再判斷（真 DB 測：8 人搶 1 席只成功 1 筆；付費 6 人搶 1 席只成立 1 張訂單）。記取快樂手 seats_taken 假資料、beunion registered_count 混入線下人數的教訓。
+- 免費票：直接 confirmed、寄確認信（簽到碼）。付費票：訂單＋held 保留，付款後 confirmed 並寄確認信；線上活動連結只寄給已確認者。
+- **候補**：名額不足才能登記（正規化 email 同場次只能排一次）。`builder_offer_waitlist`：鎖場次 → 過期保留標 lapsed → 嚴格 FIFO 把空位保留給下一位 `waitlistOfferHours`（預設 24h，不超過開場）。保留本身佔名額，同一個空位不會給兩個人，重複呼叫冪等。觸發點：訂單取消／逾期（cancel hook）、登記候補時、每日 cron、名單讀取前的 lazy 釋放。遞補信帶簽章連結 `/events/<slug>?offer=<id>&t=<簽章>`，報名時在同一交易把保留改成 claimed。
+- 簽到：後台輸入簽到碼或名單上按鈕（`check_in` confirm）；只有 confirmed 能簽到，條件式只成功一次。第一版不產生 QR 圖（簽到碼 10 碼，可自行轉 QR）。
+- 提醒：每日 cron（`/api/cron/expire-orders`，台北 03:17）寄「現在到明天結束」之間開始的場次；`reminder_sent_at` 條件式更新，cron 重跑或併發都只寄一次。
+- 取消場次（`cancel_session` confirm）：未付款保留 → 取消訂單；已付款 → 報名取消並標 `refund_required`（不自動退款）；免費／候補 → 取消；全部寄通知。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

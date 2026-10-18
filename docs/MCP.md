@@ -33,9 +33,13 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 | `marketing:write` | 建立／修改折扣碼、設定推薦 KOL 分潤比例 |
 | `newsletter:read` | 讀電子報訂閱者（個資）與群發紀錄 |
 | `newsletter:write` | 電子報草稿、寄測試信、群發（群發需 `confirm: true`） |
+| `classes:write` | 活動／場次／票種、預約服務與營業時間、線上課程與單元（上架或改已上架項目另需 `publish` ＋ `confirm: true`）；`cancel_session`（confirm） |
+| `attendees:read` | 報名名單、預約、課程學員（個資遮罩） |
+| `attendees:write` | 簽到、取消預約、手動開通／撤銷課程（都需 `confirm: true`） |
 
 > 新 scope 是 2026-10 加的：之前發行的 token 沒有這些 scope，需重新發行（`create_site` 發出的 token 取呼叫者 scope 的交集）。
 > 第三批（invoices／shipping／marketing／newsletter）的 scope 於 2026-10-19 加入，同樣需要重新發行 token 才拿得到。
+> 第四批（classes:write／attendees:read／attendees:write）於 2026-10-19 加入，需要重新發行 token。
 
 ## 在 Claude Code 連線
 
@@ -70,7 +74,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 10. 「我要開發票」→ `enable_module invoice` → 請平台擁有者在後台「電子發票」輸入 Amego 憑證並驗證（`get_invoice_setup_status` 查進度）→ 付款後 `issue_invoice { orderNo, confirm: true }`（或 `configure_module invoice { issueMode: "auto_on_paid" }` 改成自動）。
 11. 「我要超商取貨」→ `enable_module shipping { methods:[{id:"seven",type:"cvs",provider:"ecpay",subType:"UNIMARTC2C",label:"7-11 取貨",fee:60}], sender:{...} }` → 平台擁有者在後台「物流」輸入綠界憑證 → 發布 → 付款後 `create_shipment { orderNo, confirm: true }`。
 12. 「來辦個活動」→ `enable_module coupons` → `create_coupon { code:"FALL15", kind:"percent", value:15, maxDiscount:200 }`；電子報 `create_broadcast` → `send_test_broadcast` → 使用者確認 → `send_broadcast { confirm: true }`。
-13. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
+13. 「我要開陶藝工作坊，12/7 下午一場 8 人，一人 1200」→ `enable_module events`（付費要 shop）→ `create_event` → `create_session { capacity: 8 }` → `create_ticket_type { price: 1200 }` → `update_event { patch:{status:"published"}, confirm:true }` → `add_section events_list` → 發布。報名後 `list_registrations`、當天 `check_in`。
+14. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
 
@@ -122,6 +127,12 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `send_test_broadcast` | newsletter:write | 寄測試信到指定的一個信箱 |
 | `send_broadcast` | newsletter:write | 群發給已確認未退訂者（**必須** `confirm: true`；同一份只能一次；每次 50 封，`remaining > 0` 再呼叫接續） |
 | `list_ai_chats` | inquiries:read | AI 客服對話摘要 |
+| `create_event` / `update_event` | classes:write | 活動（預設草稿；上架或改已上架活動另需 publish ＋ `confirm: true`） |
+| `create_session` / `create_ticket_type` | classes:write | 場次（時間、容量、手動保留座位）／票種（價格 0＝免費、每單上限、販售期間、配額）；活動已上架時需 publish ＋ confirm |
+| `list_events` | site:read | 活動、場次、票種、即時名額（已報名、保留、候補、剩餘） |
+| `list_registrations` | attendees:read | 名單（聯絡資料遮罩；完整資料與 CSV 只在後台並留紀錄） |
+| `check_in` | attendees:write | 簽到（registrationId 或簽到碼；`confirm: true`） |
+| `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

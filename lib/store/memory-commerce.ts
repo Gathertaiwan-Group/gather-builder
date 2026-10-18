@@ -15,7 +15,18 @@ import type {
   ProductRow,
   CommerceStore,
   VariantRow,
+  Store,
+  ClassReservation,
 } from "./types";
+
+/**
+ * 課程類訂單的名額預留（由 memory-classes 提供）：reserveSync 在同步區段內檢查＋寫入（不足就丟錯、什麼都不寫），
+ * releaseSync 在取消訂單的同一個同步區段內釋放（＝builder_cancel_order 呼叫 builder_release_order_reservations）。
+ */
+export interface ReservationBridge {
+  reserveSync(tenantId: string, orderId: string, res: NonNullable<ClassReservation>): string;
+  releaseSync(tenantId: string, orderId: string, cancelReason: string): void;
+}
 
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
@@ -24,7 +35,7 @@ const now = () => new Date().toISOString();
  * members／shop 的記憶體實作。語意與 Supabase 實作（含 builder_place_order／cancel／release 函式）一致：
  * 每個方法的讀＋寫都在同一個同步區段完成（JS 單執行緒），等同 DB 的原子條件更新。
  */
-export function createMemoryCommerceStore(): CommerceStore {
+export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceStore & Pick<Store, "placeClassOrder"> {
   const members = new Map<string, MemberRow>();
   const sessions = new Map<string, MemberSessionRow>();
   const mtokens = new Map<string, MemberTokenRow>();
@@ -45,7 +56,7 @@ export function createMemoryCommerceStore(): CommerceStore {
         const v = it.variant_id ? variants.get(it.variant_id) : undefined;
         if (v) variants.set(v.id, { ...v, stock: v.stock + it.qty });
       } else if (it.deducted_from === "product") {
-        const p = products.get(it.product_id);
+        const p = it.product_id ? products.get(it.product_id) : undefined;
         if (p) products.set(p.id, { ...p, stock: p.stock + it.qty });
       }
     }
@@ -66,7 +77,7 @@ export function createMemoryCommerceStore(): CommerceStore {
     return true;
   };
 
-  const store: CommerceStore = {
+  const store: CommerceStore & Pick<Store, "placeClassOrder"> = {
     async insertCoupon(row) {
       if ([...coupons.values()].some((c) => c.tenant_id === row.tenant_id && c.code === row.code)) throw new ServiceError("conflict", "優惠碼已存在，請換一個");
       const c: CouponRow = { ...clone(row), id: randomUUID(), used_count: 0, created_at: now(), updated_at: now() };
@@ -253,7 +264,7 @@ export function createMemoryCommerceStore(): CommerceStore {
       const plan: { kind: "p" | "v"; id: string; qty: number; track: boolean }[] = [];
       const need = new Map<string, number>();
       for (const it of items) {
-        const p = products.get(it.product_id);
+        const p = it.product_id ? products.get(it.product_id) : undefined;
         const v = it.variant_id ? variants.get(it.variant_id) : undefined;
         const ok = p && p.tenant_id === tenantId && p.status === "published" && (!it.variant_id || (v && v.product_id === p.id && v.tenant_id === tenantId));
         if (!ok) throw new ServiceError("conflict", `庫存不足或商品已下架：${it.name}。整筆訂單未成立，請調整數量後再試。`);
@@ -262,7 +273,7 @@ export function createMemoryCommerceStore(): CommerceStore {
         need.set(key, total);
         const stock = it.variant_id ? v!.stock : p!.stock;
         if (p!.track_inventory && stock < total) throw new ServiceError("conflict", `庫存不足或商品已下架：${it.name}。整筆訂單未成立，請調整數量後再試。`);
-        plan.push({ kind: it.variant_id ? "v" : "p", id: it.variant_id ?? it.product_id, qty: it.qty, track: p!.track_inventory });
+        plan.push({ kind: it.variant_id ? "v" : "p", id: it.variant_id ?? p!.id, qty: it.qty, track: p!.track_inventory });
       }
       // 優惠券：與 builder_place_order 同語意（總次數、每人次數、期間、最低消費），檢查都在扣庫存之前（同步區段＝原子）
       const cp = order.coupon ?? null;
@@ -343,6 +354,80 @@ export function createMemoryCommerceStore(): CommerceStore {
       );
       return { id, order_no: orderNo };
     },
+    async placeClassOrder(tenantId, order, items, day, res) {
+      if (!items.length) throw new Error("builder: empty order");
+      // 與 builder_place_class_order 同語意：優惠券先檢查、名額預留（檢查＋寫入）、最後寫訂單——全部在同一個同步區段
+      const cp = order.coupon ?? null;
+      let coupon: CouponRow | undefined;
+      if (cp) {
+        if (!cp.user_key) throw new Error("builder: coupon user key missing");
+        coupon = coupons.get(cp.id);
+        const t = Date.now();
+        const usable =
+          coupon && coupon.tenant_id === tenantId && coupon.active &&
+          (!coupon.starts_at || new Date(coupon.starts_at).getTime() <= t) &&
+          (!coupon.ends_at || new Date(coupon.ends_at).getTime() > t) &&
+          (coupon.max_uses === null || coupon.used_count < coupon.max_uses) &&
+          order.subtotal >= coupon.min_subtotal;
+        if (!usable) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
+        const uc = userCounts.get(`${cp.id}|${cp.user_key}`) ?? 0;
+        if (coupon!.per_user_limit !== null && uc >= coupon!.per_user_limit) throw new ServiceError("conflict", COUPON_PER_USER);
+      }
+      const id = randomUUID();
+      let reservationId: string | null = null;
+      if (res) {
+        if (!bridge) throw new Error("memory store: 沒有名額預留實作");
+        reservationId = bridge.reserveSync(tenantId, id, res);
+      }
+      const ck = `${tenantId}|${day}`;
+      const n = (counters.get(ck) ?? 0) + 1;
+      counters.set(ck, n);
+      const orderNo = `${order.order_prefix}-${day}-${String(n).padStart(4, "0")}`;
+      const snapshot = items.map((it) => ({ product_id: null, variant_id: null, name: it.name, variant_label: it.variant_label, sku: it.sku, unit_price: it.unit_price, qty: it.qty, line_total: it.line_total, item_kind: it.item_kind, ref_id: it.ref_id }));
+      const row: OrderRow = {
+        id,
+        tenant_id: tenantId,
+        order_no: orderNo,
+        member_id: order.member_id,
+        contact: clone(order.contact),
+        shipping: clone(order.shipping),
+        items: clone(snapshot),
+        subtotal: order.subtotal,
+        shipping_fee: 0,
+        total: order.total,
+        status: "pending_payment",
+        payment_method: order.payment_method,
+        paid_at: null,
+        fulfilled_at: null,
+        cancelled_at: null,
+        cancel_reason: null,
+        expires_at: order.expires_at,
+        stock_released_at: null,
+        access_key_hash: order.access_key_hash,
+        note: order.note,
+        invoice_status: null,
+        shipping_method: null,
+        shipping_tracking: null,
+        payment_sandbox: false,
+        discount_total: order.discount_total ?? 0,
+        coupon_id: cp?.id ?? null,
+        coupon_code: cp?.code ?? null,
+        referral_code: order.referral_code || null,
+        invoice_request: order.invoice_request ? clone(order.invoice_request) : null,
+        shipping_choice: null,
+        created_at: now(),
+        updated_at: now(),
+      };
+      orders.set(id, row);
+      if (cp && coupon) {
+        coupons.set(cp.id, { ...coupon, used_count: coupon.used_count + 1, updated_at: now() });
+        const k = `${cp.id}|${cp.user_key}`;
+        userCounts.set(k, (userCounts.get(k) ?? 0) + 1);
+        redemptions.set(id, { id: randomUUID(), tenant_id: tenantId, coupon_id: cp.id, order_id: id, user_key: cp.user_key, amount: order.discount_total ?? 0, created_at: now(), released_at: null });
+      }
+      for (const it of snapshot) orderItems.push({ ...it, id: randomUUID(), tenant_id: tenantId, order_id: id, stock_deducted: false, deducted_from: null });
+      return { id, order_no: orderNo, reservation_id: reservationId };
+    },
     async getOrderById(tenantId, id) {
       const o = orders.get(id);
       return o && o.tenant_id === tenantId ? clone(o) : null;
@@ -372,6 +457,7 @@ export function createMemoryCommerceStore(): CommerceStore {
       orders.set(id, { ...o, status: "cancelled", cancelled_at: now(), cancel_reason: reason, updated_at: now() });
       const stockReleased = releaseSync(tenantId, id);
       releaseCouponSync(tenantId, id);
+      bridge?.releaseSync(tenantId, id, reason);
       return { transitioned: true, stockReleased };
     },
     async releaseOrderStock(tenantId, id) {
@@ -384,7 +470,7 @@ export function createMemoryCommerceStore(): CommerceStore {
         .map((o) => ({ id: o.id, tenant_id: o.tenant_id }));
     },
     async listExpiredPendingOrdersForProducts(tenantId, productIds, nowIso, limit) {
-      const ids = new Set(orderItems.filter((i) => i.tenant_id === tenantId && productIds.includes(i.product_id)).map((i) => i.order_id));
+      const ids = new Set(orderItems.filter((i) => i.tenant_id === tenantId && i.product_id !== null && productIds.includes(i.product_id)).map((i) => i.order_id));
       return clone(
         [...orders.values()]
           .filter((o) => o.tenant_id === tenantId && ids.has(o.id) && o.status === "pending_payment" && o.expires_at && o.expires_at < nowIso)

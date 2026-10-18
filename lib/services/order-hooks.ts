@@ -6,7 +6,9 @@ import type { Store, TenantRow, OrderRow } from "../store/types";
  */
 export type HookDeps = { store: Store; sendMail?: (to: string, subject: string, text: string) => Promise<void>; baseUrl: string };
 type PaidHook = (deps: HookDeps, tenant: TenantRow, order: OrderRow) => Promise<void>;
-type CancelHook = (store: Store, tenant: TenantRow, order: OrderRow) => Promise<void>;
+/** deps：呼叫端的寄信函式與網址（沒帶時 hook 自己用環境預設） */
+export type CancelDeps = { sendMail?: HookDeps["sendMail"]; baseUrl?: string };
+type CancelHook = (store: Store, tenant: TenantRow, order: OrderRow, deps?: CancelDeps) => Promise<void>;
 
 const paidHooks: PaidHook[] = [];
 const cancelHooks: CancelHook[] = [];
@@ -26,10 +28,10 @@ export async function runPaidHooks(deps: HookDeps, tenant: TenantRow, order: Ord
   }
 }
 
-export async function runCancelHooks(store: Store, tenant: TenantRow, order: OrderRow) {
+export async function runCancelHooks(store: Store, tenant: TenantRow, order: OrderRow, deps?: CancelDeps) {
   for (const hook of cancelHooks) {
     try {
-      await hook(store, tenant, order);
+      await hook(store, tenant, order, deps);
     } catch (e) {
       console.error("[order.cancel hook] 失敗", e instanceof Error ? e.message : e);
     }

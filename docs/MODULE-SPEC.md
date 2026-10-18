@@ -63,7 +63,10 @@ modules/<id>/
 | `newsletter` | core | 區塊 `newsletter_signup`；`/api/s/<slug>/newsletter`、`/s/<slug>/newsletter/confirm`、`/newsletter/unsubscribe`；後台「電子報」 | `builder_newsletter_subscribers`、`builder_newsletter_broadcasts`、`builder_newsletter_deliveries` | `list_subscribers`、`create_broadcast`、`send_test_broadcast`、`send_broadcast`、`list_broadcasts` |
 | `ai-chat` | core | 右下角客服；`/api/s/<slug>/ai-chat`；後台「AI 客服」 | `builder_ai_chats` | `list_ai_chats` |
 
+| `events` | core（付費票需 shop；會員選用） | `/events`、`/events/<slug>`（`?offer=&t=` 候補遞補）；`/s/<slug>/api/events/register`、`/api/events/waitlist`；會員中心「我的報名」；後台「活動」（名單遮罩、查看、CSV、簽到、取消場次） | `builder_events`、`builder_event_sessions`、`builder_event_ticket_types`、`builder_event_registrations`、`builder_event_waitlist`、`builder_pii_access_log` | `create_event`、`update_event`、`create_session`、`create_ticket_type`、`list_events`、`list_registrations`、`check_in`、`cancel_session` |
+
 設定（`configure_module`，進草稿、發布後生效）：
+- `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）。區塊 `events_list`、`event_detail`。
 - `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。
 - `shipping`：`methods[]`（`id`、`type` cvs／home／pickup／manual、`provider` ecpay／manual、`subType`、`label`、`fee`、`freeThreshold`、`instructions`）、`sender`（使用綠界時必填）、`goodsName`。`methods` 至少一種，否則 `pending_setup`。
 - `coupons`：無設定（折扣碼用 MCP／後台建立）。

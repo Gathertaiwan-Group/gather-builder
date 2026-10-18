@@ -14,6 +14,8 @@ import { getOrCreateReferralCode, shareUrl } from "@/lib/services/referral";
 import { headers } from "next/headers";
 import { baseUrlFrom } from "@/lib/runtime";
 import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
+import { memberRegistrations } from "@/lib/services/events";
+import { fmtTaipei } from "@/lib/services/class-orders";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "會員中心", robots: { index: false } };
@@ -40,6 +42,7 @@ export default async function AccountPage(props: Props) {
     })),
   );
   const action = (p: string) => `/s/${site.tenant.slug}/api/account/${p}`;
+  const myRegs = moduleActive(site, "events") ? await memberRegistrations(store, site.tenant, member) : [];
   const myCode = moduleActive(site, "referral") ? await getOrCreateReferralCode(store, site.tenant, member) : null;
   return (
     <SiteShell ctx={ctx}>
@@ -88,6 +91,27 @@ export default async function AccountPage(props: Props) {
                     </li>
                   );
                 })}
+              </ul>
+            )}
+          </div>
+        )}
+        {moduleActive(site, "events") && (
+          <div className="gb-card mb-6 p-5" data-gb="my-registrations">
+            <h2 className="m-0 mb-3 text-lg font-bold">我的報名</h2>
+            {myRegs.length === 0 ? (
+              <p className="gb-muted m-0 text-sm">還沒有報名紀錄。</p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
+                {myRegs.map(({ reg, session, event, code }) => (
+                  <li key={reg.id} className="flex flex-wrap justify-between gap-2 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
+                    <a href={siteHref(ctx, `/events/${event.slug}`)}>{event.title}</a>
+                    <span>
+                      {fmtTaipei(session.starts_at)} · {reg.status === "confirmed" ? "已確認" : reg.status === "held" ? "待付款" : "已取消"}
+                      {session.status === "cancelled" ? "（場次已取消）" : ""}
+                    </span>
+                    {code && <span className="gb-muted w-full text-xs">簽到碼 <span data-gb="checkin-code">{code}</span></span>}
+                  </li>
+                ))}
               </ul>
             )}
           </div>

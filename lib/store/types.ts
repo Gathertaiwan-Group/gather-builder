@@ -1,6 +1,8 @@
 import type { SiteContent } from "../content";
 import type { ExtStore } from "./types-ext";
+import type { ClassesStore } from "./types-classes";
 export type * from "./types-ext";
+export type * from "./types-classes";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -194,7 +196,8 @@ export type OrderStatus = "pending_payment" | "paid" | "fulfilled" | "cancelled"
 export type PaymentMethod = "pchomepay" | "offline";
 
 export interface OrderItemInput {
-  product_id: string;
+  /** 課程類品項（活動票／預約／課程）沒有商品，為 null */
+  product_id: string | null;
   variant_id: string | null;
   name: string;
   variant_label: string | null;
@@ -206,6 +209,10 @@ export interface OrderItemInput {
 
 export interface OrderItemRow extends OrderItemInput {
   id: string;
+  /** product（商品）／event_ticket／booking／course */
+  item_kind?: "product" | "event_ticket" | "booking" | "course";
+  /** 課程類品項的票種／服務／課程 id */
+  ref_id?: string | null;
   tenant_id: string;
   order_id: string;
   stock_deducted: boolean;
@@ -369,7 +376,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore {
+export interface Store extends ExtStore, ClassesStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;

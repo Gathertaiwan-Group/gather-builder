@@ -17,6 +17,9 @@ export const SCOPES = {
   "marketing:write": "建立／停用優惠券、設定推薦 KOL 分潤",
   "newsletter:read": "讀取電子報訂閱者（個資）與群發紀錄",
   "newsletter:write": "建立電子報草稿、寄測試信、群發（群發需 confirm）",
+  "classes:write": "活動／場次／票種、預約服務與營業時間、線上課程與單元（上架或改已上架項目另需 publish ＋ confirm；取消場次需 confirm）",
+  "attendees:read": "讀取報名名單、預約、課程學員（個資遮罩；查看完整資料會留紀錄）",
+  "attendees:write": "簽到、取消預約、手動開通／撤銷課程（都需 confirm）",
 } as const;
 
 export type Scope = keyof typeof SCOPES;

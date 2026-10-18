@@ -18,6 +18,7 @@ import * as newsletter from "../services/newsletter";
 import * as aiChat from "../services/ai-chat";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
+import { registerClassTools } from "./tools-classes";
 
 /**
  * MCP 工具層：只做參數宣告與轉送，所有邏輯（權限、隔離、驗證、稽核）都在 lib/services。
@@ -852,6 +853,10 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     },
     wrap(async (a) => aiChat.listAiChats(ctx, a)),
   );
+
+  /* ------------------------------------------------------------ 第四批：活動／預約／課程 */
+
+  registerClassTools(server, ctx, wrap);
 
   /* ------------------------------------------------------------ 發布 */
 

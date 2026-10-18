@@ -9,6 +9,7 @@ const TABS = [
   { path: "/marketing", label: "行銷" },
   { path: "/newsletter", label: "電子報" },
   { path: "/ai-chat", label: "AI 客服" },
+  { path: "/events", label: "活動" },
 ];
 
 export function TenantTabs({ slug, active, name }: { slug: string; active: string; name?: string }) {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { createMemoryCommerceStore } from "./memory-commerce";
 import { createMemoryExtStore } from "./memory-ext";
+import { createMemoryClassesStore } from "./memory-classes";
 import type {
   AuditRow,
   DraftRow,
@@ -32,9 +33,11 @@ export function createMemoryStore(): Store {
   const audit: AuditRow[] = [];
   const rate = new Map<string, number>();
 
-  return {
-    ...createMemoryCommerceStore(),
+  const classes = createMemoryClassesStore();
+  const store: Store = {
+    ...createMemoryCommerceStore(classes.bridge),
     ...createMemoryExtStore(),
+    ...classes.store,
     async getTenantBySlug(slug) {
       return clone([...tenants.values()].find((t) => t.slug === slug) ?? null);
     },
@@ -220,4 +223,6 @@ export function createMemoryStore(): Store {
       return clone(audit.filter((a) => !tenantId || a.tenant_id === tenantId).reverse().slice(0, limit));
     },
   };
+  classes.attach(store);
+  return store;
 }

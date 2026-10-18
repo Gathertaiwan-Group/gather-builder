@@ -464,7 +464,7 @@ async function placeOrderPriced(
 }
 
 /** invoice 模組啟用時：驗證並回傳發票需求（依店家開放的選項）；未啟用回 null */
-async function resolveInvoiceRequest(store: Store, tenant: TenantRow, raw: unknown): Promise<InvoiceRequest | null> {
+export async function resolveInvoiceRequest(store: Store, tenant: TenantRow, raw: unknown): Promise<InvoiceRequest | null> {
   if (!activeModuleIds(await moduleStates({ store }, tenant.id)).has("invoice")) return null;
   const s = (await publishedModuleSettings(store, tenant, "invoice")) as InvoiceSettings;
   const r = parse(invoiceRequestSchema, raw ?? { type: "member" }) as InvoiceRequest;

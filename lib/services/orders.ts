@@ -6,6 +6,8 @@ import { autoIssueOnPaid } from "./invoices";
 import { runCancelHooks, runPaidHooks } from "./order-hooks";
 // 模組副作用註冊（side-effect import：referral 在載入時註冊付款／取消 hook）
 import "./referral";
+// 第四批：活動報名（付款確認報名、取消後候補遞補）
+import "./events";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -122,7 +124,7 @@ export async function expireIfDue(store: Store, order: OrderRow, now = Date.now(
     await store.insertAudit({ tenant_id: order.tenant_id, actor: "system", action: "order.expire", payload: { orderNo: order.order_no, stockReleased: r.stockReleased } });
     const t = await store.getTenantById(order.tenant_id);
     const after = await store.getOrderById(order.tenant_id, order.id);
-    if (t && after) await runCancelHooks(store, t, after);
+    if (t && after) await runCancelHooks(store, t, after, deps ? { sendMail: deps.sendMail, baseUrl: deps.baseUrl } : undefined);
   }
   return (await store.getOrderById(order.tenant_id, order.id)) ?? order;
 }
@@ -323,7 +325,7 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
   if (!r.transitioned) throw new ServiceError("conflict", `訂單 ${o.order_no} 狀態已被其他操作改變，請重新讀取`);
   await audit(ctx, tenant.id, "order.cancel", { orderNo: o.order_no, from: o.status, stockReleased: r.stockReleased });
   const after = (await ctx.store.getOrderById(tenant.id, o.id))!;
-  await runCancelHooks(ctx.store, tenant, after);
+  await runCancelHooks(ctx.store, tenant, after, { sendMail: ctx.sendMail, baseUrl: ctx.baseUrl });
   // 已開立發票的訂單取消：提示作廢（同期）或折讓（跨期）
   const inv = await ctx.store.getInvoiceByOrder(tenant.id, o.id);
   const invoiceNote = inv?.status === "issued" ? `此訂單已開立發票 ${inv.invoice_no}：請用 void_invoice（confirm: true）處理——同一期會作廢，跨期會改開折讓單。` : null;

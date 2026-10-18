@@ -23,7 +23,7 @@ export const text = (max: number) => z.string().trim().min(1).max(max);
 export const optText = (max: number) => z.string().trim().max(max).optional();
 
 /** 模組保留的站內路徑（部落格、商店、結帳、會員、訂單、站內 API） */
-export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api"];
+export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api", "/events", "/book", "/courses", "/learn"];
 
 /** 網站內頁路徑：/、/about、/services/web */
 export const pagePath = z
@@ -33,7 +33,7 @@ export const pagePath = z
     message: "頁面路徑需為 / 開頭的小寫英數與連字號，例如 /about 或 /services/web",
   })
   .refine((p) => !RESERVED_PATHS.some((r) => p === r || p.startsWith(`${r}/`)), {
-    message: `${"/blog、/shop、/checkout、/account、/orders、/api"} 由模組保留`,
+    message: `${RESERVED_PATHS.join("、")} 由模組保留`,
   });
 
 export const siteSlug = z
