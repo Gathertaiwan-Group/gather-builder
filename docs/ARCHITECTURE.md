@@ -132,7 +132,7 @@
 | 更換 PChomePay 憑證後舊單回查失敗 | notify 回查用「目前」的憑證；正式帳號 A→B 更換後，A 帳號的未完成付款回查會失敗（回 500 讓對方重試），可能逾期取消且不會警示。 | payments 記錄建單時的 app_id、或有 pending 線上付款時禁止更換憑證、回查連續失敗寄警示。 |
 | 所有租戶同源 | `/s/<slug>` 共用一個 origin：cookie 的 path／名稱隔離只防瀏覽器自動帶 cookie，防不了同源 JS。目前租戶無法放自訂程式碼（只允許 G- 格式 GA、Markdown 已消毒）。 | 開放任何自訂 HTML/script/GTM 之前，必須先改子網域或自有網域隔離。 |
 | 登入限流 | 已改為 email＋IP 組合（10 次／15 分）為主、每 IP 30 次；email 單獨超過 100 次／15 分只延遲 1.5 秒不鎖死。分散式大量 IP 仍可慢速猜測。 | 加 CAPTCHA 或裝置指紋。 |
-| 會員信件依賴 Resend | 沒設 `RESEND_API_KEY` 時驗證／重設連結只寫 server log（正式站 log 會含一次性連結）。 | 正式站一定要設 Resend；長期改成每個租戶自己的寄件網域。 |
+| 會員信件依賴 Resend | 正式站已設 `RESEND_API_KEY`／`RESEND_FROM`（2026-10-19，寄件者 `noreply@gathertaiwan.com`）。所有租戶共用同一個寄件網域；沒設時驗證／重設連結只寫 server log。 | 長期改成每個租戶自己的寄件網域。 |
 | 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
 | 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |
 | 會員密碼重設只寄信 | 沒有「登入中改密碼」頁、沒有 2FA。 | 會員中心加改密碼（需舊密碼）＋ email 變更流程。 |

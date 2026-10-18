@@ -3,7 +3,7 @@
 // 會員註冊／登入 → 試算（套券、運費由 server 計價）→ 結帳（線下匯款、手機條碼載具）→ mark_order_paid →
 // issue_invoice（mock，不會開出真實發票）→ create_shipment（手動出貨＋追蹤號）→ 會員中心看到發票號與追蹤號。
 // 🔴 不碰真實發票（mock）、真實物流（手動出貨）、真實金流（線下匯款）；所有 email 用 example.com（不會實際寄出）。
-// 用法：node --env-file=.env.local scripts/e2e-marketing.mjs [baseUrl] [--quick] [--newsletter-test]
+// 用法：node --env-file=.env.local scripts/e2e-marketing.mjs [baseUrl] [--quick] [--newsletter-test] [--admin-base=http://localhost:3210]
 //   需要 GB_PLATFORM_TOKEN（含第三批 scope 的平台 token）與 ADMIN_PASSWORD（後台輸入 mock 發票憑證用）。
 //   --newsletter-test：另外寄一封測試電子報到 gathertaiwan@gmail.com（需要該環境有 RESEND_API_KEY）。
 import { connect, check, done, getText } from "./mcp-client.mjs";
@@ -12,6 +12,8 @@ const args = process.argv.slice(2);
 const base = args.find((a) => a.startsWith("http")) ?? "http://localhost:3100";
 const quick = args.includes("--quick");
 const newsletterTest = args.includes("--newsletter-test");
+// 後台動作（輸入 mock 發票憑證）可以打另一個共用同一個 DB 的環境（例如本機 next start），用於不知道正式站後台密碼時
+const adminBase = (args.find((a) => a.startsWith("--admin-base=")) ?? "").slice("--admin-base=".length) || base;
 const platformToken = process.env.GB_PLATFORM_TOKEN;
 const adminPassword = process.env.ADMIN_PASSWORD;
 if (!platformToken || !adminPassword) {
@@ -24,11 +26,11 @@ const email = `e2e-mkt-${ts}@example.com`;
 const password = `pw-${ts}-secure`;
 console.log(`base=${base} slug=${slug}${quick ? " (quick)" : ""}\n`);
 
-async function post(path, fields, cookie) {
-  const res = await fetch(`${base}${path}`, {
+async function post(path, fields, cookie, at = base) {
+  const res = await fetch(`${at}${path}`, {
     method: "POST",
     redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded", origin: base, ...(cookie ? { cookie } : {}) },
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: at, ...(cookie ? { cookie } : {}) },
     body: new URLSearchParams(fields).toString(),
   });
   return { status: res.status, location: res.headers.get("location") ?? "", setCookie: res.headers.get("set-cookie") ?? "" };
@@ -67,12 +69,12 @@ const ei = await site.call("enable_module", { moduleId: "invoice", config: { iss
 check(ei.changed?.some((c) => c.id === "invoice" && c.status === "pending_setup"), "enable_module invoice → pending_setup（尚無憑證）", ei.__error ?? JSON.stringify(ei.changed));
 
 // ---- 後台：mock 發票憑證（只有測試租戶能選 mock） ----
-const login = await post("/api/admin/login", { password: adminPassword });
+const login = await post("/api/admin/login", { password: adminPassword }, undefined, adminBase);
 const adminCookie = login.setCookie.split(";")[0];
 check(login.status === 303 && adminCookie.startsWith("gb_admin="), "後台登入");
-const save = await post(`/api/admin/tenants/${slug}/invoice-account`, { provider: "mock", sellerTaxId: "53912857", appKey: "" }, adminCookie);
+const save = await post(`/api/admin/tenants/${slug}/invoice-account`, { provider: "mock", sellerTaxId: "53912857", appKey: "" }, adminCookie, adminBase);
 check(save.status === 303 && !!flash(save.location).ok, "後台輸入 mock 發票憑證（測試租戶）", flash(save.location).ok ?? flash(save.location).err);
-const ver = await post(`/api/admin/tenants/${slug}/invoice-account/verify`, {}, adminCookie);
+const ver = await post(`/api/admin/tenants/${slug}/invoice-account/verify`, {}, adminCookie, adminBase);
 check(ver.status === 303 && /成功/.test(flash(ver.location).ok ?? ""), "後台驗證發票憑證", flash(ver.location).ok ?? flash(ver.location).err);
 const inst = await site.call("get_invoice_setup_status");
 check(inst.account?.status === "verified" && inst.invoiceModuleStatus === "enabled" && !JSON.stringify(inst).includes("secret_enc"), "get_invoice_setup_status：verified、模組 enabled、不含密文", inst.__error ?? "");
@@ -147,7 +149,7 @@ check(invNo.__error?.startsWith("[confirm_required]"), "issue_invoice 不帶 con
 const inv = await site.call("issue_invoice", { orderNo, confirm: true });
 check(inv.status === "issued" && /^MK\d{8}$/.test(inv.invoiceNo ?? ""), "issue_invoice（mock）→ 已開立", inv.__error ?? inv.invoiceNo);
 const inv2 = await site.call("issue_invoice", { orderNo, confirm: true });
-check(inv2.invoiceNo === inv.invoiceNo, "重複 issue_invoice → 回傳同一張（不重開）", inv2.invoiceNo);
+check(!!inv.invoiceNo && inv2.invoiceNo === inv.invoiceNo, "重複 issue_invoice → 回傳同一張（不重開）", inv2.invoiceNo);
 const shNo = await site.call("create_shipment", { orderNo, confirm: true });
 check(shNo.__error?.includes("trackingNumber"), "手動出貨沒帶追蹤號 → 被拒", shNo.__error?.slice(0, 50));
 const sh = await site.call("create_shipment", { orderNo, confirm: true, trackingNumber: `E2E-TRACK-${ts}` });
@@ -157,9 +159,9 @@ check(od2.status === "fulfilled" && od2.shippingTracking === `E2E-TRACK-${ts}` &
 
 // ---- 會員中心 ----
 const acct = await get(`/s/${slug}/account`, cookie);
-check(acct.status === 200 && acct.body.includes(inv.invoiceNo) && acct.body.includes(`E2E-TRACK-${ts}`), "會員中心看到發票號與追蹤號", `HTTP ${acct.status}`);
+check(acct.status === 200 && !!inv.invoiceNo && acct.body.includes(inv.invoiceNo) && acct.body.includes(`E2E-TRACK-${ts}`), "會員中心看到發票號與追蹤號", `HTTP ${acct.status}`);
 const op = await get(`/s/${slug}/orders/${encodeURIComponent(orderNo)}`, cookie);
-check(op.status === 200 && op.body.includes(inv.invoiceNo) && op.body.includes("折扣"), "訂單頁顯示折扣、發票號", `HTTP ${op.status}`);
+check(op.status === 200 && !!inv.invoiceNo && op.body.includes(inv.invoiceNo) && op.body.includes("折扣"), "訂單頁顯示折扣、發票號", `HTTP ${op.status}`);
 
 if (!quick) {
   // 作廢（同期）
