@@ -88,13 +88,56 @@ export function systemPrompt(tenant: TenantRow, settings: AiChatSettings, k: Kno
 ${k.text}`;
 }
 
-/** 回覆裡出現「不在允許清單」的金額 → 換成提示，避免 AI 捏造價格 */
+const CN_DIGIT: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const CN_UNIT: Record<string, number> = { 十: 10, 百: 100, 千: 1000 };
+
+/** 中文數字（到「萬」）→ 數字；無法解析回 NaN。例：一千五百 → 1500、兩萬三千 → 23000、十二 → 12 */
+export function parseChineseNumber(s: string): number {
+  let total = 0;
+  let section = 0;
+  let digit = -1;
+  for (const ch of s) {
+    if (ch in CN_DIGIT) digit = CN_DIGIT[ch]!;
+    else if (ch in CN_UNIT) {
+      section += (digit < 0 ? 1 : digit) * CN_UNIT[ch]!;
+      digit = -1;
+    } else if (ch === "萬") {
+      section += digit < 0 ? 0 : digit;
+      total += (section || 1) * 10000;
+      section = 0;
+      digit = -1;
+    } else return NaN;
+  }
+  return total + section + (digit < 0 ? 0 : digit);
+}
+
+/**
+ * 金額與折扣語句（L-2 擴大比對）：
+ * - 幣別前綴：NT$、NT＄、NT、NTD、TWD、新台幣、台幣、$、＄（數字可帶千分位、小數、「萬」）；
+ * - 數字＋元／塊／圓（含「萬」）；中文數字＋元／塊／圓（三百元、一千五百塊、兩萬元）；
+ * - 折扣語句：打 8 折、85 折、八折、現折 100、折抵 100、折價 100、減 100 元——店家折扣不在 AI 的知識裡，一律遮掉。
+ */
+const MONEY_RE =
+  /(?:新台幣|台幣|NT\s*[$＄]|NTD|TWD|NT|[$＄])\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(萬)?\s*(?:元|塊|圓)?|([0-9][0-9,]*(?:\.[0-9]+)?)\s*(萬)?\s*(?:元|塊|圓)|([零〇一二兩三四五六七八九十百千萬]+)\s*(?:元|塊|圓)|(打\s*[0-9一二三四五六七八九]{1,2}(?:\.[0-9])?\s*折|[0-9一二三四五六七八九]{1,2}(?:\.[0-9])?\s*折(?!扣碼)|現折\s*[$＄]?\s*[0-9]+\s*(?:元|塊)?|折(?:抵|價)\s*[$＄]?\s*[0-9]+\s*(?:元|塊)?|減\s*[$＄]?\s*[0-9]+\s*(?:元|塊))/gi;
+
+/**
+ * 回覆裡出現的金額必須屬於該租戶公開的商品／運費（第四批起含票價、服務費、課程價）資料，不符就換成提示；
+ * 折扣語句一律遮（避免 AI 捏造價格或優惠）。
+ */
 export function sanitizePrices(reply: string, allowed: Set<number>): { text: string; redacted: number } {
   let redacted = 0;
-  const re = /(NT\$|NTD|＄|\$)\s*([0-9][0-9,]*)(\s*元)?|([0-9][0-9,]*)\s*(元|塊)/gi;
-  const text = reply.replace(re, (m, _c, n1, _y, n2) => {
-    const n = Number(String(n1 ?? n2).replace(/,/g, ""));
-    if (Number.isFinite(n) && allowed.has(n)) return m;
+  const text = reply.replace(MONEY_RE, (m, n1, w1, n2, w2, cn, discount) => {
+    if (discount) {
+      redacted++;
+      return PRICE_PLACEHOLDER;
+    }
+    let n: number;
+    if (cn) n = parseChineseNumber(cn);
+    else {
+      n = Number(String(n1 ?? n2).replace(/,/g, ""));
+      if (w1 || w2) n *= 10000;
+    }
+    if (Number.isFinite(n) && Number.isInteger(n) && allowed.has(n)) return m;
     redacted++;
     return PRICE_PLACEHOLDER;
   });

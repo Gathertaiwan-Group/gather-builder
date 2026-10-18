@@ -105,7 +105,7 @@
 ## 物流（shipping 模組）
 
 - **運送方式**存在 shipping 模組設定（草稿／發布）。`resolveShipping()` 依**已發布設定**計運費（各方式運費＋滿額免運），試算與下單同一套，前端送的運費一律不採信。沒啟用 shipping 時沿用 shop 的固定運費。
-- **綠界憑證**：`builder_shipping_accounts`（MerchantID＋{HashKey, HashIV} 加密、`stage` 旗標、C2C／B2C），只能後台輸入。**stage 帳號只在帶預覽簽章的結帳提供綠界方式**（同 PChomePay sandbox 規則），stage 物流單不會真的寄送。
+- **綠界憑證**：`builder_shipping_accounts`（MerchantID＋{HashKey, HashIV} 加密、`stage` 旗標、C2C／B2C），只能後台輸入。**stage 帳號只在帶預覽簽章的結帳提供綠界方式**（同 PChomePay sandbox 規則），訂單的 `shipping_choice.stage` 會記下；stage 物流單不會真的寄送。**L-5**：stage 帳號只能為 sandbox 付款或 `shipping_choice.stage` 的訂單建物流單、套用狀態通知，正式訂單一律拒絕。
 - **電子地圖選店**：`cvs-start` 建 `builder_cvs_selections`（MerchantTradeNo 20 碼隨機、只存 sha256；另一個瀏覽器秘密存成 binding cookie `gbcvs_<tenant>`、只存 sha256）→ 整頁 POST 到綠界 `/Express/map` → 綠界頁面 POST 回 `/api/ship/ecpay/map/<tenantId>`（**沒有 CheckMacValue**）：驗 MerchantID＝該租戶、子類型相符、暫存未使用未過期才寫門市 → 303 回結帳頁。下單時 `consumeCvsSelection` 要同租戶＋binding 相符＋已選門市＋未使用未過期（原子），失敗歸還。別人的瀏覽器拿不到 binding，綁不到別人的結帳。
 - **物流單**：`create_shipment confirm:true`。綠界：先寫 `builder_shipments`（同一訂單只能一張有效出貨單，partial unique index）再打 `/Express/Create`；回應 `1|key=value…`（只解析尾段）、C2C 成功 RtnCode `300`、B2C／宅配 `1`，並驗回應 CheckMacValue；失敗標 `failed`（釋放名額，可重建）。收件人姓名（中文 2–5／英文 4–10、不可混合數字空白符號）與手機在結帳就先擋。訂單維持「已付款」，**以物流狀態為準**：狀態通知回報寄出（2030／3024…）才轉「已出貨」；手動出貨／自取直接轉。綠界物流單存在時 `fulfill_order` 會被拒。
 - **狀態通知** `/api/ship/ecpay/notify/<tenantId>`：CheckMacValue 依官方演算法（參數 A→Z 不分大小寫排序、前後加 HashKey／HashIV、.NET URL encode、小寫、MD5、大寫；官方範例向量測試）以**常數時間比較**，不符回 `0|CheckMacValueError`（綠界會重送）；MerchantID、AllPayLogisticsID 也要相符；正確回純文字 `1|OK`。狀態只往前走。
@@ -113,10 +113,16 @@
 
 ## 行銷（coupons／referral／newsletter／ai-chat）
 
-- **折扣碼**：`applyPromotions()` 在 `priceCart()` 之後計折扣（只算商品小計），第一版一單一張。**原子扣用在 `builder_place_order` 同一交易**：`used_count < max_uses` 條件更新＋`builder_coupon_user_counts` upsert（`count < per_user_limit`），任一不足 raise 整筆回滾，併發不超用（真 DB 測 8 搶 3）。取消／逾期由 `builder_cancel_order` 呼叫 `builder_release_coupon`（`released_at is null` 冪等）。每人＝登入會員 id，訪客＝email。
-- **推薦**：會員推薦碼；分享連結 `/s/<slug>/api/ref/<碼>` 設 HttpOnly cookie，結帳只從 cookie 讀（表單欄位不採信），自己推薦自己（同會員或同 email）忽略。付款成功 hook：首次付款（該人無其他已付款訂單）→ `builder_referrals` unique(tenant, referee_key) 保證只一次 → 發限推薦人本人、單次、有效期的回饋券。KOL 分潤 `builder_referral_ledger`：service_role 只有 select／insert（只增不改），取消時另記 reverse，unique(order_id, kind) 保證只各一筆。
-- **電子報**：雙重確認（確認 token sha256、48h、一次性）；群發 `draft → sending` 條件式只成功一次、`sent` 後拒絕；寄送列 unique(broadcast, subscriber) 只建「已確認」者、寄前再查一次狀態；每次 50 封、逐封記錄結果、`remaining` 再呼叫接續不重寄。退訂 token＝HMAC(PREVIEW_SECRET, broadcast:subscriber)，DB 存 sha256、一次性；退訂頁 GET 只顯示按鈕、POST 才退訂。🔴 `is_test` 租戶群發只寄 `gathertaiwan@gmail.com`；RFC 2606 保留網域（example.com、.test…）一律不實際寄出（`lib/mail.ts`）。
-- **AI 客服**：知識＝該租戶已發布頁面文字＋已上架商品＋運費＋設定 `extraKnowledge`；Gemini REST（`gemini-2.5-flash`、`thinkingBudget: 0`，`GEMINI_MODEL` 可覆寫）。限流：每站每 IP 每日、每站每日（`builder_rate_hit`），被擋不呼叫 AI。回覆中不在商品／運費資料內的金額一律遮成「價格請以商品頁為準」。對話以 (tenant, session) 存 `builder_ai_chats`；訪客訊息出現 email／電話就寫一筆詢問（每段對話一次）。
+- **折扣碼**：`applyPromotions()` 在 `priceCart()` 之後計折扣（只算商品小計），第一版一單一張。**原子扣用在 `builder_place_order` 同一交易**：`used_count < max_uses` 條件更新＋`builder_coupon_user_counts` upsert（`count < per_user_limit`），任一不足 raise 整筆回滾，併發不超用（真 DB 測 8 搶 3）。取消／逾期由 `builder_cancel_order` 呼叫 `builder_release_coupon`（`released_at is null` 冪等）。每人＝**正規化後的 email**（會員用帳號 email、訪客用結帳 email；小寫、去 +tag、gmail 去點，`lib/email-normalize.ts`），會員與訪客同信箱視為同一人（2026-10 審查 M-3；2026-10 以前以 member id 記的舊次數仍會一併計入）。**免運門檻一律用折扣後的商品金額判斷**（`flatShippingFee`／`resolveShipping` 收 subtotal − discount，試算與下單同一套；M-2）。
+- **推薦**：會員推薦碼；分享連結 `/s/<slug>/api/ref/<碼>` 設 HttpOnly cookie，結帳只從 cookie 讀（表單欄位不採信），自己推薦自己（同會員或同 email）忽略。付款成功 hook：首次付款（該人無其他已付款訂單）→ `builder_referrals` unique(tenant, referee_key) 保證只一次 → 發限推薦人本人、單次、有效期的回饋券。**H-1（2026-10 審查）**：referee_key 與自推比對都用正規化 email（alias 開分身無效）；每位推薦人每月上限 `rewardMonthlyLimit`（預設 10，台北月）；被推薦訂單取消 → `revokeReferralByOrder`（revoked_at 條件更新，冪等）＋停用回饋券（已被使用的無法收回，記稽核 `referral.revoke`）。KOL 分潤 `builder_referral_ledger`：service_role 只有 select／insert（只增不改），取消時另記 reverse，unique(order_id, kind) 保證只各一筆。
+- **電子報**：雙重確認（確認 token sha256、48h、一次性）；群發 `draft → sending` 條件式只成功一次、`sent` 後拒絕；寄送列 unique(broadcast, subscriber) 只建「已確認」者、寄前再查一次狀態；**每批先原子宣告 queued → sending（`builder_claim_deliveries`，FOR UPDATE SKIP LOCKED），只寄自己宣告到的列，併發接續不重寄；宣告超過 15 分鐘仍未完成＝寄了沒有不知道 → 標 failed、不重寄（M-1）**；每次 50 封、逐封記錄結果、`remaining` 再呼叫接續不重寄。退訂 token＝HMAC(PREVIEW_SECRET, broadcast:subscriber)，DB 存 sha256、一次性；退訂頁與**確認頁**都是 GET 只顯示按鈕、POST 才生效（L-3）。**防轟炸（H-2）**：訂閱端點要同源 Origin＋`Content-Type: application/json`；每個信箱（正規化）同站 24 小時最多 1 封確認信、跨所有租戶 24 小時最多 3 封；未確認期間（連結仍有效）重複訂閱不換 token、不再寄。🔴 `is_test` 租戶群發只寄 `gathertaiwan@gmail.com`；RFC 2606 保留網域（example.com、.test…）一律不實際寄出（`lib/mail.ts`）。
+- **AI 客服**：知識＝該租戶已發布頁面文字＋已上架商品＋運費＋設定 `extraKnowledge`；Gemini REST（`gemini-2.5-flash`、`thinkingBudget: 0`，`GEMINI_MODEL` 可覆寫）。限流：每站每 IP 每日、每站每日（`builder_rate_hit`），被擋不呼叫 AI。回覆中不在商品／運費資料內的金額一律遮成「價格請以商品頁為準」——比對 NT$／NT／NTD／TWD／新台幣／＄、數字或中文數字＋元／塊／圓（含「萬」）；折扣語句（打 8 折、85 折、現折、折抵、減 N 元）一律遮（L-2）。對話以 (tenant, session) 存 `builder_ai_chats`；訪客訊息出現 email／電話就寫一筆詢問（每段對話一次）。
+
+## 公開 POST 端點
+
+- JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。
+- 表單端點（會員、結帳、退訂、確認訂閱、選店）在 `/s/<slug>/api/…`，用 `originOk()`。
+- 試算端點（L-4）：每 IP 每 10 分鐘 40 次；折扣碼無效與條件不符回同一句話，細節只在真正下單時回。
 
 ## 訂單事件 hook
 
@@ -139,9 +145,9 @@
 | 發票中繼尚未架設 | gather-builder 還沒有自己的固定 IP 中繼；沒設 `AMEGO_RELAY_URL` 時正式 Amego 帳號會被 IP 白名單擋（code 14，標可重試）。 | 架 Railway／固定 IP 中繼（可參考 alice-store/ops/amego-relay），請 Amego 放行，設兩個 env。 |
 | 發票作廢期限採保守規則 | 只有同一期（雙月）可作廢，跨期一律折讓；未採用次期申報前的寬限。 | 依會計需求加設定。 |
 | 開立中卡住 | 宣告後行程被砍，列會停在 issuing 10 分鐘，之後重新宣告會先反查。 | 加 cron 主動掃 issuing。 |
-| 綠界建單卡在 created | 寫入出貨單後、綠界回應前行程被砍，出貨單會停在 created（無物流編號），會擋住重建。 | 後台加「標為失敗」或用 QueryLogisticsTradeInfo 反查。 |
+| 綠界建單結果不明 | 逾時／連線錯誤／看不懂的回應不再標 failed（M-4）：出貨單維持 created。下次 `create_shipment` 先用原 MerchantTradeNo 打 `QueryLogisticsTradeInfo/V5` 反查：查到 → 認回；明確查無（`0\|找不到訂單`，stage 實測）→ confirm 後用**同一個** MerchantTradeNo 重送；反查失敗 → 不動作。 | 加 cron 主動反查。 |
 | 電子地圖選店的跨頁導轉 | 結帳表單用 sessionStorage 暫存填寫內容；隱私模式或關閉分頁會遺失。 | 改用綠界「取得門市清單」API 在頁內選店。 |
-| 每人折扣碼次數以 email 區分訪客 | 訪客換 email 可再用一次（會員以 id 計）。 | 限定會員才能用、或加手機驗證。 |
+| 每人折扣碼次數以正規化 email 區分 | 同一人用不同信箱（不是 +tag／gmail 加點）仍可再用一次；推薦回饋同理（另有每月上限）。 | 限定會員才能用、或加手機驗證。 |
 | 電子報分批靠人觸發 | 每次 `send_broadcast` 寄 50 封，名單大時要多次呼叫。 | 背景佇列／cron 接續。 |
 | AI 客服知識是即時組的 | 每則訊息都重組知識（商品最多 60 個、全文 30k 字），大型網站會變慢。 | 快取知識或改 RAG。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |

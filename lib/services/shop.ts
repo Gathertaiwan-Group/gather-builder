@@ -295,9 +295,18 @@ export async function priceCart(store: Store, tenantId: string, raw: unknown, se
   }
   const subtotal = lines.reduce((s, l) => s + l.line_total, 0);
   if (subtotal > MAX_ORDER_TOTAL) throw new ServiceError("invalid", `單筆訂單金額上限為 ${twd(MAX_ORDER_TOTAL)}，請分開下單`);
-  const threshold = settings.freeShippingThreshold;
-  const shippingFee = lines.length === 0 ? 0 : threshold !== undefined && subtotal >= threshold ? 0 : (settings.shippingFee ?? 0);
+  const shippingFee = flatShippingFee(settings, subtotal, lines.length > 0);
   return { lines, subtotal, shippingFee, total: subtotal + shippingFee, problems };
+}
+
+/**
+ * shop 的固定運費（沒啟用 shipping 模組時）。M-2：免運門檻一律用「折扣後」的商品金額判斷——
+ * 呼叫端在套用折扣碼後要用 subtotal − discount 重算（priceCart 階段還不知道折扣，算的是折扣前，只當初值）。
+ */
+export function flatShippingFee(settings: Pick<ShopSettings, "freeShippingThreshold" | "shippingFee">, amountAfterDiscount: number, hasLines = true): number {
+  if (!hasLines) return 0;
+  const threshold = settings.freeShippingThreshold;
+  return threshold !== undefined && amountAfterDiscount >= threshold ? 0 : (settings.shippingFee ?? 0);
 }
 
 /* ================================================================== 結帳 */
@@ -370,12 +379,14 @@ export async function placeOrder(
   await releaseExpiredHolds({ store: deps.store, sendMail: deps.sendMail, baseUrl: deps.baseUrl }, tenant.id, [...new Set(d.items.map((i) => i.productId))]);
   const priced = await priceCart(deps.store, tenant.id, d.items, settings);
   if (priced.problems.length || !priced.lines.length) throw new ServiceError("invalid", priced.problems.join("；") || "購物車是空的");
+  // 折扣先算（只讀）：M-2 免運門檻用折扣後金額
+  const promo = await applyPromotions(deps.store, tenant, { subtotal: priced.subtotal, couponCode: d.couponCode, referralCode: d.referralCode, member, email: d.contact.email });
   // shipping 模組：運費依已發布設定（server 計價），超商要原子消耗選店暫存
   const ship = await resolveShipping(deps.store, tenant, {
     methodId: d.shippingMethodId,
     cvsSelectionId: d.cvsSelectionId,
     binding: input.cvsBinding ?? null,
-    subtotal: priced.subtotal,
+    subtotal: priced.subtotal - promo.discount,
     receiver: d.shipping,
     consume: true,
     allowStage: input.allowSandbox,
@@ -384,7 +395,7 @@ export async function placeOrder(
     if (ship?.consumedSelectionId) await deps.store.releaseCvsSelection(tenant.id, ship.consumedSelectionId);
   };
   try {
-    return await placeOrderPriced(deps, input, d, settings, priced, ship);
+    return await placeOrderPriced(deps, input, d, settings, priced, ship, promo);
   } catch (e) {
     await releaseSelection();
     throw e;
@@ -398,10 +409,10 @@ async function placeOrderPriced(
   settings: ShopSettings,
   priced: PricedCart,
   ship: ShippingResolution | null,
+  promo: Awaited<ReturnType<typeof applyPromotions>>,
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
-  const shippingFee = ship ? ship.fee : priced.shippingFee;
-  const promo = await applyPromotions(deps.store, tenant, { subtotal: priced.subtotal, couponCode: d.couponCode, referralCode: d.referralCode, member, email: d.contact.email });
+  const shippingFee = ship ? ship.fee : flatShippingFee(settings, priced.subtotal - promo.discount);
   const total = priced.subtotal + shippingFee - promo.discount;
   const avail = await paymentAvailability(deps.store, tenant, settings, { allowSandbox: input.allowSandbox });
   const method: PaymentMethod = d.paymentMethod;

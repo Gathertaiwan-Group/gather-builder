@@ -2,7 +2,7 @@
  * newsletter 模組：雙重確認、退訂 token 一次性、群發只寄已確認未退訂、同一份不能重複群發、分批接續不重寄、測試租戶白名單。
  * 🔴 全部用假的寄信函式（記錄收件人），不寄出任何真信。
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ctxFor, newStore } from "./helpers";
 import { createSite } from "@/lib/services/sites";
 import { publishSite } from "@/lib/services/publish";
@@ -68,10 +68,13 @@ describe("雙重確認", () => {
     await subscribe(deps, { slug: "nl-expire", ip: "2.2.2.2", email: "a@example.com" });
     const tok = tokenFrom(mb.sent[0]!.text, "token");
     expect((await confirmSubscription(store, other.tenant, tok)).ok).toBe(false);
-    const sub = (await store.listSubscribers(s.tenant.id, { limit: 1, offset: 0 })).rows[0]!;
-    // 模擬過期：重新訂閱一次但把期限設在過去
-    await store.upsertPendingSubscriber({ tenant_id: s.tenant.id, email: sub.email, confirm_token_hash: "x".repeat(64), confirm_expires_at: new Date(Date.now() - 1000).toISOString() });
-    expect((await confirmSubscription(store, s.tenant, tok)).ok).toBe(false);
+    // 模擬過期：時間往後 49 小時（確認連結 48 小時有效）
+    vi.useFakeTimers({ now: Date.now() + 49 * 3600_000, toFake: ["Date"] });
+    try {
+      expect((await confirmSubscription(store, s.tenant, tok)).ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
     for (let i = 0; i < 4; i++) await subscribe(deps, { slug: "nl-expire", ip: "3.3.3.3", email: `r${i}@example.com` });
     await subscribe(deps, { slug: "nl-expire", ip: "3.3.3.3", email: "r5@example.com" });
     await expect(subscribe(deps, { slug: "nl-expire", ip: "3.3.3.3", email: "r6@example.com" })).rejects.toMatchObject({ code: "rate_limited" });

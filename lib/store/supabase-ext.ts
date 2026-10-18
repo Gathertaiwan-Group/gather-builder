@@ -209,6 +209,24 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
     async setReferralReward(tenantId, id, couponId) {
       must(await db.from("builder_referrals").update({ reward_coupon_id: couponId }).eq("tenant_id", tenantId).eq("id", id), "setReferralReward");
     },
+    async countReferralRewardsSince(tenantId, referrerMemberId, sinceIso) {
+      const r = await db
+        .from("builder_referrals")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .eq("referrer_member_id", referrerMemberId)
+        .not("reward_coupon_id", "is", null)
+        .is("revoked_at", null)
+        .gte("created_at", sinceIso);
+      if (r.error) throw new Error(`countReferralRewardsSince: ${r.error.message}`);
+      return r.count ?? 0;
+    },
+    async revokeReferralByOrder(tenantId, orderId, reason) {
+      return must(
+        await db.from("builder_referrals").update({ revoked_at: nowIso(), revoked_reason: reason }).eq("tenant_id", tenantId).eq("order_id", orderId).is("revoked_at", null).select("*").maybeSingle(),
+        "revokeReferralByOrder",
+      ) as ReferralRow | null;
+    },
     async listReferrals(tenantId, opts) {
       let q = db.from("builder_referrals").select("*", { count: "exact" }).eq("tenant_id", tenantId);
       if (opts.referrerMemberId) q = q.eq("referrer_member_id", opts.referrerMemberId);
@@ -233,6 +251,9 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
     async upsertPendingSubscriber(row) {
       const cur = must(await db.from("builder_newsletter_subscribers").select("*").eq("tenant_id", row.tenant_id).eq("email", row.email).maybeSingle(), "upsertPendingSubscriber.read") as SubscriberRow | null;
       if (cur?.status === "confirmed") return { row: cur, needsConfirm: false };
+      const t = nowIso();
+      // H-2：未確認期間（確認連結仍有效）重複訂閱不換 token、不再寄
+      if (cur?.status === "pending" && cur.confirm_expires_at && cur.confirm_expires_at > t) return { row: cur, needsConfirm: false };
       if (cur) {
         const upd = must(
           await db
@@ -241,6 +262,7 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
             .eq("tenant_id", row.tenant_id)
             .eq("id", cur.id)
             .neq("status", "confirmed")
+            .or(`status.eq.unsubscribed,confirm_expires_at.is.null,confirm_expires_at.lte.${t}`)
             .select("*")
             .maybeSingle(),
           "upsertPendingSubscriber.update",
@@ -319,8 +341,14 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
     async listQueuedDeliveries(tenantId, broadcastId, limit) {
       return (must(await db.from("builder_newsletter_deliveries").select("*").eq("tenant_id", tenantId).eq("broadcast_id", broadcastId).eq("status", "queued").order("created_at").limit(limit), "listQueuedDeliveries") ?? []) as DeliveryRow[];
     },
+    async claimDeliveries(tenantId, broadcastId, limit) {
+      return (must(await db.rpc("builder_claim_deliveries", { p_tenant: tenantId, p_broadcast: broadcastId, p_limit: limit }), "claimDeliveries") ?? []) as DeliveryRow[];
+    },
+    async failStaleDeliveries(tenantId, broadcastId, beforeIso) {
+      return Number(must(await db.rpc("builder_fail_stale_deliveries", { p_tenant: tenantId, p_broadcast: broadcastId, p_before: beforeIso }), "failStaleDeliveries") ?? 0);
+    },
     async finishDelivery(tenantId, id, patch) {
-      const rows = must(await db.from("builder_newsletter_deliveries").update(patch).eq("tenant_id", tenantId).eq("id", id).eq("status", "queued").select("id"), "finishDelivery") as { id: string }[];
+      const rows = must(await db.from("builder_newsletter_deliveries").update(patch).eq("tenant_id", tenantId).eq("id", id).in("status", ["queued", "sending"]).select("id"), "finishDelivery") as { id: string }[];
       return rows.length > 0;
     },
     async consumeUnsubToken(tenantId, tokenHash) {
@@ -330,7 +358,7 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
       ) as DeliveryRow | null;
     },
     async deliveryStats(tenantId, broadcastId) {
-      const out = { queued: 0, sent: 0, failed: 0, skipped: 0 };
+      const out = { queued: 0, sending: 0, sent: 0, failed: 0, skipped: 0 };
       for (const st of Object.keys(out) as (keyof typeof out)[]) {
         const r = await db.from("builder_newsletter_deliveries").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("broadcast_id", broadcastId).eq("status", st);
         if (r.error) throw new Error(`deliveryStats: ${r.error.message}`);

@@ -9,10 +9,11 @@ import { loadSite, moduleActive, moduleConfig } from "./site-loader";
 import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
-import { orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettingsSchema, type ShopSettings } from "./services/shop";
+import { flatShippingFee, orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettingsSchema, type ShopSettings } from "./services/shop";
 import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
+import { guardJsonPost } from "./public-post";
 import { verifyPreviewToken } from "./preview";
 import { invoiceRequestFromForm } from "./invoice/validate";
 import { cvsCookieName, resolveShipping } from "./services/shipping";
@@ -38,7 +39,10 @@ export function cookieValue(req: Request, name: string): string | undefined {
 
 /** M1：每 IP 每小時下單上限（原 20，降低以減少庫存凍結） */
 export const CHECKOUT_LIMIT_PER_HOUR = 6;
-export const QUOTE_LIMIT_PER_10MIN = 120;
+/** L-4：試算每 IP 每 10 分鐘上限（原 120；折扣碼試算不可當猜碼神諭） */
+export const QUOTE_LIMIT_PER_10MIN = 40;
+/** L-4：試算時折扣碼無效或條件不符一律回同一句（細節只在真正下單時才回） */
+export const QUOTE_COUPON_REJECTED = "折扣碼無法使用（請確認代碼、使用期間與條件）";
 
 async function shopSite(slug: string, store: Store) {
   const site = await loadSite(slug.toLowerCase(), null, store);
@@ -49,6 +53,8 @@ async function shopSite(slug: string, store: Store) {
 
 /** 購物車／結帳頁用：依 DB 重新計價（前端只送商品 id 與數量） */
 export async function handleQuote(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const blocked = guardJsonPost(req, 20_000);
+  if (blocked) return blocked;
   try {
     const s = await shopSite(rawSlug, store);
     if (!s) return json({ error: "找不到商店" }, 404);
@@ -58,7 +64,6 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
     const priced = await priceCart(store, s.site.tenant.id, body?.items, s.settings);
     const tenant = s.site.tenant;
     const allowStage = typeof body?.preview === "string" && verifyPreviewToken(body.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
-    const ship = await resolveShipping(store, tenant, { methodId: typeof body?.shippingMethodId === "string" ? body.shippingMethodId : null, subtotal: priced.subtotal, consume: false, allowStage });
     const member = (await getSessionMember(store, tenant, memberTokenFromRequest(req, tenant)))?.member ?? null;
     const promo = await applyPromotions(store, tenant, {
       subtotal: priced.subtotal,
@@ -67,14 +72,16 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
       email: typeof body?.email === "string" ? body.email.slice(0, 200).toLowerCase() : (member?.email ?? ""),
       strict: false,
     });
-    const shippingFee = ship ? ship.fee : priced.shippingFee;
+    // M-2：免運門檻用折扣後金額（與下單同一套）
+    const ship = await resolveShipping(store, tenant, { methodId: typeof body?.shippingMethodId === "string" ? body.shippingMethodId : null, subtotal: priced.subtotal - promo.discount, consume: false, allowStage });
+    const shippingFee = ship ? ship.fee : flatShippingFee(s.settings, priced.subtotal - promo.discount, priced.lines.length > 0);
     return json({
       lines: priced.lines.map((l) => ({ productId: l.product_id, variantId: l.variant_id, name: l.name, variantLabel: l.variant_label, unitPrice: l.unit_price, qty: l.qty, lineTotal: l.line_total, lowStock: l.stockAvailable !== null && l.stockAvailable <= 5, slug: l.slug })),
       subtotal: priced.subtotal,
       shippingFee,
       shippingSelected: ship ? !!ship.choice.methodId : true,
       discount: promo.discount,
-      couponMessage: promo.couponMessage,
+      couponMessage: promo.coupon ? promo.couponMessage : promo.couponMessage ? QUOTE_COUPON_REJECTED : null,
       total: priced.subtotal + shippingFee - promo.discount,
       problems: priced.problems,
     });

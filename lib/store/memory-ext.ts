@@ -213,13 +213,23 @@ export function createMemoryExtStore(): MemoryExt {
     },
     async insertReferral(row) {
       if ([...referrals.values()].some((r) => r.tenant_id === row.tenant_id && r.referee_key === row.referee_key)) return null;
-      const r: ReferralRow = { ...row, id: randomUUID(), reward_coupon_id: null, created_at: now() };
+      const r: ReferralRow = { ...row, id: randomUUID(), reward_coupon_id: null, revoked_at: null, revoked_reason: null, created_at: now() };
       referrals.set(r.id, r);
       return clone(r);
     },
     async setReferralReward(tenantId, id, couponId) {
       const r = referrals.get(id);
       if (r && r.tenant_id === tenantId) referrals.set(id, { ...r, reward_coupon_id: couponId });
+    },
+    async countReferralRewardsSince(tenantId, referrerMemberId, sinceIso) {
+      return [...referrals.values()].filter((r) => r.tenant_id === tenantId && r.referrer_member_id === referrerMemberId && r.reward_coupon_id && !r.revoked_at && r.created_at >= sinceIso).length;
+    },
+    async revokeReferralByOrder(tenantId, orderId, reason) {
+      const r = [...referrals.values()].find((x) => x.tenant_id === tenantId && x.order_id === orderId && !x.revoked_at);
+      if (!r) return null;
+      const next = { ...r, revoked_at: now(), revoked_reason: reason };
+      referrals.set(r.id, next);
+      return clone(next);
     },
     async listReferrals(tenantId, opts) {
       return page([...referrals.values()].filter((r) => r.tenant_id === tenantId && (!opts.referrerMemberId || r.referrer_member_id === opts.referrerMemberId)).sort(byNewest), opts.limit, opts.offset);
@@ -243,6 +253,8 @@ export function createMemoryExtStore(): MemoryExt {
     async upsertPendingSubscriber(row) {
       const hit = [...subscribers.values()].find((s) => s.tenant_id === row.tenant_id && s.email === row.email);
       if (hit?.status === "confirmed") return { row: clone(hit), needsConfirm: false };
+      // H-2：未確認期間（確認連結仍有效）重複訂閱不換 token、不再寄
+      if (hit?.status === "pending" && hit.confirm_expires_at && hit.confirm_expires_at > now()) return { row: clone(hit), needsConfirm: false };
       const next: SubscriberRow = hit
         ? { ...hit, status: "pending", confirm_token_hash: row.confirm_token_hash, confirm_expires_at: row.confirm_expires_at, unsubscribed_at: null }
         : { ...row, id: randomUUID(), status: "pending", confirmed_at: null, unsubscribed_at: null, created_at: now() };
@@ -302,9 +314,29 @@ export function createMemoryExtStore(): MemoryExt {
     async listQueuedDeliveries(tenantId, broadcastId, limit) {
       return clone([...deliveries.values()].filter((d) => d.tenant_id === tenantId && d.broadcast_id === broadcastId && d.status === "queued").slice(0, limit));
     },
+    async claimDeliveries(tenantId, broadcastId, limit) {
+      const rows = [...deliveries.values()].filter((d) => d.tenant_id === tenantId && d.broadcast_id === broadcastId && d.status === "queued").slice(0, Math.max(1, Math.min(limit, 200)));
+      const out: DeliveryRow[] = [];
+      for (const d of rows) {
+        const next: DeliveryRow = { ...d, status: "sending", claimed_at: now() };
+        deliveries.set(d.id, next);
+        out.push(clone(next));
+      }
+      return out;
+    },
+    async failStaleDeliveries(tenantId, broadcastId, beforeIso) {
+      let n = 0;
+      for (const d of deliveries.values()) {
+        if (d.tenant_id === tenantId && d.broadcast_id === broadcastId && d.status === "sending" && (d.claimed_at ?? "") < beforeIso) {
+          deliveries.set(d.id, { ...d, status: "failed", error: "寄送狀態不明（宣告後中斷），為避免重複寄送未重寄" });
+          n++;
+        }
+      }
+      return n;
+    },
     async finishDelivery(tenantId, id, patch) {
       const d = deliveries.get(id);
-      if (!d || d.tenant_id !== tenantId || d.status !== "queued") return false;
+      if (!d || d.tenant_id !== tenantId || (d.status !== "queued" && d.status !== "sending")) return false;
       deliveries.set(id, { ...d, ...patch });
       return true;
     },
@@ -316,7 +348,7 @@ export function createMemoryExtStore(): MemoryExt {
       return clone(next);
     },
     async deliveryStats(tenantId, broadcastId) {
-      const out = { queued: 0, sent: 0, failed: 0, skipped: 0 };
+      const out = { queued: 0, sending: 0, sent: 0, failed: 0, skipped: 0 };
       for (const d of deliveries.values()) if (d.tenant_id === tenantId && d.broadcast_id === broadcastId) out[d.status]++;
       return out;
     },

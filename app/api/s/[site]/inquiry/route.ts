@@ -4,10 +4,13 @@ import { requireSecret } from "@/lib/secrets";
 import { clientIp } from "@/lib/client-ip";
 import { getMailer } from "@/lib/mail";
 import { errorResponse, json } from "@/lib/http";
+import { guardJsonPost } from "@/lib/public-post";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ site: string }> }) {
+  const blocked = guardJsonPost(req, 20000);
+  if (blocked) return blocked;
   try {
     const { site } = await params;
     const len = Number(req.headers.get("content-length") ?? 0);

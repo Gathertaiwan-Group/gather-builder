@@ -166,6 +166,51 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     expect(fin.filter(Boolean)).toHaveLength(1);
     const un = await Promise.all([store.consumeUnsubToken(t.id, q[1]!.unsub_token_hash), store.consumeUnsubToken(t.id, q[1]!.unsub_token_hash)]);
     expect(un.filter(Boolean)).toHaveLength(1);
-    expect(await store.deliveryStats(t.id, b.id)).toEqual({ queued: 1, sent: 1, failed: 0, skipped: 0 });
+    expect(await store.deliveryStats(t.id, b.id)).toEqual({ queued: 1, sending: 0, sent: 1, failed: 0, skipped: 0 });
+  });
+
+  it("審查 M-1：真 DB 併發宣告寄送列（FOR UPDATE SKIP LOCKED）不重疊；宣告後中斷的標 failed", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    for (let i = 0; i < 10; i++) {
+      await store.upsertPendingSubscriber({ tenant_id: t.id, email: `claim${i}-${ts}@example.org`, confirm_token_hash: `cl-${ts}-${i}`, confirm_expires_at: new Date(Date.now() + 60_000).toISOString() });
+      await store.confirmSubscriber(t.id, `cl-${ts}-${i}`, new Date().toISOString());
+    }
+    const b = await store.insertBroadcast({ tenant_id: t.id, subject: "claim", body_md: "x" });
+    await store.updateBroadcast(t.id, b.id, ["draft"], { status: "sending" });
+    const n = await store.queueDeliveries(t.id, b.id, (sid) => `claim-${b.id}-${sid}`);
+    const claims = await Promise.all(Array.from({ length: 4 }, () => store.claimDeliveries(t.id, b.id, 5)));
+    const ids = claims.flat().map((d) => d.id);
+    expect(ids).toHaveLength(n);
+    expect(new Set(ids).size).toBe(n);
+    expect(claims.flat().every((d) => d.status === "sending")).toBe(true);
+    // sending 的列只能由宣告者完成一次
+    expect(await store.finishDelivery(t.id, ids[0]!, { status: "sent", error: null, sent_at: new Date().toISOString() })).toBe(true);
+    expect(await store.finishDelivery(t.id, ids[0]!, { status: "sent", error: null, sent_at: new Date().toISOString() })).toBe(false);
+    expect(await store.failStaleDeliveries(t.id, b.id, new Date(Date.now() + 60_000).toISOString())).toBe(n - 1);
+    expect(await store.claimDeliveries(t.id, b.id, 5)).toEqual([]);
+  });
+
+  it("審查 H-1：真 DB 推薦撤銷條件式只成功一次、每月計數不含已撤銷", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const m = await store.insertMember({ tenant_id: t.id, email: `ref2-${ts}@example.com`, password_hash: "x", name: null, phone: null });
+    const p = await createProduct(ctx, { site: slug, slug: "ref2", name: "推薦2", price: 100, status: "published", confirm: true });
+    const { order } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: t, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } });
+    const ref = (await store.insertReferral({ tenant_id: t.id, referrer_member_id: m!.id, referee_key: `email:r2-${ts}@example.com`, referee_member_id: null, order_id: order.id }))!;
+    const cp = await store.insertCoupon({ tenant_id: t.id, code: `RFIT${ts}`.toUpperCase().slice(0, 32), kind: "fixed", value: 10, max_discount: null, min_subtotal: 0, starts_at: null, ends_at: null, max_uses: 1, per_user_limit: 1, assigned_member_id: m!.id, active: true, source: "referral", note: null });
+    await store.setReferralReward(t.id, ref.id, cp.id);
+    const since = new Date(Date.now() - 3600_000).toISOString();
+    expect(await store.countReferralRewardsSince(t.id, m!.id, since)).toBe(1);
+    const r = await Promise.all([store.revokeReferralByOrder(t.id, order.id, "x"), store.revokeReferralByOrder(t.id, order.id, "x")]);
+    expect(r.filter(Boolean)).toHaveLength(1);
+    expect(await store.countReferralRewardsSince(t.id, m!.id, since)).toBe(0);
+  });
+
+  it("審查 H-2：未確認期間重複 upsert 不換 token（舊連結仍有效）", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const email = `pend-${ts}@example.org`;
+    expect((await store.upsertPendingSubscriber({ tenant_id: t.id, email, confirm_token_hash: `p1-${ts}`, confirm_expires_at: new Date(Date.now() + 60_000).toISOString() })).needsConfirm).toBe(true);
+    expect((await store.upsertPendingSubscriber({ tenant_id: t.id, email, confirm_token_hash: `p2-${ts}`, confirm_expires_at: new Date(Date.now() + 60_000).toISOString() })).needsConfirm).toBe(false);
+    expect(await store.confirmSubscriber(t.id, `p2-${ts}`, new Date().toISOString())).toBeNull();
+    expect(await store.confirmSubscriber(t.id, `p1-${ts}`, new Date().toISOString())).not.toBeNull();
   });
 });

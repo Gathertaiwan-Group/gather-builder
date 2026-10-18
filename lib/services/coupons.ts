@@ -3,13 +3,22 @@ import type { CouponRow, MemberRow, Store, TenantRow } from "../store/types";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { twd } from "./shop";
+import { normalizeEmail } from "../email-normalize";
 
 /* ================================================================== 計算（server 端唯一依據） */
 
 export const normalizeCode = (c: string) => c.trim().toUpperCase();
 
-/** 每人次數的識別：登入會員用 member id，訪客用 email（小寫） */
+/**
+ * 每人次數的識別（M-3）：一律用「正規化後的 email」——會員用自己帳號的 email、訪客用結帳 email，
+ * 所以會員與訪客用同一個信箱（含 +tag、gmail 加點）視為同一人。仍無法防止不同信箱的同一個人（已知限制）。
+ */
 export function couponUserKey(member: MemberRow | null, email: string) {
+  return `email:${normalizeEmail(member ? member.email : email)}`;
+}
+
+/** 2026-10 以前的每人鍵（會員 = member:<id>）：舊的使用次數記在這裡，檢查時一併算進去 */
+export function legacyCouponUserKey(member: MemberRow | null, email: string) {
   return member ? `member:${member.id}` : `email:${email.trim().toLowerCase()}`;
 }
 
@@ -36,8 +45,11 @@ export async function checkCoupon(store: Store, tenant: TenantRow, input: { code
   if (c.max_uses !== null && c.used_count >= c.max_uses) return { ok: false, message: "折扣碼已被用完" };
   if (input.subtotal < c.min_subtotal) return { ok: false, message: `未達最低消費 ${twd(c.min_subtotal)}` };
   if (c.assigned_member_id && c.assigned_member_id !== input.member?.id) return { ok: false, message: "這張折扣碼限指定會員使用，請先登入" };
-  if (c.per_user_limit !== null && (await store.getCouponUserCount(c.id, couponUserKey(input.member, input.email))) >= c.per_user_limit) {
-    return { ok: false, message: "你已達這張折扣碼的使用次數上限" };
+  if (c.per_user_limit !== null) {
+    const key = couponUserKey(input.member, input.email);
+    const legacy = legacyCouponUserKey(input.member, input.email);
+    const used = (await store.getCouponUserCount(c.id, key)) + (legacy !== key ? await store.getCouponUserCount(c.id, legacy) : 0);
+    if (used >= c.per_user_limit) return { ok: false, message: "你已達這張折扣碼的使用次數上限" };
   }
   return { ok: true, coupon: c, discount: couponDiscount(c, input.subtotal) };
 }

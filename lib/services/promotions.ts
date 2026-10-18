@@ -1,6 +1,7 @@
 import type { MemberRow, Store, TenantRow } from "../store/types";
 import { ServiceError, activeModuleIds, moduleStates } from "./context";
 import { checkCoupon, couponUserKey } from "./coupons";
+import { sameEmail } from "../email-normalize";
 
 export interface PromotionResult {
   discount: number;
@@ -48,7 +49,8 @@ export async function applyPromotions(
     // 不能自己推薦自己：推薦碼的主人＝目前會員，或 email 相同 → 忽略
     if (rc && rc.member_id !== input.member?.id) {
       const owner = await store.getMemberById(tenant.id, rc.member_id);
-      if (owner && owner.email.toLowerCase() !== (input.email || "").toLowerCase()) referralCode = rc.code;
+      // H-1：email 正規化比對（a+x@、gmail 加點視為本人）；下單會員帳號的 email 也要比
+      if (owner && !sameEmail(owner.email, input.email) && !sameEmail(owner.email, input.member?.email)) referralCode = rc.code;
     }
   }
   return { discount, coupon, couponMessage, referralCode };

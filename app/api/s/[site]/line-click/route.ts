@@ -3,10 +3,13 @@ import { recordLineClick } from "@/lib/services/inquiries";
 import { requireSecret } from "@/lib/secrets";
 import { clientIp } from "@/lib/client-ip";
 import { errorResponse, json } from "@/lib/http";
+import { guardJsonPost } from "@/lib/public-post";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ site: string }> }) {
+  const blocked = guardJsonPost(req, 2000);
+  if (blocked) return blocked;
   try {
     const { site } = await params;
     const body = (await req.json().catch(() => ({}))) as { path?: unknown; placement?: unknown };

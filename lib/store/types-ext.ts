@@ -136,6 +136,9 @@ export interface ReferralRow {
   referee_member_id: string | null;
   order_id: string;
   reward_coupon_id: string | null;
+  /** H-1：被推薦人的訂單取消 → 撤銷（回饋券同時停用） */
+  revoked_at?: string | null;
+  revoked_reason?: string | null;
   created_at: string;
 }
 
@@ -185,9 +188,11 @@ export interface DeliveryRow {
   subscriber_id: string;
   email: string;
   unsub_token_hash: string;
-  status: "queued" | "sent" | "failed" | "skipped";
+  /** sending = 已被某次群發呼叫宣告（M-1：只寄自己宣告到的列） */
+  status: "queued" | "sending" | "sent" | "failed" | "skipped";
   error: string | null;
   sent_at: string | null;
+  claimed_at?: string | null;
   unsub_used_at: string | null;
   created_at: string;
 }
@@ -264,6 +269,10 @@ export interface ExtStore {
   /** 同一被推薦人只會成功一次（unique tenant_id+referee_key）；重複回 null */
   insertReferral(row: Omit<ReferralRow, "id" | "created_at" | "reward_coupon_id">): Promise<ReferralRow | null>;
   setReferralReward(tenantId: string, id: string, couponId: string): Promise<void>;
+  /** 推薦人自 sinceIso 起「已發回饋券且未撤銷」的推薦數（H-1：每月上限） */
+  countReferralRewardsSince(tenantId: string, referrerMemberId: string, sinceIso: string): Promise<number>;
+  /** 條件式撤銷（revoked_at 由 null 改成 now 的那一次回列；冪等） */
+  revokeReferralByOrder(tenantId: string, orderId: string, reason: string): Promise<ReferralRow | null>;
   listReferrals(tenantId: string, opts: { referrerMemberId?: string; limit: number; offset: number }): Promise<{ rows: ReferralRow[]; total: number }>;
   /** 只增不改的分潤帳：同一訂單同一 kind 只會寫一次（unique order_id+kind），重複回 false */
   insertLedger(row: Omit<ReferralLedgerRow, "id" | "created_at">): Promise<boolean>;
@@ -287,6 +296,10 @@ export interface ExtStore {
   /** 為所有「已確認」的訂閱者建立寄送列（broadcast_id+subscriber_id 唯一，重複略過）；回傳新增數 */
   queueDeliveries(tenantId: string, broadcastId: string, tokenFor: (subscriberId: string) => string): Promise<number>;
   listQueuedDeliveries(tenantId: string, broadcastId: string, limit: number): Promise<DeliveryRow[]>;
+  /** M-1：原子宣告一批 queued → sending（FOR UPDATE SKIP LOCKED），併發呼叫拿到的列不重疊 */
+  claimDeliveries(tenantId: string, broadcastId: string, limit: number): Promise<DeliveryRow[]>;
+  /** 宣告後中斷（claimed_at 早於 beforeIso 仍是 sending）→ failed，不重寄；回傳筆數 */
+  failStaleDeliveries(tenantId: string, broadcastId: string, beforeIso: string): Promise<number>;
   /** 條件式更新寄送列（queued → sent／failed／skipped），回傳是否真的轉換 */
   finishDelivery(tenantId: string, id: string, patch: Pick<DeliveryRow, "status" | "error" | "sent_at">): Promise<boolean>;
   /** 一次性退訂 token：unsub_used_at 由 null 改成 now 的那一次回列 */

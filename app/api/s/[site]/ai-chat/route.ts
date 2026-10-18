@@ -4,12 +4,15 @@ import { geminiFromEnv } from "@/lib/ai/gemini";
 import { requireSecret } from "@/lib/secrets";
 import { clientIp } from "@/lib/client-ip";
 import { errorResponse, json } from "@/lib/http";
+import { guardJsonPost } from "@/lib/public-post";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 /** AI 客服（公開）：限流與租戶隔離在 chat() 內 */
 export async function POST(req: Request, { params }: { params: Promise<{ site: string }> }) {
+  const blocked = guardJsonPost(req, 6000);
+  if (blocked) return blocked;
   try {
     const { site } = await params;
     if (Number(req.headers.get("content-length") ?? 0) > 6000) return json({ error: "訊息太長" }, 413);

@@ -56,7 +56,7 @@ describe("結帳套用（server 計價）", () => {
     const store = newStore();
     const s = await couponShop(store, "cp-apply");
     await createCoupon(s.ctx, { site: "cp-apply", code: "OFF15", kind: "percent", value: 15, maxDiscount: 200 });
-    const q = await handleQuote(new Request("http://t/q", { method: "POST", body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 2 }], couponCode: "off15", discount: 9999 }) }), "cp-apply", store);
+    const q = await handleQuote(new Request("http://t/q", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 2 }], couponCode: "off15", discount: 9999 }) }), "cp-apply", store);
     expect(await q.json()).toMatchObject({ subtotal: 700, shippingFee: 80, discount: 105, total: 675, couponMessage: "已套用 OFF15" });
     const r = await order(store, s, "off15", 2);
     expect(r.order).toMatchObject({ subtotal: 700, shipping_fee: 80, discount_total: 105, total: 675, coupon_code: "OFF15" });

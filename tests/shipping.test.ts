@@ -177,10 +177,10 @@ describe("運費由 server 計價", () => {
     await expect(placeOrder({ store, baseUrl: "http://t" }, { tenant: s.tenant, member: null, data: { items: [{ productId: s.mug.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } })).rejects.toThrow(/請選擇運送方式/);
     await expect(placeOrder({ store, baseUrl: "http://t" }, { tenant: s.tenant, member: null, data: { items: [{ productId: s.mug.id, qty: 1 }], contact, shipping, paymentMethod: "offline", shippingMethodId: "nope" } })).rejects.toThrow(/請選擇運送方式/);
     // quote：竄改的 shippingFee 欄位被忽略；超商滿 999 免運
-    const q = await handleQuote(new Request("http://test.local/q", { method: "POST", body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 3 }], shippingMethodId: "seven", shippingFee: 0, total: 1 }) }), "ship-fee", store);
+    const q = await handleQuote(new Request("http://test.local/q", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 3 }], shippingMethodId: "seven", shippingFee: 0, total: 1 }) }), "ship-fee", store);
     const j = (await q.json()) as { subtotal: number; shippingFee: number; total: number };
     expect(j).toMatchObject({ subtotal: 1050, shippingFee: 0, total: 1050 });
-    const q2 = await handleQuote(new Request("http://test.local/q", { method: "POST", body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 1 }], shippingMethodId: "seven", shippingFee: 0 }) }), "ship-fee", store);
+    const q2 = await handleQuote(new Request("http://test.local/q", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ productId: s.mug.id, qty: 1 }], shippingMethodId: "seven", shippingFee: 0 }) }), "ship-fee", store);
     expect(((await q2.json()) as { shippingFee: number }).shippingFee).toBe(60);
   });
 

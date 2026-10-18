@@ -4,6 +4,7 @@ import type { ReferralSettings } from "@/modules/referral/manifest";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { publishedModuleSettings } from "./members";
 import { registerOrderHooks, type HookDeps } from "./order-hooks";
+import { normalizeEmail, sameEmail } from "../email-normalize";
 
 const ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function randomCode(len: number, prefix = "") {
@@ -34,7 +35,20 @@ export function shareUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, code:
   return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/api/ref/${code}`;
 }
 
-const refereeKey = (o: OrderRow) => (o.member_id ? `member:${o.member_id}` : `email:${o.contact.email.toLowerCase()}`);
+/**
+ * 被推薦人識別（H-1）：一律用正規化後的 email（去 +tag、gmail 去點、小寫）——
+ * 同一個收件匣開分身帳號或換 alias 都算同一人，只會觸發一次回饋。
+ */
+export const refereeKey = (o: OrderRow) => `email:${normalizeEmail(o.contact.email)}`;
+
+/** 每位推薦人每月（台北時間月初起）最多發幾張回饋券（設定 rewardMonthlyLimit，預設 10） */
+export const DEFAULT_REWARD_MONTHLY_LIMIT = 10;
+
+/** 台北時間本月 1 日 00:00 的 ISO */
+export function taipeiMonthStartIso(now = new Date()): string {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit" }).format(now); // YYYY-MM
+  return new Date(`${p}-01T00:00:00+08:00`).toISOString();
+}
 
 /**
  * 付款成功的副作用（訂單 paid 轉換成功那一次呼叫；本身也冪等）：
@@ -48,7 +62,12 @@ export async function onReferralOrderPaid(deps: HookDeps, tenant: TenantRow, ord
   if (!rc) return;
   const referrer = await deps.store.getMemberById(tenant.id, rc.member_id);
   if (!referrer || referrer.status !== "active") return;
-  if (order.member_id === referrer.id || order.contact.email.toLowerCase() === referrer.email.toLowerCase()) return;
+  // H-1：自推比對用正規化 email（a+x@、a.b@gmail 與本人視為同一人）；下單會員帳號的 email 也要比
+  if (order.member_id === referrer.id || sameEmail(order.contact.email, referrer.email)) return;
+  if (order.member_id) {
+    const buyer = await deps.store.getMemberById(tenant.id, order.member_id);
+    if (buyer && sameEmail(buyer.email, referrer.email)) return;
+  }
   const settings = (await publishedModuleSettings(deps.store, tenant, "referral")) as Partial<ReferralSettings>;
 
   if (rc.kol_rate_bp > 0 && settings.kolEnabled !== false) {
@@ -62,6 +81,12 @@ export async function onReferralOrderPaid(deps: HookDeps, tenant: TenantRow, ord
   if (!settings.rewardCoupon) return;
   const prior = await deps.store.countPaidOrdersFor(tenant.id, { memberId: order.member_id, email: order.contact.email }, order.id);
   if (prior > 0) return;
+  // H-1：每位推薦人每月回饋上限（分身帳號刷量的上限）
+  const monthlyLimit = settings.rewardMonthlyLimit ?? DEFAULT_REWARD_MONTHLY_LIMIT;
+  if ((await deps.store.countReferralRewardsSince(tenant.id, referrer.id, taipeiMonthStartIso())) >= monthlyLimit) {
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:referral", action: "referral.reward_capped", payload: { orderNo: order.order_no, referrer: referrer.id, monthlyLimit } });
+    return;
+  }
   const ref = await deps.store.insertReferral({ tenant_id: tenant.id, referrer_member_id: referrer.id, referee_key: refereeKey(order), referee_member_id: order.member_id, order_id: order.id });
   if (!ref) return; // 這個被推薦人已觸發過
   const rw = settings.rewardCoupon;
@@ -96,8 +121,22 @@ export async function onReferralOrderPaid(deps: HookDeps, tenant: TenantRow, ord
   }
 }
 
-/** 訂單取消：有分潤 earn 就記一筆 reverse（只增不改；unique(order_id, kind) 保證只沖一次） */
+/**
+ * 訂單取消：
+ * 1. H-1：這張訂單觸發過首單回饋 → 撤銷推薦紀錄（revoked_at 條件更新，只會一次）並停用回饋券（已被使用的無法收回，只記稽核）。
+ * 2. 有分潤 earn 就記一筆 reverse（只增不改；unique(order_id, kind) 保證只沖一次）。
+ */
 export async function onReferralOrderCancelled(store: Store, tenant: TenantRow, order: OrderRow) {
+  const revoked = await store.revokeReferralByOrder(tenant.id, order.id, order.cancel_reason ?? "order_cancelled");
+  if (revoked) {
+    let couponUsed: boolean | null = null;
+    if (revoked.reward_coupon_id) {
+      const c = await store.getCouponById(tenant.id, revoked.reward_coupon_id);
+      couponUsed = !!c && c.used_count > 0;
+      if (c?.active) await store.updateCoupon(tenant.id, c.id, { active: false, note: `${c.note ?? ""}（被推薦訂單 ${order.order_no} 取消，已停用）`.slice(0, 200) });
+    }
+    await store.insertAudit({ tenant_id: tenant.id, actor: "system:referral", action: "referral.revoke", payload: { orderNo: order.order_no, referralId: revoked.id, couponId: revoked.reward_coupon_id, couponAlreadyUsed: couponUsed } });
+  }
   const earned = (await store.listLedger(tenant.id, { orderId: order.id, limit: 5 })).find((l) => l.kind === "earn");
   if (!earned) return;
   if (await store.insertLedger({ tenant_id: tenant.id, referrer_member_id: earned.referrer_member_id, order_id: order.id, kind: "reverse", amount: -earned.amount })) {

@@ -67,7 +67,7 @@ modules/<id>/
 - `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。
 - `shipping`：`methods[]`（`id`、`type` cvs／home／pickup／manual、`provider` ecpay／manual、`subType`、`label`、`fee`、`freeThreshold`、`instructions`）、`sender`（使用綠界時必填）、`goodsName`。`methods` 至少一種，否則 `pending_setup`。
 - `coupons`：無設定（折扣碼用 MCP／後台建立）。
-- `referral`：`rewardCoupon { kind, value, maxDiscount, minSubtotal, validDays }`（必填，否則 `pending_setup`）、`kolEnabled`。
+- `referral`：`rewardCoupon { kind, value, maxDiscount, minSubtotal, validDays }`（必填，否則 `pending_setup`）、`rewardMonthlyLimit`（每位推薦人每月回饋上限，預設 10）、`kolEnabled`。
 - `newsletter`：`footer`、`rateLimitPerHour`。
 - `ai-chat`：`assistantName`、`greeting`、`extraKnowledge`、`perIpDailyLimit`（30）、`dailyLimit`（300）、`collectLeads`。平台沒設 `GEMINI_API_KEY` → `pending_setup`。
 

@@ -11,6 +11,7 @@ import {
   isValidEcpayName,
   mapForm,
   mapLogisticsStatus,
+  queryLogisticsOrder,
   randomTradeNo,
   verifyCheckMacValue,
   type EcpayCreds,
@@ -160,6 +161,7 @@ export async function resolveShipping(
   }
   const fee = methodFee(m, input.subtotal);
   const choice: ShippingChoice = { methodId: m.id, type: m.type, provider: m.provider, subType: m.subType ?? null, label: m.label, fee, store: null, cvsSelectionId: null };
+  if (m.provider === "ecpay" && (await store.getShippingAccount(tenant.id))?.stage) choice.stage = true;
   if (input.consume && m.provider === "ecpay" && input.receiver) {
     if (!isValidEcpayName(input.receiver.name)) throw new ServiceError("invalid", ECPAY_NAME_RULE);
     if (!isValidCellPhone(input.receiver.phone)) throw new ServiceError("invalid", "超商取貨與綠界宅配的收件人電話需為手機（09 開頭 10 碼）");
@@ -273,9 +275,16 @@ export async function createShipment(ctx: ServiceContext, input: { site?: string
   if (!order) throw new ServiceError("not_found", "找不到訂單（請給 orderId 或 orderNo）");
   if (order.status !== "paid") throw new ServiceError("conflict", `訂單 ${order.order_no} 目前不是「已付款」，不能建立出貨單`);
   if (order.payment_sandbox) throw new ServiceError("invalid", `訂單 ${order.order_no} 是金流測試環境付款（沒有實際收款），不能出貨`);
-  if (await ctx.store.getActiveShipmentByOrder(tenant.id, order.id)) throw new ServiceError("conflict", `訂單 ${order.order_no} 已經有出貨單了（get_shipment 查看）`);
   const choice: ShippingChoice = order.shipping_choice ?? { methodId: "manual", type: "manual", provider: "manual", subType: null, label: "手動出貨", fee: order.shipping_fee, store: null, cvsSelectionId: null };
   const settings = await publishedShippingSettings(ctx.store, tenant);
+  const active = await ctx.store.getActiveShipmentByOrder(tenant.id, order.id);
+  if (active) {
+    // M-4：上次建單結果不明（逾時／連線錯誤、或寫入後行程中斷）→ 先用原 MerchantTradeNo 反查，絕不直接另建一張
+    if (active.provider === "ecpay" && active.status === "created" && !active.logistics_id && active.merchant_trade_no) {
+      return reconcileUnknownShipment(ctx, tenant, order, active, choice, settings, input.confirm, fetchImpl);
+    }
+    throw new ServiceError("conflict", `訂單 ${order.order_no} 已經有出貨單了（get_shipment 查看）`);
+  }
 
   if (choice.provider !== "ecpay") {
     const tracking = input.trackingNumber?.trim().slice(0, 100) || null;
@@ -306,6 +315,7 @@ export async function createShipment(ctx: ServiceContext, input: { site?: string
   // 綠界
   const creds = await ecpayCreds(ctx.store, tenant.id);
   if (!creds) throw new ServiceError("invalid", "此商店尚未設定綠界物流憑證（請平台擁有者到後台「物流」輸入）");
+  assertStageAllowed(creds, order);
   if (!settings?.sender) throw new ServiceError("invalid", "請先在 shipping 模組設定寄件人（sender）並發布");
   if (choice.type === "cvs" && !choice.store) throw new ServiceError("invalid", "訂單沒有取貨門市資料");
   if (!isValidEcpayName(order.shipping.name)) throw new ServiceError("invalid", `${ECPAY_NAME_RULE}（目前：${order.shipping.name}），請與客人確認後改用手動出貨`);
@@ -332,6 +342,32 @@ export async function createShipment(ctx: ServiceContext, input: { site?: string
     raw: null,
     events: [{ at: new Date().toISOString(), code: null, message: "送出建單", status: "created" }],
   });
+  return sendEcpayCreate(ctx, tenant, order, claim, choice, creds, settings, zip, { retry: false }, fetchImpl);
+}
+
+/** L-5：綠界測試環境帳號只能處理「預覽／sandbox」訂單（真實付款的訂單不能拿 stage 帳號出假物流單） */
+function assertStageAllowed(creds: { stage: boolean }, order: OrderRow) {
+  if (creds.stage && !order.payment_sandbox && !order.shipping_choice?.stage) {
+    throw new ServiceError("invalid", `目前的綠界帳號是測試環境（stage），只能處理預覽／測試訂單；訂單 ${order.order_no} 是正式訂單，請平台擁有者換成正式綠界帳號，或改用手動出貨`);
+  }
+}
+
+type EcpayFull = EcpayCreds & { kind: "C2C" | "B2C" };
+
+/** 打 Express/Create 並依結果更新出貨單：成功 → 寫物流編號；結果不明 → 維持 created（下次先反查）；確定失敗 → failed（可重建） */
+async function sendEcpayCreate(
+  ctx: ServiceContext,
+  tenant: TenantRow,
+  order: OrderRow,
+  claim: ShipmentRow,
+  choice: ShippingChoice,
+  creds: EcpayFull,
+  settings: ShippingSettings | null,
+  zip: string | undefined,
+  opts: { retry: boolean },
+  fetchImpl?: FetchLike,
+) {
+  const tradeNo = claim.merchant_trade_no!;
   const r = await createLogisticsOrder(
     creds,
     {
@@ -339,28 +375,68 @@ export async function createShipment(ctx: ServiceContext, input: { site?: string
       type: choice.type === "cvs" ? "cvs" : "home",
       subType: choice.subType ?? "",
       goodsAmount: order.total,
-      goodsName: settings.goodsName ?? `${tenant.name} 訂單`,
-      sender: settings.sender,
+      goodsName: settings?.goodsName ?? `${tenant.name} 訂單`,
+      sender: settings!.sender!,
       receiver: { name: order.shipping.name.trim(), cellPhone: order.shipping.phone, email: order.contact.email, storeId: choice.store?.id, zipCode: zip, address: order.shipping.address.replace(/^\s*\d{3,6}\s*/, "") },
       serverReplyUrl: `${ctx.baseUrl.replace(/\/$/, "")}/api/ship/ecpay/notify/${tenant.id}`,
     },
     fetchImpl,
   );
+  const ev = (message: string, status: ShipmentStatus | null, code: string | null = null) => ({ at: new Date().toISOString(), code, message: message.slice(0, 200), status });
   if (!r.ok) {
-    const failed = await ctx.store.updateShipment(tenant.id, claim.id, { status: "failed", raw: r.raw as Record<string, unknown>, events: [...claim.events, { at: new Date().toISOString(), code: null, message: r.message.slice(0, 200), status: "failed" }] });
+    if (r.unknown) {
+      await ctx.store.updateShipment(tenant.id, claim.id, { raw: { ...(r.raw as Record<string, unknown>), unknown: true }, events: [...claim.events, ev(`結果不明：${r.message}`, "created")] });
+      await audit(ctx, tenant.id, "shipment.unknown", { orderNo: order.order_no, tradeNo, message: r.message.slice(0, 200) });
+      throw new ServiceError("conflict", `綠界建單結果不明（${r.message}）。出貨單維持「建立中」，綠界可能已經建好單；請稍後再呼叫一次 create_shipment，系統會先用原交易編號 ${tradeNo} 向綠界反查，確定沒有才重送。`);
+    }
+    if (opts.retry) {
+      // 重送被拒（可能是同一個 MerchantTradeNo 剛被另一個請求建好）→ 再反查一次，查到就認回
+      const q = await queryLogisticsOrder(creds, tradeNo, fetchImpl);
+      if (q.kind === "found") return adoptShipment(ctx, tenant, order, claim, choice, q);
+    }
+    await ctx.store.updateShipment(tenant.id, claim.id, { status: "failed", raw: r.raw as Record<string, unknown>, events: [...claim.events, ev(r.message, "failed")] });
     await audit(ctx, tenant.id, "shipment.fail", { orderNo: order.order_no, message: r.message.slice(0, 200) });
-    throw new ServiceError("invalid", `${r.message}（出貨單已標失敗，可修正後重新建立）${failed ? "" : ""}`);
+    throw new ServiceError("invalid", `${r.message}（出貨單已標失敗，可修正後重新建立）`);
   }
   const s = await ctx.store.updateShipment(tenant.id, claim.id, {
     logistics_id: r.logisticsId,
     tracking_no: r.trackingNo,
     validation_no: r.validationNo,
     raw: r.raw,
-    events: [...claim.events, { at: new Date().toISOString(), code: r.rtnCode, message: r.raw.RtnMsg ?? "建單成功", status: "created" }],
+    events: [...claim.events, ev(r.raw.RtnMsg ?? "建單成功", "created", r.rtnCode)],
   });
   await ctx.store.setOrderFields(tenant.id, order.id, { shipping_tracking: r.trackingNo, shipping_method: choice.label });
-  await audit(ctx, tenant.id, "shipment.create", { orderNo: order.order_no, provider: "ecpay", stage: creds.stage, logisticsId: r.logisticsId });
+  await audit(ctx, tenant.id, "shipment.create", { orderNo: order.order_no, provider: "ecpay", stage: creds.stage, logisticsId: r.logisticsId, retry: opts.retry });
   return { ...shipmentSummary(s, order.order_no), note: `綠界物流單已建立${creds.stage ? "（測試環境，不會真的寄送）" : ""}；訂單會在物流狀態回報「已寄出」後自動轉為已出貨。` };
+}
+
+async function adoptShipment(ctx: ServiceContext, tenant: TenantRow, order: OrderRow, claim: ShipmentRow, choice: ShippingChoice, q: Extract<Awaited<ReturnType<typeof queryLogisticsOrder>>, { kind: "found" }>) {
+  const s = await ctx.store.updateShipment(tenant.id, claim.id, {
+    logistics_id: q.logisticsId,
+    tracking_no: q.trackingNo,
+    validation_no: q.validationNo,
+    raw: { query: q.fields },
+    events: [...claim.events, { at: new Date().toISOString(), code: q.status || null, message: "反查綠界：此交易編號已建單，認回（不重建）", status: "created" }],
+  });
+  await ctx.store.setOrderFields(tenant.id, order.id, { shipping_tracking: q.trackingNo, shipping_method: choice.label });
+  await audit(ctx, tenant.id, "shipment.adopt", { orderNo: order.order_no, logisticsId: q.logisticsId });
+  return { ...shipmentSummary(s, order.order_no), note: "綠界已經有這張物流單（上次建單其實成功），已認回，不會重複寄件。" };
+}
+
+/** M-4：結果不明的出貨單 → 用原 MerchantTradeNo 反查：有 → 認回；確定沒有 → （confirm 後）用同一個交易編號重送；查不到結果 → 不動作 */
+async function reconcileUnknownShipment(ctx: ServiceContext, tenant: TenantRow, order: OrderRow, active: ShipmentRow, choice: ShippingChoice, settings: ShippingSettings | null, confirm: boolean | undefined, fetchImpl?: FetchLike) {
+  const creds = await ecpayCreds(ctx.store, tenant.id);
+  if (!creds) throw new ServiceError("invalid", "此商店尚未設定綠界物流憑證（請平台擁有者到後台「物流」輸入）");
+  if (creds.stage !== active.stage) throw new ServiceError("conflict", "綠界帳號環境（測試／正式）已和建單時不同，無法反查這張出貨單，請人工到綠界後台確認");
+  const q = await queryLogisticsOrder(creds, active.merchant_trade_no!, fetchImpl);
+  if (q.kind === "error") throw new ServiceError("conflict", `無法確認綠界是否已建單（${q.message}），為避免重複寄件這次不重送，請稍後再試`);
+  if (q.kind === "found") return adoptShipment(ctx, tenant, order, active, choice, q);
+  // 確定不存在
+  assertStageAllowed(creds, order);
+  if (!settings?.sender) throw new ServiceError("invalid", "請先在 shipping 模組設定寄件人（sender）並發布");
+  if (confirm !== true) throw new ServiceError("confirm_required", `綠界查無上次的物流單（交易編號 ${active.merchant_trade_no}），可以用同一個交易編號重送建單${creds.stage ? "（測試環境）" : "，會產生真實寄件與運費"}。請先讓使用者確認，再以 confirm: true 呼叫。`);
+  const zip = /^\s*(\d{3,6})/.exec(order.shipping.address)?.[1];
+  return sendEcpayCreate(ctx, tenant, order, active, choice, creds, settings, zip, { retry: true }, fetchImpl);
 }
 
 export async function getShipment(ctx: ServiceContext, input: { site?: string | null; orderId?: string; orderNo?: string }) {
@@ -401,6 +477,13 @@ export async function handleLogisticsNotify(deps: { store: Store; sendMail?: Ser
     return { status: 200, body: "1|OK", outcome: "unknown_shipment" };
   }
   if (s.logistics_id && params.AllPayLogisticsID && params.AllPayLogisticsID !== s.logistics_id) return { status: 400, body: "0|LogisticsIDError", outcome: "bad_logistics_id" };
+  if (creds.stage) {
+    const o = await deps.store.getOrderById(s.tenant_id, s.order_id);
+    if (!o || (!o.payment_sandbox && !o.shipping_choice?.stage)) {
+      console.error(`[ecpay/notify] 🔴 stage 帳號的狀態通知對應到正式訂單，拒絕套用 tenant=${input.tenantId} trade=${params.MerchantTradeNo}`);
+      return { status: 400, body: "0|StageAccountNotAllowed", outcome: "stage_rejected" };
+    }
+  }
   const mapped = mapLogisticsStatus(params.RtnCode ?? "");
   const next = mapped && RANK[mapped] > RANK[s.status] ? mapped : s.status;
   const updated = await deps.store.updateShipment(s.tenant_id, s.id, {

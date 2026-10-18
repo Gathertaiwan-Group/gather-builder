@@ -171,7 +171,8 @@ export interface CreateLogisticsInput {
 
 export type CreateLogisticsResult =
   | { ok: true; logisticsId: string; trackingNo: string | null; validationNo: string | null; rtnCode: string; raw: Record<string, string> }
-  | { ok: false; message: string; raw: Record<string, string> | { text: string } };
+  /** unknown = 連線錯誤／逾時／看不懂的回應：綠界可能已經建好單（M-4），不可當成失敗重建，要先用 queryLogisticsOrder 反查 */
+  | { ok: false; message: string; raw: Record<string, string> | { text: string }; unknown?: boolean };
 
 /** 幕後建立物流訂單（Express/Create）。成功 = 有 AllPayLogisticsID 且 RtnCode 為 1（B2C／宅配）或 300（C2C），且回應的 CheckMacValue 正確 */
 export async function createLogisticsOrder(creds: EcpayCreds, input: CreateLogisticsInput, fetchImpl: FetchLike = (u, i) => fetch(u, i)): Promise<CreateLogisticsResult> {
@@ -217,8 +218,10 @@ export async function createLogisticsOrder(creds: EcpayCreds, input: CreateLogis
     });
     text = await res.text();
   } catch (e) {
-    return { ok: false, message: `連線失敗：${e instanceof Error ? e.message : String(e)}`, raw: { text: "" } };
+    return { ok: false, message: `連線失敗或逾時：${e instanceof Error ? e.message : String(e)}`, raw: { text: "" }, unknown: true };
   }
+  // 不是「數字|…」也不是 key=value（例如 WAF 擋頁、5xx HTML）→ 結果不明，不能當失敗
+  if (!/^\s*\d+\|/.test(text) && !/AllPayLogisticsID=/.test(text)) return { ok: false, message: `綠界回應無法辨識：${text.slice(0, 120)}`, raw: { text: text.slice(0, 1000) }, unknown: true };
   const r = parseEcpayResponse(text);
   const f = r.fields;
   if (!r.ok || !f.AllPayLogisticsID) return { ok: false, message: `綠界建單失敗 ${f.RtnCode ?? "?"}：${r.message || text.slice(0, 200)}`, raw: { text: text.slice(0, 1000) } };
@@ -232,4 +235,47 @@ export async function createLogisticsOrder(creds: EcpayCreds, input: CreateLogis
     rtnCode: f.RtnCode,
     raw: f,
   };
+}
+
+/** 查詢回應（V5）：`key=value&…`，值不做 URL 編碼（可能含中文、空白、/） */
+export function parseQueryResponse(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of text.trim().split("&")) {
+    const i = part.indexOf("=");
+    if (i > 0) out[part.slice(0, i)] = part.slice(i + 1);
+  }
+  return out;
+}
+
+export type QueryLogisticsResult =
+  | { kind: "found"; logisticsId: string; trackingNo: string | null; validationNo: string | null; status: string; fields: Record<string, string> }
+  | { kind: "not_found" }
+  | { kind: "error"; message: string };
+
+/**
+ * 依 MerchantTradeNo 反查物流訂單（/Helper/QueryLogisticsTradeInfo/V5，官方文件 https://developers.ecpay.com.tw/?p=7418）。
+ * 2026-10-19 於 stage（官方測試特店 2000933）實測：查無 → HTTP 500 `0|找不到訂單`；查到 → HTTP 200 `key=value&…&CheckMacValue=…`（CheckMacValue 可驗）。
+ * 只有「明確查無」才回 not_found；其他（連線失敗、CheckMacValue 不符、看不懂）一律 error（＝不知道，不可重建）。
+ */
+export async function queryLogisticsOrder(creds: EcpayCreds, tradeNo: string, fetchImpl: FetchLike = (u, i) => fetch(u, i)): Promise<QueryLogisticsResult> {
+  const fields: Record<string, string> = { MerchantID: creds.merchantId, MerchantTradeNo: tradeNo, TimeStamp: String(Math.floor(Date.now() / 1000)) };
+  fields.CheckMacValue = checkMacValue(fields, creds.hashKey, creds.hashIv);
+  let text: string;
+  try {
+    const res = await fetchImpl(`${creds.stage ? ECPAY_LOGISTICS_BASE.stage : ECPAY_LOGISTICS_BASE.prod}/Helper/QueryLogisticsTradeInfo/V5`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+    text = await res.text();
+  } catch (e) {
+    return { kind: "error", message: `反查連線失敗：${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (/^\s*0\|\s*找不到訂單/.test(text)) return { kind: "not_found" };
+  const f = parseQueryResponse(text);
+  if (!f.AllPayLogisticsID || f.MerchantTradeNo !== tradeNo) return { kind: "error", message: `反查回應無法辨識：${text.slice(0, 120)}` };
+  if (!verifyCheckMacValue(f, creds.hashKey, creds.hashIv)) return { kind: "error", message: "反查回應的 CheckMacValue 不正確（拒絕採信）" };
+  return { kind: "found", logisticsId: f.AllPayLogisticsID, trackingNo: f.CVSPaymentNo || f.BookingNote || null, validationNo: f.CVSValidationNo || null, status: f.LogisticsStatus ?? "", fields: f };
 }

@@ -7,11 +7,14 @@ import { hashIp } from "./inquiries";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { publishedModuleSettings, emailSchema } from "./members";
 import { parse } from "./sites";
+import { normalizeEmail } from "../email-normalize";
 
 const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 export const CONFIRM_TTL_MS = 48 * 3600_000;
 /** 每次 send_broadcast 呼叫最多寄幾封（serverless 執行時間有限；剩下的再呼叫一次會接續） */
 export const BATCH_SIZE = 50;
+/** 宣告超過這麼久仍是 sending（行程被砍）→ 標 failed，不重寄 */
+export const STALE_CLAIM_MS = 15 * 60_000;
 /**
  * 🔴 測試租戶（is_test）群發時，只會真的寄給這個名單；其他收件人一律記為 skipped（不寄給真實的人）。
  */
@@ -45,6 +48,10 @@ export function unsubToken(secret: string, broadcastId: string, subscriberId: st
 /* ================================================================== 公開：訂閱／確認／退訂 */
 
 export const SUBSCRIBE_DONE = "請到信箱點確認連結，完成訂閱。";
+/** H-2：同一網站同一信箱 24 小時內最多寄 1 封確認信 */
+export const CONFIRM_PER_EMAIL_PER_DAY = 1;
+/** H-2：跨所有網站，同一信箱（正規化後）24 小時內最多 3 封確認信——避免開很多租戶一起轟炸同一人 */
+export const CONFIRM_GLOBAL_PER_EMAIL_PER_DAY = 3;
 
 /**
  * 訂閱（公開、無登入）。不論 email 是否已訂閱都回同一句話（不洩漏名單）；honeypot、每 IP 限流。
@@ -59,6 +66,12 @@ export async function subscribe(deps: NewsletterDeps, input: { slug: string; ip:
   const cfg = (await publishedModuleSettings(deps.store, tenant, "newsletter")) as { rateLimitPerHour?: number };
   const hit = await deps.store.rateHit(`newsletter:${tenant.id}`, hashIp(input.ip || "unknown", deps.ipSecret), 3600, cfg.rateLimitPerHour ?? 5);
   if (!hit.allowed) throw new ServiceError("rate_limited", "送出太頻繁，請稍後再試");
+  // H-2：每個信箱的確認信冷卻（站內 24h 1 封、跨站 24h 3 封）。被擋時回同一句話、不換 token（之前寄出的連結仍有效）
+  const ek = sha256(`nl:${normalizeEmail(email)}`);
+  const perSite = await deps.store.rateHit(`newsletter-confirm:${tenant.id}`, ek, 86_400, CONFIRM_PER_EMAIL_PER_DAY);
+  if (!perSite.allowed) return { message: SUBSCRIBE_DONE, sent: false };
+  const global = await deps.store.rateHit("newsletter-confirm-global", ek, 86_400, CONFIRM_GLOBAL_PER_EMAIL_PER_DAY);
+  if (!global.allowed) return { message: SUBSCRIBE_DONE, sent: false };
   const raw = randomBytes(32).toString("base64url");
   const r = await deps.store.upsertPendingSubscriber({ tenant_id: tenant.id, email, confirm_token_hash: sha256(raw), confirm_expires_at: new Date(Date.now() + CONFIRM_TTL_MS).toISOString() });
   if (!r.needsConfirm) return { message: SUBSCRIBE_DONE, sent: false };
@@ -180,7 +193,9 @@ export async function sendBroadcast(ctx: ServiceContext, input: { site?: string 
     await audit(ctx, tenant.id, "newsletter.send_start", { broadcastId: b.id, recipients: confirmed });
   }
   const footer = ((await publishedModuleSettings(ctx.store, tenant, "newsletter")) as { footer?: string }).footer;
-  const batch = await ctx.store.listQueuedDeliveries(tenant.id, b.id, BATCH_SIZE);
+  // M-1：先把「宣告後中斷」的列標 failed（不重寄），再原子宣告自己這一批（併發呼叫拿到的列不重疊）
+  await ctx.store.failStaleDeliveries(tenant.id, b.id, new Date(Date.now() - STALE_CLAIM_MS).toISOString());
+  const batch = await ctx.store.claimDeliveries(tenant.id, b.id, BATCH_SIZE);
   let sent = 0;
   let failed = 0;
   let skipped = 0;
@@ -208,10 +223,10 @@ export async function sendBroadcast(ctx: ServiceContext, input: { site?: string 
     }
   }
   const stats = await ctx.store.deliveryStats(tenant.id, b.id);
-  const done = stats.queued === 0;
+  const done = stats.queued === 0 && stats.sending === 0;
   const after = await ctx.store.updateBroadcast(tenant.id, b.id, ["sending"], { sent_count: stats.sent, failed_count: stats.failed, ...(done ? { status: "sent", finished_at: new Date().toISOString() } : {}) });
-  await audit(ctx, tenant.id, done ? "newsletter.send_done" : "newsletter.send_batch", { broadcastId: b.id, sent, failed, skipped, remaining: stats.queued });
-  return { ...broadcastSummary(after ?? cur, stats), thisBatch: { sent, failed, skipped }, remaining: stats.queued, note: done ? "群發完成。" : `還有 ${stats.queued} 封待寄，請再呼叫一次 send_broadcast（confirm: true）接續。` };
+  await audit(ctx, tenant.id, done ? "newsletter.send_done" : "newsletter.send_batch", { broadcastId: b.id, sent, failed, skipped, remaining: stats.queued, sending: stats.sending });
+  return { ...broadcastSummary(after ?? cur, stats), thisBatch: { sent, failed, skipped }, remaining: stats.queued + stats.sending, note: done ? "群發完成。" : stats.queued ? `還有 ${stats.queued} 封待寄，請再呼叫一次 send_broadcast（confirm: true）接續。` : `另一個群發呼叫正在寄送 ${stats.sending} 封，請稍後用 list_broadcasts 查看。` };
 }
 
 export async function listBroadcasts(ctx: ServiceContext, input: { site?: string | null; limit?: number }) {

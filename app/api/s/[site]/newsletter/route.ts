@@ -4,11 +4,14 @@ import { requireSecret } from "@/lib/secrets";
 import { clientIp } from "@/lib/client-ip";
 import { baseUrlFrom } from "@/lib/runtime";
 import { errorResponse, json } from "@/lib/http";
+import { guardJsonPost } from "@/lib/public-post";
 
 export const dynamic = "force-dynamic";
 
 /** 電子報訂閱（公開）：一律回同一句話，不洩漏是否已訂閱 */
 export async function POST(req: Request, { params }: { params: Promise<{ site: string }> }) {
+  const blocked = guardJsonPost(req, 4000);
+  if (blocked) return blocked;
   try {
     const { site } = await params;
     if (Number(req.headers.get("content-length") ?? 0) > 4000) return json({ error: "內容太長" }, 413);

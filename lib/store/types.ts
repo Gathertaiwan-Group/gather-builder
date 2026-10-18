@@ -278,6 +278,8 @@ export interface ShippingChoice {
   fee: number;
   store: { id: string; name: string; address: string; outside: boolean } | null;
   cvsSelectionId: string | null;
+  /** L-5：下單時用的是綠界測試環境（stage）帳號——只有預覽結帳拿得到；stage 帳號只能處理這種訂單 */
+  stage?: boolean;
 }
 
 export interface CouponRow {
