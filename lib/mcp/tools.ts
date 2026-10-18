@@ -13,6 +13,7 @@ import * as orders from "../services/orders";
 import * as invoices from "../services/invoices";
 import * as shipping from "../services/shipping";
 import * as coupons from "../services/coupons";
+import * as referral from "../services/referral";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -761,6 +762,28 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: RO,
     },
     wrap(async (a) => coupons.listCoupons(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 推薦（referral） */
+
+  server.registerTool(
+    "list_referrals",
+    {
+      description: "推薦報表：每位推薦人的 email、推薦碼、KOL 分潤比例、成功推薦人數、分潤金額（earn − 取消沖回），以及最近的分潤帳。含會員個資，需要 members:read。",
+      inputSchema: { site, limit: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => referral.listReferrals(ctx, a)),
+  );
+
+  server.registerTool(
+    "set_referral_kol",
+    {
+      description: "設定某會員推薦碼的 KOL 分潤比例（ratePercent 0–50；0 = 不分潤）。之後每筆經由他推薦碼的付款會記一筆分潤帳，訂單取消時自動沖回。回傳分享連結。需要 marketing:write。",
+      inputSchema: { site, memberId: z.string().optional(), email: z.string().optional(), ratePercent: z.number() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => referral.setReferralKol(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

@@ -10,6 +10,9 @@ import { siteHref } from "@/modules/render-types";
 import { ORDER_STATUS_LABEL } from "@/lib/shop/machine";
 import { twd } from "@/modules/shop/sections";
 import { expireIfDue } from "@/lib/services/orders";
+import { getOrCreateReferralCode, shareUrl } from "@/lib/services/referral";
+import { headers } from "next/headers";
+import { baseUrlFrom } from "@/lib/runtime";
 import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +27,7 @@ export default async function AccountPage(props: Props) {
   const member = await currentMember(site.tenant);
   if (!member) redirect(`/s/${site.tenant.slug}/account/login`);
   const ctx = makeRenderCtx(site, "/account");
+  const baseUrl = baseUrlFrom({ headers: await headers() });
   const store = getStore();
   const listed = moduleActive(site, "shop") ? (await store.listOrders(site.tenant.id, { memberId: member.id, limit: 50, offset: 0 })).rows : [];
   // 逾期未付的訂單在讀取時 lazy 取消（冪等）
@@ -36,6 +40,7 @@ export default async function AccountPage(props: Props) {
     })),
   );
   const action = (p: string) => `/s/${site.tenant.slug}/api/account/${p}`;
+  const myCode = moduleActive(site, "referral") ? await getOrCreateReferralCode(store, site.tenant, member) : null;
   return (
     <SiteShell ctx={ctx}>
       <AccountPanel title="會員中心" sp={sp}>
@@ -85,6 +90,18 @@ export default async function AccountPage(props: Props) {
                 })}
               </ul>
             )}
+          </div>
+        )}
+        {myCode && (
+          <div className="gb-card mb-6 p-5 text-sm" data-gb="referral">
+            <h2 className="m-0 mb-2 text-lg font-bold">推薦好友</h2>
+            <p className="m-0">
+              你的推薦碼：<strong data-gb="referral-code">{myCode.code}</strong>
+            </p>
+            <p className="m-0 mt-1 break-all">
+              分享連結：<span data-gb="referral-link">{shareUrl(baseUrl, site.tenant, myCode.code)}</span>
+            </p>
+            <p className="gb-muted m-0 mt-2 text-xs">朋友透過連結完成第一筆訂單後，你會收到一張回饋券。</p>
           </div>
         )}
         <form method="post" action={action("logout")}>

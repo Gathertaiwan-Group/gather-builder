@@ -128,4 +128,21 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     expect(same.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect(await store.getCouponUserCount((await store.getCouponByCode(t.id, code2))!.id, "email:same-user@example.com")).toBe(1);
   });
+
+  it("推薦：分潤帳只增不改（service_role 也不能 update／delete）、同訂單同 kind 只一筆、同一被推薦人只觸發一次", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const m = await store.insertMember({ tenant_id: t.id, email: `kol-${ts}@example.com`, password_hash: "x", name: null, phone: null });
+    const p = await createProduct(ctx, { site: slug, slug: "ref", name: "推薦", price: 100, status: "published", confirm: true });
+    const { order } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: t, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } });
+    expect(await store.insertLedger({ tenant_id: t.id, referrer_member_id: m!.id, order_id: order.id, kind: "earn", amount: 10 })).toBe(true);
+    expect(await store.insertLedger({ tenant_id: t.id, referrer_member_id: m!.id, order_id: order.id, kind: "earn", amount: 10 })).toBe(false);
+    const db = createServiceClient();
+    const upd = await db.from("builder_referral_ledger").update({ amount: 999 }).eq("order_id", order.id);
+    expect(upd.error?.code).toBe("42501");
+    const del = await db.from("builder_referral_ledger").delete().eq("order_id", order.id);
+    expect(del.error?.code).toBe("42501");
+    const a = await store.insertReferral({ tenant_id: t.id, referrer_member_id: m!.id, referee_key: "email:x@example.com", referee_member_id: null, order_id: order.id });
+    const b = await store.insertReferral({ tenant_id: t.id, referrer_member_id: m!.id, referee_key: "email:x@example.com", referee_member_id: null, order_id: order.id });
+    expect(!!a && !b).toBe(true);
+  });
 });

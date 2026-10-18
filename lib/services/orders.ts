@@ -3,6 +3,9 @@ import { ORDER_STATUS_LABEL, assertTransition, canTransition, sourcesFor } from 
 import { classifyPchomepayQuery, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
 import { getMailer } from "../mail";
 import { autoIssueOnPaid } from "./invoices";
+import { runCancelHooks, runPaidHooks } from "./order-hooks";
+// 模組副作用註冊（side-effect import：referral 在載入時註冊付款／取消 hook）
+import "./referral";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -234,32 +237,7 @@ export async function onOrderPaid(deps: { store: Store; sendMail?: Mailer; baseU
   if (opts.sandbox) return;
   // 模組副作用（各自冪等、失敗不影響付款）：自動開發票、推薦回饋／分潤
   await autoIssueOnPaid(deps.store, tenant, order);
-  for (const hook of paidHooks) {
-    try {
-      await hook(deps, tenant, order);
-    } catch (e) {
-      console.error("[order.paid hook] 失敗", e instanceof Error ? e.message : e);
-    }
-  }
-}
-
-type PaidHook = (deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow) => Promise<void>;
-type CancelHook = (store: Store, tenant: TenantRow, order: OrderRow) => Promise<void>;
-const paidHooks: PaidHook[] = [];
-const cancelHooks: CancelHook[] = [];
-/** 模組註冊「付款成功」與「訂單取消」副作用（referral 用；避免循環 import） */
-export function registerOrderHooks(h: { paid?: PaidHook; cancelled?: CancelHook }) {
-  if (h.paid && !paidHooks.includes(h.paid)) paidHooks.push(h.paid);
-  if (h.cancelled && !cancelHooks.includes(h.cancelled)) cancelHooks.push(h.cancelled);
-}
-export async function runCancelHooks(store: Store, tenant: TenantRow, order: OrderRow) {
-  for (const hook of cancelHooks) {
-    try {
-      await hook(store, tenant, order);
-    } catch (e) {
-      console.error("[order.cancel hook] 失敗", e instanceof Error ? e.message : e);
-    }
-  }
+  await runPaidHooks(deps, tenant, order);
 }
 
 async function onOrderPaidMails(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow, via: string, opts: { sandbox?: boolean }) {
