@@ -13,6 +13,8 @@ export interface ServiceContext {
   /** 產生預覽網址用，例如 https://builder.example.com */
   baseUrl: string;
   previewSecret: string;
+  /** 寄信（Resend）；沒設 RESEND_API_KEY 時為 undefined，呼叫端略過不報錯 */
+  sendMail?: (to: string, subject: string, text: string) => Promise<void>;
 }
 
 export { ServiceError, type ServiceErrorCode } from "../errors";

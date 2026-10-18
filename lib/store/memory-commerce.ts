@@ -1,0 +1,303 @@
+import { randomUUID } from "node:crypto";
+import { ServiceError } from "../errors";
+import type {
+  MemberRow,
+  MemberSessionRow,
+  MemberTokenRow,
+  OrderItemRow,
+  OrderRow,
+  PaymentAccountRow,
+  PaymentRow,
+  ProductRow,
+  CommerceStore,
+  VariantRow,
+} from "./types";
+
+const clone = <T>(v: T): T => structuredClone(v);
+const now = () => new Date().toISOString();
+
+/**
+ * members／shop 的記憶體實作。語意與 Supabase 實作（含 builder_place_order／cancel／release 函式）一致：
+ * 每個方法的讀＋寫都在同一個同步區段完成（JS 單執行緒），等同 DB 的原子條件更新。
+ */
+export function createMemoryCommerceStore(): CommerceStore {
+  const members = new Map<string, MemberRow>();
+  const sessions = new Map<string, MemberSessionRow>();
+  const mtokens = new Map<string, MemberTokenRow>();
+  const products = new Map<string, ProductRow>();
+  const variants = new Map<string, VariantRow>();
+  const orders = new Map<string, OrderRow>();
+  const orderItems: OrderItemRow[] = [];
+  const counters = new Map<string, number>();
+  const accounts = new Map<string, PaymentAccountRow>();
+  const payments = new Map<string, PaymentRow>();
+
+  const releaseSync = (tenantId: string, id: string): boolean => {
+    const o = orders.get(id);
+    if (!o || o.tenant_id !== tenantId || o.stock_released_at) return false;
+    orders.set(id, { ...o, stock_released_at: now(), updated_at: now() });
+    for (const it of orderItems.filter((i) => i.order_id === id && i.stock_deducted)) {
+      if (it.variant_id) {
+        const v = variants.get(it.variant_id);
+        if (v) variants.set(v.id, { ...v, stock: v.stock + it.qty });
+      } else {
+        const p = products.get(it.product_id);
+        if (p) products.set(p.id, { ...p, stock: p.stock + it.qty });
+      }
+    }
+    return true;
+  };
+
+  const store: CommerceStore = {
+    async insertMember(row) {
+      if ([...members.values()].some((m) => m.tenant_id === row.tenant_id && m.email === row.email)) return null;
+      const m: MemberRow = { ...row, id: randomUUID(), email_verified_at: null, status: "active", created_at: now(), last_login_at: null };
+      members.set(m.id, m);
+      return clone(m);
+    },
+    async getMemberByEmail(tenantId, email) {
+      return clone([...members.values()].find((m) => m.tenant_id === tenantId && m.email === email) ?? null);
+    },
+    async getMemberById(tenantId, id) {
+      const m = members.get(id);
+      return m && m.tenant_id === tenantId ? clone(m) : null;
+    },
+    async updateMember(tenantId, id, patch) {
+      const m = members.get(id);
+      if (!m || m.tenant_id !== tenantId) return null;
+      const next = { ...m, ...patch };
+      members.set(id, next);
+      return clone(next);
+    },
+    async listMembers(tenantId, opts) {
+      const rows = [...members.values()]
+        .filter((m) => m.tenant_id === tenantId && (!opts.q || m.email.includes(opts.q.toLowerCase())))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
+    async insertMemberSession(row) {
+      const s: MemberSessionRow = { ...row, id: randomUUID(), created_at: now(), revoked_at: null };
+      sessions.set(s.id, s);
+      return clone(s);
+    },
+    async getMemberSessionByHash(hash) {
+      return clone([...sessions.values()].find((s) => s.token_hash === hash) ?? null);
+    },
+    async revokeMemberSession(tenantId, id) {
+      const s = sessions.get(id);
+      if (s && s.tenant_id === tenantId && !s.revoked_at) s.revoked_at = now();
+    },
+    async revokeAllMemberSessions(tenantId, memberId) {
+      let n = 0;
+      for (const s of sessions.values()) {
+        if (s.tenant_id === tenantId && s.member_id === memberId && !s.revoked_at) {
+          s.revoked_at = now();
+          n++;
+        }
+      }
+      return n;
+    },
+    async insertMemberToken(row) {
+      const t: MemberTokenRow = { ...row, id: randomUUID(), created_at: now(), used_at: null };
+      mtokens.set(t.id, t);
+    },
+    async consumeMemberToken(tenantId, hash, purpose, nowIso) {
+      const t = [...mtokens.values()].find((x) => x.token_hash === hash);
+      if (!t || t.tenant_id !== tenantId || t.purpose !== purpose || t.used_at || t.expires_at <= nowIso) return null;
+      t.used_at = nowIso;
+      return clone(t);
+    },
+
+    async listProducts(tenantId, opts) {
+      const rows = [...products.values()]
+        .filter((p) => p.tenant_id === tenantId && (!opts.status || p.status === opts.status))
+        .sort((a, b) => a.sort - b.sort || b.created_at.localeCompare(a.created_at));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
+    async getProductById(tenantId, id) {
+      const p = products.get(id);
+      return p && p.tenant_id === tenantId ? clone(p) : null;
+    },
+    async getProductBySlug(tenantId, slug) {
+      return clone([...products.values()].find((p) => p.tenant_id === tenantId && p.slug === slug) ?? null);
+    },
+    async getProductsByIds(tenantId, ids) {
+      return clone(ids.map((id) => products.get(id)).filter((p): p is ProductRow => !!p && p.tenant_id === tenantId));
+    },
+    async insertProduct(row) {
+      if ([...products.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) {
+        throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      }
+      const p: ProductRow = { ...row, id: randomUUID(), created_at: now(), updated_at: now() };
+      products.set(p.id, p);
+      return clone(p);
+    },
+    async updateProduct(tenantId, id, patch) {
+      const p = products.get(id);
+      if (!p || p.tenant_id !== tenantId) throw new Error("product not found");
+      if (patch.slug && [...products.values()].some((x) => x.id !== id && x.tenant_id === tenantId && x.slug === patch.slug)) {
+        throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      }
+      const next = { ...p, ...patch, updated_at: now() };
+      products.set(id, next);
+      return clone(next);
+    },
+    async listVariants(tenantId, productIds) {
+      return clone([...variants.values()].filter((v) => v.tenant_id === tenantId && productIds.includes(v.product_id)).sort((a, b) => a.sort - b.sort));
+    },
+    async replaceVariants(tenantId, productId, rows) {
+      for (const v of [...variants.values()]) if (v.tenant_id === tenantId && v.product_id === productId) variants.delete(v.id);
+      const out = rows.map((r) => ({ ...r, id: randomUUID(), tenant_id: tenantId, product_id: productId, created_at: now() }));
+      for (const v of out) variants.set(v.id, v);
+      return clone(out);
+    },
+
+    async placeOrder(tenantId, order, items, day) {
+      // 先全部檢查、再全部扣：等同 SQL 函式「任一不足整筆回滾」
+      const plan: { kind: "p" | "v"; id: string; qty: number; track: boolean }[] = [];
+      const need = new Map<string, number>();
+      for (const it of items) {
+        const p = products.get(it.product_id);
+        const v = it.variant_id ? variants.get(it.variant_id) : undefined;
+        const ok = p && p.tenant_id === tenantId && p.status === "published" && (!it.variant_id || (v && v.product_id === p.id && v.tenant_id === tenantId));
+        if (!ok) throw new ServiceError("conflict", `庫存不足或商品已下架：${it.name}。整筆訂單未成立，請調整數量後再試。`);
+        const key = it.variant_id ? `v:${it.variant_id}` : `p:${it.product_id}`;
+        const total = (need.get(key) ?? 0) + it.qty;
+        need.set(key, total);
+        const stock = it.variant_id ? v!.stock : p!.stock;
+        if (p!.track_inventory && stock < total) throw new ServiceError("conflict", `庫存不足或商品已下架：${it.name}。整筆訂單未成立，請調整數量後再試。`);
+        plan.push({ kind: it.variant_id ? "v" : "p", id: it.variant_id ?? it.product_id, qty: it.qty, track: p!.track_inventory });
+      }
+      for (const s of plan) {
+        if (!s.track) continue;
+        if (s.kind === "v") {
+          const v = variants.get(s.id)!;
+          variants.set(s.id, { ...v, stock: v.stock - s.qty });
+        } else {
+          const p = products.get(s.id)!;
+          products.set(s.id, { ...p, stock: p.stock - s.qty });
+        }
+      }
+      const ck = `${tenantId}|${day}`;
+      const n = (counters.get(ck) ?? 0) + 1;
+      counters.set(ck, n);
+      const orderNo = `${order.order_prefix}-${day}-${String(n).padStart(4, "0")}`;
+      const id = randomUUID();
+      const row: OrderRow = {
+        id,
+        tenant_id: tenantId,
+        order_no: orderNo,
+        member_id: order.member_id,
+        contact: clone(order.contact),
+        shipping: clone(order.shipping),
+        items: clone(items),
+        subtotal: order.subtotal,
+        shipping_fee: order.shipping_fee,
+        total: order.total,
+        status: "pending_payment",
+        payment_method: order.payment_method,
+        paid_at: null,
+        fulfilled_at: null,
+        cancelled_at: null,
+        cancel_reason: null,
+        expires_at: order.expires_at,
+        stock_released_at: null,
+        access_key_hash: order.access_key_hash,
+        note: order.note,
+        invoice_status: null,
+        shipping_method: null,
+        shipping_tracking: null,
+        created_at: now(),
+        updated_at: now(),
+      };
+      orders.set(id, row);
+      items.forEach((it, i) => orderItems.push({ ...clone(it), id: randomUUID(), tenant_id: tenantId, order_id: id, stock_deducted: plan[i]!.track }));
+      return { id, order_no: orderNo };
+    },
+    async getOrderById(tenantId, id) {
+      const o = orders.get(id);
+      return o && o.tenant_id === tenantId ? clone(o) : null;
+    },
+    async getOrderByNo(tenantId, orderNo) {
+      return clone([...orders.values()].find((o) => o.tenant_id === tenantId && o.order_no === orderNo) ?? null);
+    },
+    async listOrders(tenantId, opts) {
+      const rows = [...orders.values()]
+        .filter((o) => o.tenant_id === tenantId && (!opts.status || o.status === opts.status) && (!opts.memberId || o.member_id === opts.memberId))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
+    async listOrderItems(tenantId, orderId) {
+      return clone(orderItems.filter((i) => i.tenant_id === tenantId && i.order_id === orderId));
+    },
+    async transitionOrder(tenantId, id, from, to, patch) {
+      const o = orders.get(id);
+      if (!o || o.tenant_id !== tenantId || o.status !== from) return null;
+      const next = { ...o, ...patch, status: to, updated_at: now() };
+      orders.set(id, next);
+      return clone(next);
+    },
+    async cancelOrder(tenantId, id, from, reason) {
+      const o = orders.get(id);
+      if (!o || o.tenant_id !== tenantId || !from.includes(o.status)) return { transitioned: false, stockReleased: false };
+      orders.set(id, { ...o, status: "cancelled", cancelled_at: now(), cancel_reason: reason, updated_at: now() });
+      return { transitioned: true, stockReleased: releaseSync(tenantId, id) };
+    },
+    async releaseOrderStock(tenantId, id) {
+      return releaseSync(tenantId, id);
+    },
+    async listExpiredPendingOrders(nowIso, limit) {
+      return [...orders.values()]
+        .filter((o) => o.status === "pending_payment" && o.expires_at && o.expires_at < nowIso)
+        .slice(0, limit)
+        .map((o) => ({ id: o.id, tenant_id: o.tenant_id }));
+    },
+
+    async getPaymentAccount(tenantId, provider) {
+      return clone(accounts.get(`${tenantId}|${provider}`) ?? null);
+    },
+    async upsertPaymentAccount(row) {
+      const k = `${row.tenant_id}|${row.provider}`;
+      const prev = accounts.get(k);
+      const next: PaymentAccountRow = {
+        id: prev?.id ?? randomUUID(),
+        created_at: prev?.created_at ?? now(),
+        ...row,
+        status: "unverified",
+        verified_at: null,
+        last_error: null,
+        updated_at: now(),
+      };
+      accounts.set(k, next);
+      return clone(next);
+    },
+    async markPaymentAccount(tenantId, provider, patch) {
+      const k = `${tenantId}|${provider}`;
+      const a = accounts.get(k);
+      if (a) accounts.set(k, { ...a, ...patch, updated_at: now() });
+    },
+    async insertPayment(row) {
+      if ([...payments.values()].some((p) => p.gateway_order_no === row.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
+      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, created_at: now(), updated_at: now() };
+      payments.set(p.id, p);
+      return clone(p);
+    },
+    async getPaymentByGatewayNo(no) {
+      return clone([...payments.values()].find((p) => p.gateway_order_no === no) ?? null);
+    },
+    async listPaymentsForOrder(tenantId, orderId) {
+      return clone([...payments.values()].filter((p) => p.tenant_id === tenantId && p.order_id === orderId));
+    },
+    async updatePayment(tenantId, id, patch) {
+      const p = payments.get(id);
+      if (p && p.tenant_id === tenantId) payments.set(id, { ...p, ...patch, updated_at: now() });
+    },
+    async transitionPayment(tenantId, id, from, to, patch) {
+      const p = payments.get(id);
+      if (!p || p.tenant_id !== tenantId || p.status !== from) return false;
+      payments.set(id, { ...p, ...patch, status: to, updated_at: now() });
+      return true;
+    },
+  };
+  return store;
+}

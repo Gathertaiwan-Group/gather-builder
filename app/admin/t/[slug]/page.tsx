@@ -9,6 +9,7 @@ import { getTenantBySlugAdmin, listAuditLog } from "@/lib/services/admin";
 import { TENANT_SCOPES } from "@/lib/scopes";
 import { ServiceError } from "@/lib/services/context";
 import { TokenTable } from "@/components/admin/TokenTable";
+import { TenantTabs } from "@/components/admin/TenantTabs";
 
 export const dynamic = "force-dynamic";
 
@@ -28,9 +29,7 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
   ]);
   return (
     <AdminShell sp={sp}>
-      <h1 className="mb-1 mt-0 text-2xl font-bold">
-        {site.name} <span className="text-base font-normal text-neutral-500">/{site.slug}</span>
-      </h1>
+      <TenantTabs slug={slug} active="" name={site.name} />
       <p className="mb-6 mt-0 text-sm text-neutral-600">
         狀態 {site.status} · 已發布版本 {site.publishedRevision ?? "無"} · <a href={site.publicUrl}>前台</a>
         {pv && (

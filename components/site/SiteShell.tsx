@@ -40,6 +40,16 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
                 {n.label}
               </a>
             ))}
+            {moduleActive(site, "shop") && (
+              <a href={siteHref(ctx, "/checkout")} className="no-underline" style={{ color: "var(--gb-text)" }} data-gb="cart-link">
+                購物車
+              </a>
+            )}
+            {moduleActive(site, "members") && (
+              <a href={siteHref(ctx, "/account")} className="no-underline" style={{ color: "var(--gb-text)" }} data-gb="account-link">
+                會員
+              </a>
+            )}
           </nav>
         </div>
       </header>

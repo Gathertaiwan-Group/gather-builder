@@ -4,6 +4,8 @@ import { PostsList } from "./blog/sections";
 import { PortfolioGrid } from "./portfolio/sections";
 import { ContactForm } from "./contact-form/sections";
 import { LineButton } from "./line/sections";
+import { AccountCta } from "./members/sections";
+import { ProductDetail, ProductGrid } from "./shop/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -18,4 +20,7 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   portfolio_grid: PortfolioGrid,
   contact_form: ContactForm,
   line_button: LineButton,
+  account_cta: AccountCta,
+  product_grid: ProductGrid,
+  product_detail: ProductDetail,
 };

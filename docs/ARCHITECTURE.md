@@ -39,12 +39,48 @@
 
 - MCP：`Authorization: Bearer <token>` → `authenticateBearer()` 比對 `builder_api_tokens.token_hash`（sha256，原文只在建立時顯示一次）、未撤銷 → `Actor { tenantId, scopes }`，更新 `last_used_at`。
 - 刻意不做 OAuth 流程、不提供 `/.well-known/oauth-*`、401 不帶 `resource_metadata`（避免客戶端誤走 OAuth discovery）。
-- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`（`lib/scopes.ts`）。
+- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
 - 預覽連結：HMAC-SHA256 簽 `{ tenantId, exp }`，1 小時有效（`lib/preview.ts`）。
 - 後台：單一密碼 → HMAC cookie（`lib/adminAuth.ts`），middleware 擋 `/admin` 與 `/api/admin`，頁面與 API 再驗一次；後台 POST 檢查 Origin 防 CSRF。
 - token 發行：發出的 scopes 必須是呼叫者 scopes 的子集（`issue_site_token` 超出直接拒絕；`create_site` 取交集，沒有任何網站 scope 就不發）。
-- 限流：`builder_rate_limits` ＋ SQL 函式 `builder_rate_hit`（固定時間窗，`insert … on conflict … returning` 原子計數，跨 serverless 實例有效）。用在聯絡表單（每 IP 每小時，預設 5，被擋的不寫入不寄信）、LINE 點擊（每 IP 每 10 分鐘 30）、後台登入（每 IP 每 15 分鐘 10 次嘗試）。
+- 限流：`builder_rate_limits` ＋ SQL 函式 `builder_rate_hit`（固定時間窗，`insert … on conflict … returning` 原子計數，跨 serverless 實例有效）。用在聯絡表單（每 IP 每小時，預設 5，被擋的不寫入不寄信）、LINE 點擊（每 IP 每 10 分鐘 30）、後台登入（每 IP 每 15 分鐘 10 次嘗試）、會員登入／註冊／忘記密碼（見「會員」）、結帳（每 IP 每小時 20）、計價（每 IP 每 10 分鐘 120）。
 - 錯誤：MCP 只回 `ServiceError` 的訊息；其他內部錯誤只記 server log，回客戶端通用訊息＋追查碼。unique 衝突轉成 `conflict`「資料重複」。
+
+## 會員（members 模組）
+
+平台自管帳號，**不用 Supabase Auth**（共用專案還住著其他客戶站）。
+
+- **隔離**：帳號唯一性是 `(tenant_id, email)`，同一個 email 在不同網站是不同帳號、不同密碼。session cookie 名為 `gbm_<tenant id 前 12 碼>`、`Path=/s/<slug>`、HttpOnly、SameSite=Lax、prod 加 Secure，瀏覽器不會把 A 站 cookie 送到 B 站；server 端另外比對 `session.tenant_id === 目前網站`，cookie 被搬到別站也無效。
+- **儲存**：密碼 scrypt（N=16384, r=8, p=1，每人 16 bytes salt），格式 `scrypt$N$r$p$salt$hash`（參數在字串裡，日後可升級）。session、驗證信、重設密碼 token 都只存 sha256；token 一次性（條件更新 `used_at is null and expires_at > now`），驗證信 48 小時、重設 1 小時。
+- **防枚舉**：登入失敗（不存在／密碼錯／停用）一律「Email 或密碼錯誤」，帳號不存在時也跑一次同成本的雜湊；註冊已存在的 email 回同一句話（另寄提醒信給帳號本人）；忘記密碼一律回同一句話。
+- **限流**（`builder_rate_hit`）：登入每 IP 10 次／15 分＋每 email 10 次／15 分、註冊每 IP 5 次／小時、忘記密碼每 IP 5 次＋每 email 3 次／小時、重設每 IP 10 次／小時。
+- 重設密碼成功 → 撤銷該會員所有 session；停用會員 → 同樣撤銷。登出撤銷該筆 session。
+- 公開 POST 在 `app/s/[site]/api/account/*`（必須在 `/s/<slug>` 底下才收得到 cookie），檢查 Origin、303 回頁面帶訊息。
+- 寄信走 `lib/mail.ts`（Resend）；**沒設 `RESEND_API_KEY` 時不報錯，把信件內容（含連結）寫進 server log**——只適合本機，正式站要設 Resend。
+
+## 電商（shop 模組）
+
+- **計價**：`priceCart()` 是唯一的計價入口，前端只送 `{productId, variantId, qty}`，價格、運費、總額全部依 DB 重算（多送的 price/total 欄位直接丟掉）。購物車存在瀏覽器 localStorage，結帳頁顯示的金額也是呼叫 `/s/<slug>/api/shop/quote` 由 server 算的。
+- **下單**：SQL 函式 `builder_place_order`（單一交易）：逐項 `update … set stock = stock - qty where stock >= qty`（只有 `track_inventory` 的商品扣），任一不足就 raise、整筆回滾；同交易內遞增 `builder_order_counters` 產生 `<前綴>-YYYYMMDD-####`（台北日期）並寫入訂單與明細（明細記錄 `stock_deducted`，回補只補真的扣過的）。
+- **狀態機**：`lib/shop/machine.ts` 是唯一的轉換表（待付款→已付款/取消、已付款→出貨/取消，fulfilled／cancelled 為終點）；寫入一律條件式（`where status = from`），併發只有一個成功。
+- **取消與逾期**：`builder_cancel_order` 在同一交易內轉 cancelled ＋ 呼叫 `builder_release_order_stock`；回補以 `stock_released_at is null` 條件更新為冪等旗標，重複取消／重複回補不會多補。逾期未付（預設 72 小時）在讀取訂單時 lazy 處理，另有每日 cron `/api/cron/expire-orders`（`CRON_SECRET`，Vercel Hobby 只能每日）。
+- **訂單頁存取**：`/s/<slug>/orders/<編號>?k=<存取金鑰>`（DB 只存 sha256），或下單會員本人登入後直接看。頁面 `noindex`、`no-referrer`。
+
+## 金流（PChomePay，每個租戶自己的商家帳號）
+
+- **憑證**：`builder_payment_accounts`，secret 以 AES-256-GCM 加密（`lib/secretbox.ts`，金鑰 env `PAYMENT_ENC_KEY` 32 bytes；密文格式 `v1.<kid>.<iv>.<tag>.<ct>`，AAD 綁 tenant_id，複製到別的租戶解不開）。**只能從平台後台「金流設定」表單輸入**（服務層檢查 `actor.kind === "admin"`）；MCP 沒有任何設定或讀出 secret／app_id 的工具，`get_payment_setup_status` 只回狀態與遮罩後的 app_id。按「驗證」用該組憑證打 `/v1/token`（sandbox 憑證打 sandbox 端點）。
+- **token 快取**以租戶為鍵（並比對 app_id／環境），過期前 60 秒重換，API 回 401 清快取重換一次。
+- **流程**：結帳 → `builder_place_order` → 建 `builder_payments`（`gateway_order_no` 唯一，英數 ≤20）→ `POST /v1/payment` → 303 到 `payment_url`。金流建單失敗 → 取消訂單並回補庫存。金額 < NT$30 不能選線上付款。
+- **return_url** = 訂單頁：只顯示狀態、待付款時每 5 秒刷新，**不在 return 上改任何狀態**。
+- **notify** `/api/pay/pchomepay/notify/<tenantId>` 安全規則（`handlePchomepayNotify`）：
+  1. notify 沒有簽章 → 絕不信 payload，只取 `order_id` 當查詢鍵；付款紀錄的 tenant 必須等於路徑上的 tenant。
+  2. 一律用「該租戶自己的憑證」`GET /v1/payment/{order_id}` 回查；`status_code ∈ {S,00,1}` 才算付款。
+  3. 權威金額 round 後必須等於付款紀錄與訂單總額，不符不標記（回 success、寫 log）。
+  4. 回查失敗或缺金額 → 回 500 讓對方重試；其餘處理完一律回純文字 `success`。
+  5. 條件式轉換 `pending_payment → paid`：只有真正轉換成功的那一次寄付款成功信（客人＋店主），重複／併發 notify 冪等。
+  6. 訂單已取消（含逾期）卻收到付款 → 不改訂單、付款標 `paid_after_cancel`、寫 error log、寄店主警示（需人工退款），警示只寄一次。
+- **線下匯款**：訂單 pending_payment，店主在後台或 MCP `mark_order_paid`（`orders:write`＋confirm）；PChomePay 訂單不能手動標記。
+- 🔴 規則：正式金鑰不准拿來測試；`scripts/e2e-pchomepay-sandbox.mjs` 只允許 localhost＋sandbox，且不跟隨付款頁。notify 用單元／整合測試模擬（mock 回查結果）。
 
 ## 已知風險（第一版刻意不處理）
 
@@ -52,6 +88,10 @@
 |---|---|---|
 | 後台 session 無法單獨撤銷 | cookie 是無狀態 HMAC（12 小時），登出只刪自己瀏覽器的 cookie；外洩的 cookie 在到期前都有效。緊急時只能換 `ADMIN_SESSION_SECRET`（全部登出）。 | 改成 DB session 表（`builder_admin_sessions`，cookie 只放隨機 id），可逐筆撤銷；或換成正式身分系統（多使用者＋2FA）。 |
 | 前台與後台同源 | 租戶網站 `/s/<slug>` 與 `/admin` 同一個 origin。租戶內容雖然不能放程式碼（Markdown 轉義、URL 白名單、props strict），但若未來區塊出現 XSS，就能直接帶著後台 cookie 呼叫 `/api/admin`。 | 後台移到獨立子網域（例如 `admin.builder.gather.tw`，cookie 不設 Domain），租戶網站走子網域／自有網域；再加 CSP。 |
+| 會員信件依賴 Resend | 沒設 `RESEND_API_KEY` 時驗證／重設連結只寫 server log（正式站 log 會含一次性連結）。 | 正式站一定要設 Resend；長期改成每個租戶自己的寄件網域。 |
+| 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
+| 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |
+| 會員密碼重設只寄信 | 沒有「登入中改密碼」頁、沒有 2FA。 | 會員中心加改密碼（需舊密碼）＋ email 變更流程。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點

@@ -1,7 +1,7 @@
 import type { SiteContent } from "./content";
 import { verifyPreviewToken } from "./preview";
 import { getStore } from "./store";
-import type { TenantModuleRow, TenantRow } from "./store/types";
+import type { Store, TenantModuleRow, TenantRow } from "./store/types";
 
 export interface LoadedSite {
   tenant: TenantRow;
@@ -18,8 +18,7 @@ export interface LoadedSite {
  * 前台讀取：預設讀「已發布快照」；帶有效簽章 preview token 時讀草稿。
  * 全部走 no-store 的 Supabase client（見 lib/store/supabase.ts），發布後立即生效。
  */
-export async function loadSite(slug: string, previewToken?: string | null): Promise<LoadedSite | null> {
-  const store = getStore();
+export async function loadSite(slug: string, previewToken?: string | null, store: Store = getStore()): Promise<LoadedSite | null> {
   const tenant = await store.getTenantBySlug(slug);
   if (!tenant || tenant.status === "suspended") return null;
   const modules = new Map((await store.listTenantModules(tenant.id)).map((m) => [m.module_id, m]));

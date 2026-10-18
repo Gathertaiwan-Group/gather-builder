@@ -1,0 +1,74 @@
+import { notFound } from "next/navigation";
+import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
+import { TenantTabs } from "@/components/admin/TenantTabs";
+import { adminContext, requireAdminPage } from "@/lib/adminServer";
+import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { getPaymentSetupStatus } from "@/lib/services/orders";
+import { ServiceError } from "@/lib/services/context";
+
+export const dynamic = "force-dynamic";
+
+export default async function PaymentsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
+  await requireAdminPage();
+  const [{ slug }, sp] = await Promise.all([params, searchParams]);
+  const ctx = adminContext();
+  const tenant = await getTenantBySlugAdmin(ctx, slug);
+  if (!tenant) notFound();
+  const st = await getPaymentSetupStatus(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
+  const base = `/api/admin/tenants/${slug}/payment-account`;
+  return (
+    <AdminShell sp={sp}>
+      <TenantTabs slug={slug} active="/payments" name={tenant.name} />
+      {"error" in st ? (
+        <Card title="金流設定">
+          <p className="m-0 text-sm text-neutral-600">{st.error}</p>
+        </Card>
+      ) : (
+        <>
+          <Card title="PChomePay 支付連">
+            <div className="text-sm" data-admin="payment-status">
+              <p className="mt-0">
+                shop 模組狀態：<strong>{st.shopModuleStatus}</strong>
+                {" · "}
+                {st.pchomepay.configured ? (
+                  <>
+                    憑證 <strong data-admin="payment-account-status">{st.pchomepay.status === "verified" ? "已驗證" : "未驗證"}</strong>
+                    {"sandbox" in st.pchomepay && (st.pchomepay.sandbox ? "（測試環境 sandbox）" : "（正式環境）")} · APP ID {"appId" in st.pchomepay ? st.pchomepay.appId : ""}
+                    {"verifiedAt" in st.pchomepay && st.pchomepay.verifiedAt && <> · 驗證於 {fmt(st.pchomepay.verifiedAt)}</>}
+                  </>
+                ) : (
+                  "尚未設定憑證"
+                )}
+              </p>
+              {"lastError" in st.pchomepay && st.pchomepay.lastError && <p className="text-red-700">上次驗證失敗：{st.pchomepay.lastError}</p>}
+              <p className="text-neutral-600">線下匯款：{st.offlineTransfer.enabled ? "已開放（設定在 shop 模組 offlineTransfer）" : "未開放"}</p>
+            </div>
+            {st.pchomepay.configured && (
+              <form action={`${base}/verify`} method="post" className="mb-4">
+                <button className="rounded bg-neutral-900 px-3 py-1 text-sm text-white" type="submit">
+                  驗證憑證
+                </button>
+              </form>
+            )}
+            <form action={base} method="post" className="flex flex-col gap-2 text-sm" autoComplete="off">
+              <p className="m-0 font-semibold">{st.pchomepay.configured ? "更換憑證" : "輸入憑證"}</p>
+              <p className="m-0 text-xs text-neutral-600">
+                金鑰只在這裡輸入，以 AES-256-GCM 加密存放，任何頁面與 MCP 都讀不到原文。測試金鑰只能用測試環境、正式金鑰只能用正式環境。更換後需重新驗證。
+              </p>
+              <input name="appId" required placeholder="APP ID" className="rounded border px-3 py-1" autoComplete="off" />
+              <input name="secret" required type="password" placeholder="SECRET" className="rounded border px-3 py-1" autoComplete="new-password" />
+              <label className="flex items-center gap-1">
+                <input type="checkbox" name="sandbox" defaultChecked /> 測試環境（sandbox）
+              </label>
+              <div>
+                <button className="rounded bg-neutral-900 px-3 py-1 text-white" type="submit">
+                  儲存（加密）
+                </button>
+              </div>
+            </form>
+          </Card>
+        </>
+      )}
+    </AdminShell>
+  );
+}

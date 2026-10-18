@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
+import { createMemoryCommerceStore } from "./memory-commerce";
 import type {
   AuditRow,
   DraftRow,
@@ -31,6 +32,7 @@ export function createMemoryStore(): Store {
   const rate = new Map<string, number>();
 
   return {
+    ...createMemoryCommerceStore(),
     async getTenantBySlug(slug) {
       return clone([...tenants.values()].find((t) => t.slug === slug) ?? null);
     },

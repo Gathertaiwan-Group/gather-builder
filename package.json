@@ -11,7 +11,7 @@
     "test": "vitest run",
     "migrate": "node scripts/apply-migrations.mjs",
     "e2e:mcp": "node scripts/e2e-mcp.mjs",
-    "test:db": "node --env-file=.env.local node_modules/vitest/vitest.mjs run tests/integration"
+    "test:db": "node --env-file=.env.local node_modules/vitest/vitest.mjs run tests/integration --testTimeout=60000 --no-file-parallelism"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",

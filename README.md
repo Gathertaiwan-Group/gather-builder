@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台第一版：骨架＋形象站模組＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。
@@ -24,6 +24,8 @@ npm run dev                  # http://localhost:3000
 | `node --env-file=.env.local scripts/issue-platform-token.mjs "名稱" --save-env .env.local` | 發行平台級 MCP token（原文寫入 env 檔，不印在終端） |
 | `node --env-file=.env.local scripts/e2e-mcp.mjs http://localhost:3100` | MCP 端到端（開站→改→發布→改版→還原）；`--quick` 為精簡版 |
 | `node --env-file=.env.local scripts/e2e-security.mjs http://localhost:3100` | 隔離、scope、401、聯絡表單、honeypot、限流、後台撤銷 token |
+| `node --env-file=.env.local scripts/e2e-shop.mjs http://localhost:3100` | 會員＋電商端到端（開站→商品→會員註冊/登入→結帳（線下匯款）→收款→出貨→會員中心）；`--quick` 為正式站精簡版 |
+| `PCHOMEPAY_SANDBOX_APP_ID=… PCHOMEPAY_SANDBOX_SECRET=… node --env-file=.env.local scripts/e2e-pchomepay-sandbox.mjs http://localhost:3100` | 只限本機＋sandbox：後台輸入測試金鑰→驗證→結帳 303 到 sandbox 付款頁（不刷卡） |
 
 ## 環境變數
 
@@ -37,6 +39,8 @@ npm run dev                  # http://localhost:3000
 | `APP_URL` | 建議 | 對外網址，用來產生預覽連結；沒設就用 request 的 host |
 | `RESEND_API_KEY` | 選填 | 有設才寄聯絡表單通知信（收件人在 contact-form 模組設定 `notifyEmail`） |
 | `RESEND_FROM` | 選填 | 寄件者 |
+| `PAYMENT_ENC_KEY` | shop 必要 | 金流憑證加密金鑰（32 bytes，base64 或 64 位 hex，`openssl rand -base64 32`）。換掉會讓既有憑證解不開（需重新輸入） |
+| `CRON_SECRET` | shop 建議 | 每日逾期訂單 cron（`/api/cron/expire-orders`）的 Bearer 金鑰（≥16 字） |
 | `SUPABASE_ACCESS_TOKEN` | 只給 migrate 腳本 | Management API token，**不要**放進 Vercel 或 repo |
 | `GB_PLATFORM_TOKEN` | 只給 e2e 腳本 | 平台級 MCP token |
 

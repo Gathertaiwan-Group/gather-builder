@@ -4,6 +4,7 @@ import { defaultContent, findPage, normalizePath, type NavItem, type SiteContent
 import { MODULES, findSectionType, getModule, resolveDependencies, validateSectionProps, DependencyError } from "@/modules/registry";
 import { THEME_PRESETS, themeOverridesSchema } from "../themes";
 import { generateToken } from "../tokens";
+import { adjustModuleStatus } from "../shop/status";
 import { TENANT_SCOPES } from "../scopes";
 import { createPreviewToken } from "../preview";
 import { pagePath, siteSlug, text } from "../validators";
@@ -76,7 +77,7 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
   const statuses: { id: string; status: string }[] = [];
   for (const id of moduleIds) {
     const m = getModule(id)!;
-    const status = m.settingsSchema.safeParse({}).success ? "enabled" : "pending_setup";
+    const status = await adjustModuleStatus(ctx.store, tenant.id, id, m.settingsSchema.safeParse({}).success ? "enabled" : "pending_setup");
     await ctx.store.upsertTenantModule({ tenant_id: tenant.id, module_id: id, status, config: {}, enabled_at: now });
     statuses.push({ id, status });
   }

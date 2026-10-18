@@ -7,6 +7,9 @@ import * as publish from "../services/publish";
 import * as posts from "../services/posts";
 import * as inquiries from "../services/inquiries";
 import * as tokens from "../services/tokens";
+import * as members from "../services/members";
+import * as shop from "../services/shop";
+import * as orders from "../services/orders";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -190,7 +193,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   server.registerTool(
     "upsert_page",
     {
-      description: "新增或更新草稿頁面（標題、SEO）。新頁面沒有區塊，之後用 add_section 加。路徑 /blog 由部落格模組保留。需要 content:write。",
+      description: "新增或更新草稿頁面（標題、SEO）。新頁面沒有區塊，之後用 add_section 加。路徑 /blog、/shop、/checkout、/account、/orders、/api 由模組保留。需要 content:write。",
       inputSchema: {
         site,
         path,
@@ -272,7 +275,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     "configure_module",
     {
       description:
-        "設定模組（依模組的 settingsSchema 驗證）。設定存進草稿，preview_changes → publish_site 後才對外生效。例：core {ga4MeasurementId, siteDescription, defaultOgImage, footerText}；contact-form {notifyEmail, rateLimitPerHour}；line {lineUrl, floating, floatingLabel}；blog {listTitle, postsPerPage}。預設與現有設定合併。需要 modules:write。",
+        "設定模組（依模組的 settingsSchema 驗證）。設定存進草稿，preview_changes → publish_site 後才對外生效。例：core {ga4MeasurementId, siteDescription, defaultOgImage, footerText}；contact-form {notifyEmail, rateLimitPerHour}；line {lineUrl, floating, floatingLabel}；blog {listTitle, postsPerPage}；members {allowRegistration}；shop {shippingFee, freeShippingThreshold, ownerEmail, orderPrefix, orderExpireHours, allowGuestCheckout, offlineTransfer:{enabled, instructions}, pchomepay}（金流金鑰不在這裡，只能從後台輸入）。預設與現有設定合併。需要 modules:write。",
       inputSchema: {
         site,
         moduleId: z.string(),
@@ -413,6 +416,184 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: RO,
     },
     wrap(async (a) => inquiries.listInquiries(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 會員（members 模組） */
+
+  server.registerTool(
+    "list_members",
+    {
+      description: "列出此網站的會員（Email、姓名、電話、狀態、是否驗證、註冊與最後登入時間）。不含密碼雜湊；沒有任何改密碼的工具。會員資料屬個資，只轉達給網站主。需要 members:read。",
+      inputSchema: { site, limit: z.number().int().optional().describe("預設 20，最多 100"), offset: z.number().int().optional(), q: z.string().optional().describe("Email 關鍵字") },
+      annotations: RO,
+    },
+    wrap(async (a) => members.listMembers(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_member",
+    {
+      description: "取得單一會員資料（用 memberId 或 email），含訂單數。不含密碼雜湊。需要 members:read。",
+      inputSchema: { site, memberId: z.string().optional(), email: z.string().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => members.getMember(ctx, a)),
+  );
+
+  server.registerTool(
+    "disable_member",
+    {
+      description: "停用會員：之後無法登入，現有登入全部失效。必須先讓使用者確認並帶 confirm: true。需要 members:write。",
+      inputSchema: { site, memberId: z.string(), confirm: z.boolean().optional().describe("使用者確認後才設 true") },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => members.setMemberStatus(ctx, { ...a, status: "disabled" })),
+  );
+
+  /* ------------------------------------------------------------ 商品（shop 模組） */
+
+  const variantSchema = z.object({
+    options: z.record(z.string(), z.string()).describe("規格選項，例如 {\"尺寸\":\"M\",\"顏色\":\"黑\"}"),
+    price: z.number().int().optional().describe("此規格價格（省略則沿用商品價格）"),
+    sku: z.string().optional(),
+    stock: z.number().int().optional(),
+  });
+
+  server.registerTool(
+    "create_product",
+    {
+      description:
+        "新增商品（需 shop 模組）。價格為新台幣整數。status 預設 draft（不公開）；設 published 會立即上架，另需 publish scope 並帶 confirm: true（使用者確認後）。descriptionMd 為 Markdown。trackInventory=true 時下單會原子扣庫存、售完不能下單。需要 commerce:write。",
+      inputSchema: {
+        site,
+        slug: z.string().describe("商品網址代號，小寫英數與連字號，前台網址 /shop/<slug>"),
+        name: z.string(),
+        price: z.number().int().describe("售價（NT$ 整數）"),
+        compareAtPrice: z.number().int().optional().describe("原價（劃線價）"),
+        descriptionMd: z.string().optional(),
+        images: z.array(z.string()).optional().describe("圖片 https 網址，第一張為主圖"),
+        sku: z.string().optional(),
+        trackInventory: z.boolean().optional(),
+        stock: z.number().int().optional(),
+        sort: z.number().int().optional().describe("排序，小的在前"),
+        variants: z.array(variantSchema).optional().describe("規格（有規格時客人必須選一個，庫存以規格計）"),
+        status: z.enum(["draft", "published"]).optional(),
+        confirm: z.boolean().optional().describe("status 為 published 時必填 true"),
+      },
+      annotations: WRITE,
+    },
+    wrap(async (a) => shop.createProduct(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_product",
+    {
+      description:
+        "修改商品（productId 或 slug 指定），只傳要改的欄位；variants 若有給則整份取代。草稿商品只需 commerce:write；已上架商品的任何修改、上架、下架都會立即影響線上，需要 publish scope 並帶 confirm: true。",
+      inputSchema: {
+        site,
+        productId: z.string().optional(),
+        slug: z.string().optional().describe("目前的 slug（與 productId 二擇一）"),
+        patch: z
+          .object({
+            slug: z.string().optional(),
+            name: z.string().optional(),
+            price: z.number().int().optional(),
+            compareAtPrice: z.number().int().nullable().optional(),
+            descriptionMd: z.string().optional(),
+            images: z.array(z.string()).optional(),
+            sku: z.string().optional(),
+            trackInventory: z.boolean().optional(),
+            stock: z.number().int().optional(),
+            sort: z.number().int().optional(),
+            variants: z.array(variantSchema).optional(),
+            status: z.enum(["draft", "published"]).optional(),
+          })
+          .describe("要修改的欄位"),
+        confirm: z.boolean().optional().describe("影響已上架商品時必填 true"),
+      },
+      annotations: WRITE,
+    },
+    wrap(async (a) => shop.updateProduct(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_products",
+    {
+      description: "列出商品（id、slug、名稱、狀態、價格、庫存、規格）。需要 site:read。",
+      inputSchema: { site, status: z.enum(["draft", "published"]).optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => shop.listProducts(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 訂單 */
+
+  const orderRef = {
+    orderId: z.string().optional(),
+    orderNo: z.string().optional().describe("訂單編號，例如 LIN-20261018-0001（與 orderId 二擇一）"),
+  };
+
+  server.registerTool(
+    "list_orders",
+    {
+      description: "列出訂單（最新在前）：編號、狀態（pending_payment 待付款／paid 已付款／fulfilled 已出貨／cancelled 已取消）、付款方式、金額、訂購人。逾期未付的訂單會在讀取時自動取消並回補庫存。需要 orders:read。",
+      inputSchema: { site, status: z.enum(["pending_payment", "paid", "fulfilled", "cancelled"]).optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => orders.listOrders(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_order",
+    {
+      description: "訂單明細：品項、金額、訂購人與收件資料（個資，只轉達給網站主）、付款紀錄狀態、下一步可做的動作（allowedNext）。需要 orders:read。",
+      inputSchema: { site, ...orderRef },
+      annotations: RO,
+    },
+    wrap(async (a) => orders.getOrder(ctx, a)),
+  );
+
+  server.registerTool(
+    "mark_order_paid",
+    {
+      description: "線下匯款訂單「標記已收款」（待付款 → 已付款），會寄付款成功通知。只限線下匯款訂單（PChomePay 訂單由金流通知自動更新）。必須先讓使用者確認款項已入帳，再帶 confirm: true。需要 orders:write。",
+      inputSchema: { site, ...orderRef, confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => orders.markOrderPaid(ctx, a)),
+  );
+
+  server.registerTool(
+    "fulfill_order",
+    {
+      description: "已付款訂單標記為已出貨（可帶物流單號），會通知客人。必須帶 confirm: true。需要 orders:write。",
+      inputSchema: { site, ...orderRef, trackingNumber: z.string().optional(), shippingMethod: z.string().optional(), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => orders.fulfillOrder(ctx, a)),
+  );
+
+  server.registerTool(
+    "cancel_order",
+    {
+      description:
+        "取消訂單（待付款或已付款），會回補庫存且無法復原。🔴 已付款訂單取消「不會自動退款」：PChomePay 訂單需到 PChomePay 商家後台人工退款，線下匯款需自行退款——回傳的 note 會說明。必須帶 confirm: true。需要 orders:write。",
+      inputSchema: { site, ...orderRef, reason: z.string().optional(), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => orders.cancelOrder(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_payment_setup_status",
+    {
+      description:
+        "查金流設定狀態：PChomePay 憑證是否已設定／驗證、測試或正式環境、shop 模組狀態、是否開放線下匯款。🔴 只能查狀態：金鑰只能由平台擁有者在後台輸入，MCP 沒有設定或讀出金鑰的工具（請勿要求使用者在對話中貼金鑰）。需要 orders:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => orders.getPaymentSetupStatus(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

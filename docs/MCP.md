@@ -23,6 +23,13 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 | `modules:write` | 啟用／停用／設定模組 |
 | `publish` | `publish_site`、`rollback`；文章／作品的公開、修改已公開項目、下架（都還要 `confirm: true`） |
 | `inquiries:read` | 讀聯絡表單詢問（個資） |
+| `members:read` | 讀會員列表與資料（個資；不含密碼雜湊） |
+| `members:write` | 停用會員（需 `confirm: true`） |
+| `commerce:write` | 建立／修改商品（上架、改已上架商品、下架另需 `publish` ＋ `confirm: true`） |
+| `orders:read` | 讀訂單（含收件個資）、金流設定狀態 |
+| `orders:write` | 標記已收款（線下匯款）、出貨、取消（都需 `confirm: true`） |
+
+> 新 scope 是 2026-10 加的：之前發行的 token 沒有這些 scope，需重新發行（`create_site` 發出的 token 取呼叫者 scope 的交集）。
 
 ## 在 Claude Code 連線
 
@@ -53,6 +60,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 6. 「我想看看」→ `preview_changes`（給預覽網址，約 1 小時有效）
 7. 「OK 發布」→ `publish_site { confirm: true, expectedDraftVersion: <preview_changes 回的 draftVersion> }`
 8. 「改壞了，回到上一版」→ `list_revisions` → `rollback { number, confirm: true }`
+9. 「我要開始賣東西」→ `enable_module shop`（members 自動帶入）→ `configure_module shop { offlineTransfer, shippingFee, ownerEmail }` → `create_product`（上架要 confirm）→ `add_section product_grid` → 預覽、發布。線上刷卡要請平台擁有者到後台「金流設定」輸入 PChomePay 金鑰並驗證（`get_payment_setup_status` 可查進度）。
+10. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
 
@@ -78,6 +87,15 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `create_post` / `update_post` / `list_posts` | content:write / site:read | 部落格文章。公開或改已公開文章另需 publish ＋ `confirm: true` |
 | `create_portfolio_item` / `update_portfolio_item` / `list_portfolio_items` | content:write / site:read | 作品集（預設 draft）。公開或改已公開作品另需 publish ＋ `confirm: true` |
 | `list_inquiries` | inquiries:read | 聯絡表單詢問 |
+| `list_members` / `get_member` | members:read | 會員（不回傳密碼雜湊；沒有任何改密碼的工具） |
+| `disable_member` | members:write | 停用會員並撤銷所有登入（**必須** `confirm: true`） |
+| `create_product` / `update_product` | commerce:write | 商品（價格 NT$ 整數、規格、庫存）。上架或改已上架商品另需 publish ＋ `confirm: true` |
+| `list_products` | site:read | 商品列表（含規格與庫存） |
+| `list_orders` / `get_order` | orders:read | 訂單（逾期未付會在讀取時自動取消並回補庫存） |
+| `mark_order_paid` | orders:write | 線下匯款訂單標記已收款（**必須** `confirm: true`；PChomePay 訂單由 notify 回查自動更新，不能手動標） |
+| `fulfill_order` | orders:write | 已付款 → 已出貨（可帶物流單號，`confirm: true`） |
+| `cancel_order` | orders:write | 取消並回補庫存（`confirm: true`）；已付款訂單**不會自動退款**，回傳 note 會提示人工退款 |
+| `get_payment_setup_status` | orders:read | 金流設定狀態（是否已驗證、sandbox／正式、遮罩後的 APP ID）。🔴 **沒有**設定或讀出金鑰的工具：金鑰只能由平台擁有者在後台輸入 |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

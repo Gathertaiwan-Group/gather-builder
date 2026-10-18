@@ -7,6 +7,11 @@ export const SCOPES = {
   "modules:write": "啟用、停用、設定模組",
   publish: "預覽差異、發布草稿、還原版本",
   "inquiries:read": "讀取聯絡表單詢問",
+  "members:read": "讀取會員列表與會員資料（不含密碼雜湊）",
+  "members:write": "停用會員（需 confirm）",
+  "commerce:write": "建立與修改商品（上架／修改已上架商品另需 publish ＋ confirm）",
+  "orders:read": "讀取訂單（含收件個資）與金流設定狀態",
+  "orders:write": "標記已收款、出貨、取消訂單（都需 confirm）",
 } as const;
 
 export type Scope = keyof typeof SCOPES;

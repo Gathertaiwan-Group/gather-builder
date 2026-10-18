@@ -25,7 +25,7 @@ const row = {
   name,
   token_hash: createHash("sha256").update(raw).digest("hex"),
   token_prefix: raw.slice(0, 10),
-  scopes: ["platform:sites", "site:read", "content:write", "design:write", "modules:write", "publish", "inquiries:read"],
+  scopes: ["platform:sites", "site:read", "content:write", "design:write", "modules:write", "publish", "inquiries:read", "members:read", "members:write", "commerce:write", "orders:read", "orders:write"],
 };
 const res = await fetch(`${url}/rest/v1/builder_api_tokens`, {
   method: "POST",

@@ -45,7 +45,7 @@ export async function handleMcp(req: Request, store: Store): Promise<Response> {
     { name: "gather-builder", version: "0.1.0" },
     {
       instructions:
-        "Gather Builder 建站平台。流程：list_modules → create_site（平台 token）→ get_site / list_section_types → add_section / update_section / update_theme → preview_changes（把預覽網址給使用者看）→ 使用者同意後 publish_site confirm:true。所有內容修改只進草稿；每次發布留版本，可 rollback。",
+        "Gather Builder 建站平台。流程：list_modules → create_site（平台 token）→ get_site / list_section_types → add_section / update_section / update_theme → preview_changes（把預覽網址給使用者看）→ 使用者同意後 publish_site confirm:true。所有內容修改只進草稿；每次發布留版本，可 rollback。電商：enable_module shop → configure_module shop（運費、線下匯款）→ create_product（上架需 confirm）→ 訂單用 list_orders / mark_order_paid / fulfill_order / cancel_order（都需 confirm）。金流金鑰只能由平台擁有者在後台輸入，請勿要求使用者在對話中提供金鑰。",
     },
   );
   registerTools(server, makeContext(actor, req, store));

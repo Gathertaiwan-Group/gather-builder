@@ -1,4 +1,5 @@
 import { checkDisable, getModule, resolveDependencies, DependencyError } from "@/modules/registry";
+import { adjustModuleStatus } from "../shop/status";
 import { ServiceError, activeModuleIds, audit, loadDraft, moduleStates, mutateDraft, requireScope, resolveTenant, type ServiceContext } from "./context";
 
 function issues(err: { issues: { path: PropertyKey[]; message: string }[] }) {
@@ -30,7 +31,7 @@ export async function enableModule(ctx: ServiceContext, input: { site?: string |
     if (existing && existing.status !== "disabled" && !(isTarget && input.config)) continue;
     const m = getModule(id)!;
     const config = isTarget && input.config ? input.config : (draft.moduleSettings?.[id] ?? {});
-    const status = m.settingsSchema.safeParse(config).success ? "enabled" : "pending_setup";
+    const status = await adjustModuleStatus(ctx.store, tenant.id, id, m.settingsSchema.safeParse(config).success ? "enabled" : "pending_setup");
     await ctx.store.upsertTenantModule({ tenant_id: tenant.id, module_id: id, status, config: {}, enabled_at: now });
     changed.push({ id, status, autoIncluded: !isTarget });
   }
@@ -43,12 +44,15 @@ export async function enableModule(ctx: ServiceContext, input: { site?: string |
   }
   await audit(ctx, tenant.id, "module.enable", { moduleId: input.moduleId, changed });
   const pending = changed.filter((c) => c.status === "pending_setup").map((c) => c.id);
+  const shopPending = pending.includes("shop");
   return {
     moduleId: input.moduleId,
     changed,
     alreadyEnabled: changed.length === 0,
     sectionTypes: target.sectionTypes.map((s) => s.type),
-    note: pending.length ? `下列模組需要設定才會生效：${pending.join(", ")}，請用 configure_module。` : undefined,
+    note: pending.length
+      ? `下列模組需要設定才會生效：${pending.join(", ")}。${shopPending ? "shop 需由平台擁有者在後台「金流設定」輸入並驗證 PChomePay 憑證（MCP 無法設定金鑰）；在那之前可用 configure_module 開啟線下匯款（offlineTransfer）。" : "請用 configure_module。"}`
+      : undefined,
   };
 }
 
@@ -91,11 +95,12 @@ export async function configureModule(
     d.moduleSettings = { ...(d.moduleSettings ?? {}), [input.moduleId]: r.data };
     return r.data;
   });
-  if (row.status === "pending_setup") await ctx.store.upsertTenantModule({ ...row, status: "enabled" });
+  const status = await adjustModuleStatus(ctx.store, tenant.id, input.moduleId, "enabled");
+  if (row.status !== status) await ctx.store.upsertTenantModule({ ...row, status });
   await audit(ctx, tenant.id, "module.configure", { moduleId: input.moduleId, keys: Object.keys(input.config) });
   return {
     moduleId: input.moduleId,
-    status: "enabled",
+    status,
     config: data,
     draft: true,
     note: "設定已存入草稿，要 preview_changes → publish_site（confirm: true）後才會對外生效。",
