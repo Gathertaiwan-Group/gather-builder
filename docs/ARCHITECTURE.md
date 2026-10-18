@@ -180,6 +180,14 @@
 - **等級**：依 `tierWindowMonths`（預設 12，0＝累計）內已付款的商品淨額（`builder_member_spend`，不含運費、儲值、sandbox）取最高達標等級；`builder_member_tiers` 是快照（超過 1 天自動重算），付款／取消 hook 即時重算，每日 cron 重算全部（降級）。等級影響賺點倍率與等級折扣（商品金額 %）。等級設定在模組設定（`update_tiers`／`configure_module`，草稿→發布）。
 - 會員中心「我的點數」：可用點數、即將到期批次、等級與升級門檻、點數紀錄。
 
+### stored-value（儲值金）
+
+- **儲值方案** `builder_topup_plans`：付 `pay_amount`（≥ 30）→ 入帳本金（不到期）＋ `bonus_amount` 贈送額度（`bonus_expire_days` 天後到期，可不設）。上架／改已上架方案需 publish＋confirm。
+- **購買**：必須登入會員；`placeClassOrder` 建 `item_kind=topup` 的訂單（不能用折扣碼／點數／儲值金），付款方式、sandbox 只限預覽（H1）、notify 權威回查全部沿用。**付款真正成功那一次**（onOrderPaid hook；sandbox 不跑）才入帳，ref `order:<id>:topup`／`:bonus` 冪等。儲值訂單不開發票、不賺點、不計入等級消費。
+- **消費**：結帳選用儲值金（全額或部分），下單交易內 strict 扣款（ref `order:<id>:spend`），取消／逾期同交易退回（refund，ref `:spend_refund`）。FIFO：會到期的贈送額度先用，本金最後。
+- **儲值訂單取消**：收回本金＋贈送（`capped`，ref `:topup_reverse`）；🔴 已用掉的部分只收回到 0（不讓餘額變負），不足記 `meta.shortfall`＋稽核 `wallet.reverse_shortfall`，由店家與客人另行處理（例如退款時扣除已用金額）。不會自動退款到信用卡。
+- 🔴 **法規**：儲值金屬預收款。正式上線前店家應自行確認是否需依《零售業等禮券定型化契約應記載及不得記載事項》等規定提供履約保證（銀行保證、信託、同業連帶）——平台只提供功能，不提供履約保證。模組說明、MCP 工具說明與後台「會員經營」都有提示。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

@@ -1,6 +1,7 @@
 import type { MemberRow, TenantRow } from "@/lib/store/types";
 import { getStore } from "@/lib/store";
 import { memberPointsView } from "@/lib/services/loyalty";
+import { memberWalletView } from "@/lib/services/wallet";
 import { fmtTaipei } from "@/lib/services/class-orders";
 
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
@@ -44,6 +45,46 @@ export async function MemberPoints({ tenant, member }: { tenant: TenantRow; memb
                 </span>
                 <span>
                   {e.amount > 0 ? `+${e.amount}` : e.amount} · {fmtTaipei(e.at, false)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** 會員中心／儲值頁：儲值金餘額、贈送額度到期、明細 */
+export async function MemberWallet({ tenant, member }: { tenant: TenantRow; member: MemberRow }) {
+  const v = await memberWalletView(getStore(), tenant, member);
+  return (
+    <div className="gb-card mb-6 p-5 text-sm" data-gb="my-wallet">
+      <h2 className="m-0 mb-2 text-lg font-bold">我的儲值金</h2>
+      <p className="m-0">
+        可用餘額：<strong data-gb="wallet-available">{twd(v.available)}</strong>
+      </p>
+      {v.expiring.length > 0 && (
+        <ul className="m-0 mt-2 flex list-none flex-col gap-1 p-0">
+          {v.expiring.map((e, i) => (
+            <li key={i}>
+              贈送額度 {twd(e.amount)} · {fmtTaipei(e.expiresAt, false)} 到期
+            </li>
+          ))}
+        </ul>
+      )}
+      {v.recent.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer">儲值金明細</summary>
+          <ul className="m-0 mt-2 flex list-none flex-col gap-1 p-0">
+            {v.recent.map((e, i) => (
+              <li key={i} className="flex flex-wrap justify-between gap-2">
+                <span>
+                  {KIND[e.kind] ?? e.kind}
+                  {e.reason ? `（${e.reason}）` : ""}
+                </span>
+                <span>
+                  {e.amount > 0 ? `+${twd(e.amount)}` : `−${twd(-e.amount)}`} · {fmtTaipei(e.at, false)}
                 </span>
               </li>
             ))}

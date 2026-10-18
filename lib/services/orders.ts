@@ -12,6 +12,7 @@ import "./booking";
 import "./courses";
 // 第五批：點數（賺點／沖回）
 import "./loyalty";
+import "./wallet";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";

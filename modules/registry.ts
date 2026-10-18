@@ -16,10 +16,11 @@ import { manifest as events } from "./events/manifest";
 import { manifest as booking } from "./booking/manifest";
 import { manifest as courses } from "./courses/manifest";
 import { manifest as loyalty } from "./loyalty/manifest";
+import { manifest as storedValue } from "./stored-value/manifest";
 import type { ModuleManifest, SectionTypeDef } from "./types";
 
 /** 模組註冊表：程式內唯一真相。新增模組只要在這裡加一行。 */
-export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty];
+export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty, storedValue];
 
 export type Registry = Map<string, ModuleManifest>;
 export const registry: Registry = new Map(MODULES.map((m) => [m.id, m]));

@@ -6,6 +6,7 @@ import { json } from "@/lib/http";
 import { runEventsCron } from "@/lib/services/events";
 import { runBookingCron } from "@/lib/services/booking";
 import { runLoyaltyCron } from "@/lib/services/loyalty";
+import { runWalletCron } from "@/lib/services/wallet";
 import { getMailer } from "@/lib/mail";
 import { baseUrlFrom } from "@/lib/runtime";
 
@@ -34,7 +35,8 @@ export async function GET(req: Request) {
   const hooks = await retryOrderHooks(deps, { limit: 200 }).catch((e) => (console.error("[cron] hooks", e), { scanned: -1, resolved: 0, failed: 0 }));
   // 第五批：點數到期（FIFO）、等級降級
   const loyalty = await runLoyaltyCron(getStore()).catch((e) => (console.error("[cron] loyalty", e), { expired: -1, evaluated: 0, changed: 0 }));
-  console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)}`);
+  const wallet = await runWalletCron(getStore()).catch((e) => (console.error("[cron] wallet", e), { expired: -1 }));
+  console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)} wallet=${JSON.stringify(wallet)}`);
   console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty });
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet });
 }

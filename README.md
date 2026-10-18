@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。

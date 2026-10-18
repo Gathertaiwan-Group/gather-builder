@@ -10,6 +10,7 @@ import { publishSite } from "@/lib/services/publish";
 import { createProduct, placeOrder } from "@/lib/services/shop";
 import { cancelOrder, markOrderPaid } from "@/lib/services/orders";
 import { adjustPoints, onLoyaltyOrderPaid } from "@/lib/services/loyalty";
+import { buyTopup, createTopupPlan, onWalletOrderPaid } from "@/lib/services/wallet";
 import { computeLedgerState } from "@/lib/loyalty/ledger";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
@@ -46,6 +47,7 @@ describe.skipIf(!enabled)("第五批 Supabase 實作（整合）", () => {
     await createSite(ctx, { slug, name: slug, modules: ["shop"], test: true });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "LW", shippingFee: 0 } });
     await enableModule(ctx, { site: slug, moduleId: "loyalty", config: { maxRedeemPercent: 100 } });
+    await enableModule(ctx, { site: slug, moduleId: "stored-value", config: {} });
     await publishSite(ctx, { site: slug, confirm: true });
     tenantCache = await store.getTenantBySlug(slug);
     const p = await createProduct(ctx, { site: slug, slug: "item", name: "商品", price: 500, trackInventory: false, status: "published", confirm: true });
@@ -102,5 +104,32 @@ describe.skipIf(!enabled)("第五批 Supabase 實作（整合）", () => {
     expect(await store.creditExpire("points", tenantCache!.id, m2.id)).toBe(50);
     expect(await store.creditExpire("points", tenantCache!.id, m2.id)).toBe(0);
     expect(await store.creditState("points", tenantCache!.id, m2.id)).toMatchObject({ balance: 20, available: 20, expiredDue: 0 });
+  });
+
+  it("儲值：付款成功才入帳（hook 冪等）；帳本 update／delete → 42501", async () => {
+    const plan = await createTopupPlan(ctx, { site: slug, name: "儲 1000 送 100", payAmount: 1000, bonusAmount: 100, bonusExpireDays: 30, status: "published", confirm: true });
+    const r = await buyTopup(deps, { tenant: tenantCache!, member, data: { planId: plan.id, contact: { name: contact.name, phone: contact.phone }, paymentMethod: "offline" } });
+    expect((await store.creditState("wallet", tenantCache!.id, member.id)).balance).toBe(0);
+    await markOrderPaid(ctx, { site: slug, orderNo: r.order.order_no, confirm: true });
+    const paid = (await store.getOrderById(tenantCache!.id, r.order.id))!;
+    await onWalletOrderPaid(deps, tenantCache!, paid);
+    expect(await store.creditState("wallet", tenantCache!.id, member.id)).toMatchObject({ balance: 1100, available: 1100 });
+    const up = await db.from("builder_wallet_ledger").update({ amount: 1 }).eq("tenant_id", tenantCache!.id);
+    expect(up.error?.code).toBe("42501");
+    const del = await db.from("builder_wallet_ledger").delete().eq("tenant_id", tenantCache!.id);
+    expect(del.error?.code).toBe("42501");
+  });
+
+  it("儲值金支付併發：可用 1100、8 張訂單各付 400 → 只成立 2 張；取消退回冪等", async () => {
+    const r = await Promise.allSettled(Array.from({ length: 8 }, () => buy({ walletToUse: 400 })));
+    const ok = r.filter((x) => x.status === "fulfilled");
+    expect(ok).toHaveLength(2);
+    for (const f of r.filter((x) => x.status === "rejected")) expect(String((f as PromiseRejectedResult).reason.message)).toMatch(/餘額不足/);
+    expect((await store.creditState("wallet", tenantCache!.id, member.id)).available).toBe(300);
+    const first = (ok[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof buy>>>).value.order;
+    expect(first).toMatchObject({ wallet_paid: 400, total: 100 });
+    await cancelOrder(ctx, { site: slug, orderNo: first.order_no, confirm: true });
+    await db.rpc("builder_release_order_credits", { p_tenant: tenantCache!.id, p_order: first.id });
+    expect((await store.creditState("wallet", tenantCache!.id, member.id)).available).toBe(700);
   });
 });

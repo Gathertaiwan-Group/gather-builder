@@ -17,6 +17,7 @@ import { cookieValue, referralCookieName } from "./shop-routes";
 import { confirmEventEmail, joinWaitlist, registerEvent } from "./services/events";
 import { bookSlot, selfCancelBooking, selfRescheduleBooking } from "./services/booking";
 import { buyCourse, markLessonComplete } from "./services/courses";
+import { buyTopup } from "./services/wallet";
 import type { OrderRow } from "./store/types";
 
 /**
@@ -232,6 +233,22 @@ export async function handleCourseBuy(req: Request, rawSlug: string, store: Stor
     return afterClassOrder(req, store, site.tenant, r, clientFactory);
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+export async function handleTopupBuy(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  try {
+    const g = await guard(req, slug, "stored-value", store, "wallet-topup");
+    if ("res" in g) return g.res!;
+    const { site, form, member, allowSandbox } = g;
+    const r = await buyTopup(
+      { store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) },
+      { tenant: site.tenant, member, allowSandbox, data: { planId: form.planId, contact: { name: form.name ?? "", phone: form.phone ?? "" }, paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined } },
+    );
+    return afterClassOrder(req, store, site.tenant, r, clientFactory);
+  } catch (e) {
+    return siteRedirect(req, slug, "/wallet", { err: messageOf(e) });
   }
 }
 

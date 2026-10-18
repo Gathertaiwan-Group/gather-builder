@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ServiceContext } from "../services/context";
 import * as loyalty from "../services/loyalty";
+import * as wallet from "../services/wallet";
 
 /**
  * 第五、六批 MCP 工具（會員經營、內容與在地）：只做參數宣告與轉送，邏輯全在 lib/services。
@@ -66,5 +67,67 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: WRITE,
     },
     wrap(async (a) => loyalty.updateTiers(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 儲值金（stored-value） */
+
+  server.registerTool(
+    "get_member_balance",
+    {
+      description: "查會員儲值金：餘額、可用、贈送額度到期、最近 30 筆帳本（只增不改）。需要 members:read。",
+      inputSchema: { site, ...memberRef },
+      annotations: RO,
+    },
+    wrap(async (a) => wallet.getMemberBalance(ctx, a)),
+  );
+
+  server.registerTool(
+    "adjust_balance",
+    {
+      description: "店主手動增減會員儲值金（例如線下退款後扣回、補償）。amount 正數增加、負數扣除（不能超過可用）；reason 必填。寫入只增不改的帳本。**必須** confirm: true。需要 members:write。",
+      inputSchema: { site, ...memberRef, amount: z.number().int().describe("NT$（正＝增加、負＝扣除）"), reason: z.string(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => wallet.adjustBalance(ctx, a)),
+  );
+
+  const planFields = {
+    name: z.string().describe("方案名稱，例如「儲 1000 送 100」"),
+    payAmount: z.number().int().describe("客人付多少（NT$，≥ 30）"),
+    bonusAmount: z.number().int().optional().describe("另外贈送多少額度（預設 0）"),
+    bonusExpireDays: z.number().int().nullable().optional().describe("贈送額度幾天後到期（不填＝不到期；本金不到期）"),
+    description: z.string().optional(),
+    status: z.enum(["draft", "published"]).optional().describe("預設 draft；published 需要 publish scope＋confirm"),
+    sort: z.number().int().optional(),
+  };
+
+  server.registerTool(
+    "create_topup_plan",
+    {
+      description: "建立儲值方案（付 X 得 X＋贈送）。購買走既有訂單＋付款，付款真正成功才入帳（sandbox 不入帳）。直接上架需 publish＋confirm。🔴 儲值金屬預收款，正式上線前請店家確認是否需履約保證／信託。需要 commerce:write。",
+      inputSchema: { site, ...planFields, confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => wallet.createTopupPlan(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_topup_plan",
+    {
+      description: "修改／上架／下架儲值方案（已上架或要上架需 publish＋confirm）。已售出的儲值不受影響。需要 commerce:write。",
+      inputSchema: { site, planId: z.string(), patch: z.object(planFields).partial(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => wallet.updateTopupPlan(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_topup_plans",
+    {
+      description: "儲值方案列表（含草稿）。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => wallet.listTopupPlans(ctx, a)),
   );
 }

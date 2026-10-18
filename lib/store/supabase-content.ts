@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, TopupPlanRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,22 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async insertTopupPlan(row) {
+      return must(await db.from("builder_topup_plans").insert(row).select("*").single(), "insertTopupPlan") as TopupPlanRow;
+    },
+    async updateTopupPlan(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_topup_plans").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateTopupPlan") as TopupPlanRow | null;
+    },
+    async getTopupPlan(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_topup_plans").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getTopupPlan") as TopupPlanRow | null;
+    },
+    async listTopupPlans(tenantId, opts) {
+      let q = db.from("builder_topup_plans").select("*").eq("tenant_id", tenantId);
+      if (opts.status) q = q.eq("status", opts.status);
+      return (must(await q.order("sort").order("pay_amount"), "listTopupPlans") ?? []) as TopupPlanRow[];
+    },
     async creditPost(ledger, i) {
       const r = await db.rpc("builder_ledger_post", {
         p_table: LEDGER_TABLE[ledger],

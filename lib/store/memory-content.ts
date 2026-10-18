@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, TopupPlanRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -23,8 +23,9 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const tiers = new Map<string, MemberTierRow>();
   let seq = 0;
   let root: Store | null = null;
-  /** 與 SQL 版本對齊：儲值金扣款由 stored-value 模組（0022）開啟 */
-  const walletEnabled = false;
+  /** 與 SQL 版本對齊（0022 起支援儲值金扣款） */
+  const walletEnabled = true;
+  const plans = new Map<string, TopupPlanRow>();
 
   const entries = (l: CreditLedger, tenantId: string, memberId: string) => ledgers[l].filter((e) => e.tenant_id === tenantId && e.member_id === memberId);
   const state = (l: CreditLedger, tenantId: string, memberId: string) => computeLedgerState(entries(l, tenantId, memberId));
@@ -94,6 +95,25 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async insertTopupPlan(row) {
+      const r: TopupPlanRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      plans.set(r.id, r);
+      return clone(r);
+    },
+    async updateTopupPlan(tenantId, id, patch) {
+      const p = plans.get(id);
+      if (!p || p.tenant_id !== tenantId) return null;
+      const next = { ...p, ...clone(patch), updated_at: now() };
+      plans.set(id, next);
+      return clone(next);
+    },
+    async getTopupPlan(tenantId, id) {
+      const p = plans.get(id);
+      return p && p.tenant_id === tenantId ? clone(p) : null;
+    },
+    async listTopupPlans(tenantId, opts) {
+      return clone([...plans.values()].filter((p) => p.tenant_id === tenantId && (!opts.status || p.status === opts.status)).sort((a, b) => a.sort - b.sort || a.pay_amount - b.pay_amount));
+    },
     async creditPost(l, i) {
       return postSync(l, i);
     },

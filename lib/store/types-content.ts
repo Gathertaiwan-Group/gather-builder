@@ -57,7 +57,30 @@ export interface MemberTierRow {
   changed_at: string;
 }
 
+export interface TopupPlanRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  /** 付多少錢（NT$，≥ 30） */
+  pay_amount: number;
+  /** 另外贈送的額度 */
+  bonus_amount: number;
+  /** 贈送額度幾天後到期（null＝不到期）；本金不到期 */
+  bonus_expire_days: number | null;
+  description: string | null;
+  status: "draft" | "published";
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContentStore {
+  // 儲值方案
+  insertTopupPlan(row: Omit<TopupPlanRow, "id" | "created_at" | "updated_at">): Promise<TopupPlanRow>;
+  updateTopupPlan(tenantId: string, id: string, patch: Partial<Omit<TopupPlanRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<TopupPlanRow | null>;
+  getTopupPlan(tenantId: string, id: string): Promise<TopupPlanRow | null>;
+  listTopupPlans(tenantId: string, opts: { status?: TopupPlanRow["status"] }): Promise<TopupPlanRow[]>;
+
   // 帳本（builder_ledger_post：每會員一把鎖、ref 冪等、先寫到期再處理本筆）
   creditPost(ledger: CreditLedger, input: CreditPostInput): Promise<{ posted: boolean; amount: number; balance: number }>;
   creditState(ledger: CreditLedger, tenantId: string, memberId: string): Promise<CreditLedgerState>;
