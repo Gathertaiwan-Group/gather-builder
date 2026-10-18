@@ -308,6 +308,9 @@ export async function fulfillOrder(
   // H1：測試環境（sandbox）付款的訂單沒有真的收到錢，絕不能出貨
   const sandboxPaid = o.payment_sandbox || (await ctx.store.listPaymentsForOrder(tenant.id, o.id)).some((p) => p.sandbox && p.status === "paid");
   if (sandboxPaid) throw new ServiceError("invalid", `訂單 ${o.order_no} 是 PChomePay 測試環境（sandbox）付款，沒有實際收款，不能出貨。請取消這張訂單。`);
+  // shipping 模組：已建立綠界物流單的訂單，出貨狀態以物流通知為準
+  const active = await ctx.store.getActiveShipmentByOrder(tenant.id, o.id);
+  if (active?.provider === "ecpay") throw new ServiceError("conflict", `訂單 ${o.order_no} 已建立綠界物流單（${active.logistics_id ?? "建立中"}），出貨狀態以物流通知為準，不能手動標記`);
   requireConfirm(input.confirm, `把訂單 ${o.order_no} 標記為已出貨會通知客人`);
   const moved = await ctx.store.transitionOrder(tenant.id, o.id, "paid", "fulfilled", {
     fulfilled_at: new Date().toISOString(),

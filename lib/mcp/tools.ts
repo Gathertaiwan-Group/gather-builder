@@ -11,6 +11,7 @@ import * as members from "../services/members";
 import * as shop from "../services/shop";
 import * as orders from "../services/orders";
 import * as invoices from "../services/invoices";
+import * as shipping from "../services/shipping";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -662,6 +663,50 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: DESTRUCTIVE,
     },
     wrap(async (a) => invoices.voidInvoice(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 物流（shipping） */
+
+  server.registerTool(
+    "get_shipping_setup_status",
+    {
+      description:
+        "查物流設定：已發布的運送方式（id、類型 cvs／home／pickup／manual、運費、滿額免運）、綠界帳號是否設定、測試或正式環境。🔴 綠界憑證只能由平台擁有者在後台輸入，MCP 無法設定或讀出。運送方式用 configure_module shipping { methods, sender } 設定（進草稿，發布後生效）。需要 orders:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => shipping.getShippingSetupStatus(ctx, a)),
+  );
+
+  server.registerTool(
+    "create_shipment",
+    {
+      description:
+        "為已付款訂單建立出貨單：訂單選的是綠界超商／宅配 → 建立綠界物流單（會產生真實寄件與運費；測試環境帳號不會），訂單在物流回報已寄出後自動轉「已出貨」；手動出貨／自取 → 記錄 trackingNumber 並直接轉「已出貨」。必須先讓使用者確認，再帶 confirm: true。需要 shipping:write。",
+      inputSchema: { site, ...orderRef, trackingNumber: z.string().optional().describe("手動出貨的物流追蹤號（綠界物流免填）"), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => shipping.createShipment(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_shipment",
+    {
+      description: "查某張訂單的出貨單（方式、門市、物流狀態、追蹤號、最近的物流事件）。需要 orders:read。",
+      inputSchema: { site, ...orderRef },
+      annotations: RO,
+    },
+    wrap(async (a) => shipping.getShipment(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_shipments",
+    {
+      description: "列出出貨單（狀態 created／in_transit／arrived／delivered／returned／failed／cancelled）。需要 orders:read。",
+      inputSchema: { site, status: z.enum(["created", "in_transit", "arrived", "delivered", "returned", "failed", "cancelled"]).optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => shipping.listShipments(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

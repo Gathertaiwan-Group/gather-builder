@@ -11,6 +11,8 @@ import { optionsKey } from "../store/supabase-commerce";
 import { invoiceRequestSchema } from "../invoice/validate";
 import type { InvoiceSettings } from "@/modules/invoice/manifest";
 import { releaseExpiredHolds } from "./orders";
+import { resolveShipping, type ShippingResolution } from "./shipping";
+import { applyPromotions } from "./promotions";
 
 /* ================================================================== 共用 */
 
@@ -311,6 +313,13 @@ export const checkoutInput = z
     pchomepayType: z.enum(["card", "atm"]).optional(),
     /** invoice 模組：發票方式（未啟用時忽略） */
     invoice: z.unknown().optional(),
+    /** shipping 模組：運送方式 id、超商選店暫存 id（運費一律由 server 依設定計算） */
+    shippingMethodId: z.string().trim().max(32).optional(),
+    cvsSelectionId: z.string().trim().max(64).optional(),
+    /** coupons 模組：折扣碼 */
+    couponCode: z.string().trim().max(32).optional(),
+    /** referral 模組：推薦碼（來自分享連結的 cookie） */
+    referralCode: z.string().trim().max(16).optional(),
   })
   .strict();
 
@@ -351,7 +360,7 @@ export interface CheckoutDeps {
  */
 export async function placeOrder(
   deps: CheckoutDeps,
-  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings; allowSandbox?: boolean },
+  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings; allowSandbox?: boolean; cvsBinding?: string | null },
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
   const settings = input.settings ?? (await publishedShopSettings(deps.store, tenant));
@@ -361,14 +370,46 @@ export async function placeOrder(
   await releaseExpiredHolds({ store: deps.store, sendMail: deps.sendMail, baseUrl: deps.baseUrl }, tenant.id, [...new Set(d.items.map((i) => i.productId))]);
   const priced = await priceCart(deps.store, tenant.id, d.items, settings);
   if (priced.problems.length || !priced.lines.length) throw new ServiceError("invalid", priced.problems.join("；") || "購物車是空的");
+  // shipping 模組：運費依已發布設定（server 計價），超商要原子消耗選店暫存
+  const ship = await resolveShipping(deps.store, tenant, {
+    methodId: d.shippingMethodId,
+    cvsSelectionId: d.cvsSelectionId,
+    binding: input.cvsBinding ?? null,
+    subtotal: priced.subtotal,
+    receiver: d.shipping,
+    consume: true,
+    allowStage: input.allowSandbox,
+  });
+  const releaseSelection = async () => {
+    if (ship?.consumedSelectionId) await deps.store.releaseCvsSelection(tenant.id, ship.consumedSelectionId);
+  };
+  try {
+    return await placeOrderPriced(deps, input, d, settings, priced, ship);
+  } catch (e) {
+    await releaseSelection();
+    throw e;
+  }
+}
 
+async function placeOrderPriced(
+  deps: CheckoutDeps,
+  input: { tenant: TenantRow; member: MemberRow | null; allowSandbox?: boolean },
+  d: z.output<typeof checkoutInput>,
+  settings: ShopSettings,
+  priced: PricedCart,
+  ship: ShippingResolution | null,
+): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
+  const { tenant, member } = input;
+  const shippingFee = ship ? ship.fee : priced.shippingFee;
+  const promo = await applyPromotions(deps.store, tenant, { subtotal: priced.subtotal, couponCode: d.couponCode, referralCode: d.referralCode, member, email: d.contact.email });
+  const total = priced.subtotal + shippingFee - promo.discount;
   const avail = await paymentAvailability(deps.store, tenant, settings, { allowSandbox: input.allowSandbox });
   const method: PaymentMethod = d.paymentMethod;
   const atm = method === "pchomepay" && d.pchomepayType === "atm";
   if (method === "pchomepay") {
     if (!avail.pchomepay) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
     if (atm && !avail.pchomepayAtm) throw new ServiceError("invalid", "此商店未開放 ATM 轉帳，請改用信用卡");
-    if (priced.total < PCHOMEPAY_MIN_AMOUNT) throw new ServiceError("invalid", `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式或加購商品`);
+    if (total < PCHOMEPAY_MIN_AMOUNT) throw new ServiceError("invalid", `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式或加購商品`);
   } else if (!avail.offline) {
     throw new ServiceError("invalid", "此商店未開放線下匯款");
   }
@@ -386,18 +427,23 @@ export async function placeOrder(
       contact: d.contact,
       shipping: d.shipping,
       subtotal: priced.subtotal,
-      shipping_fee: priced.shippingFee,
-      total: priced.total,
+      shipping_fee: shippingFee,
+      total,
       payment_method: method,
       expires_at: new Date(Date.now() + hours * 3600_000).toISOString(),
       access_key_hash: sha256(accessKey),
       note: d.note ?? null,
       invoice_request: invoiceRequest,
+      shipping_choice: ship?.choice ?? null,
+      discount_total: promo.discount,
+      coupon: promo.coupon,
+      referral_code: promo.referralCode,
     },
     priced.lines.map(({ stockAvailable: _s, slug: _g, ...l }) => l),
     taipeiDay(),
   );
   const order = (await deps.store.getOrderById(tenant.id, id))!;
+  if (ship?.consumedSelectionId) await deps.store.attachCvsSelectionOrder(tenant.id, ship.consumedSelectionId, order.id);
   const orderUrl = orderPageUrl(deps.baseUrl, tenant, order.order_no, accessKey);
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "order.place", payload: { orderNo: order.order_no, total: order.total, method } });
 
@@ -421,7 +467,7 @@ export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow
   const hours = settings.orderExpireHours ?? 72;
   const offlineInstructions = settings.offlineTransfer?.instructions ?? null;
   const lines = order.items.map((l) => `・${l.name}${l.variant_label ? `（${l.variant_label}）` : ""} × ${l.qty}　${twd(l.line_total)}`).join("\n");
-  const sum = `${lines}\n小計 ${twd(order.subtotal)}　運費 ${twd(order.shipping_fee)}　總計 ${twd(order.total)}`;
+  const sum = `${lines}\n小計 ${twd(order.subtotal)}　運費 ${twd(order.shipping_fee)}${order.discount_total ? `　折扣 −${twd(order.discount_total)}${order.coupon_code ? `（${order.coupon_code}）` : ""}` : ""}　總計 ${twd(order.total)}${order.shipping_choice ? `\n運送方式：${order.shipping_choice.label}${order.shipping_choice.store ? `（${order.shipping_choice.store.name}）` : ""}` : ""}`;
   const payText =
     method === "offline"
       ? `付款方式：線下匯款\n${offlineInstructions ?? "店家將與你聯繫付款方式。"}\n請於 ${hours} 小時內完成付款，逾期訂單會自動取消。`

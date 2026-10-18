@@ -77,4 +77,26 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     const dup = await db.from("builder_invoices").insert({ tenant_id: t.id, order_id: order.id, provider: "mock", amount: 1 });
     expect(dup.error?.code).toBe("23505");
   });
+
+  it("物流：選店暫存併發消耗只成功一次、binding 不符拿不到；同一訂單只能有一張有效出貨單", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const sel = await store.insertCvsSelection({ tenant_id: t.id, trade_no_hash: `h-${ts}`, binding_hash: "bind-ok", sub_type: "UNIMARTC2C", method_id: "seven", expires_at: new Date(Date.now() + 600_000).toISOString() });
+    const nowIso = new Date().toISOString();
+    expect(await store.consumeCvsSelection(t.id, sel.id, "bind-ok", nowIso)).toBeNull(); // 還沒選門市
+    expect(await store.setCvsSelectionStore(`h-${ts}`, "FAMIC2C", { id: "1", name: "x", address: "y", outside: false }, nowIso)).toBeNull(); // 子類型不符
+    expect(await store.setCvsSelectionStore(`h-${ts}`, "UNIMARTC2C", { id: "131386", name: "門市", address: "地址", outside: false }, nowIso)).not.toBeNull();
+    expect(await store.consumeCvsSelection(t.id, sel.id, "bind-wrong", nowIso)).toBeNull();
+    const both = await Promise.all(Array.from({ length: 4 }, () => store.consumeCvsSelection(t.id, sel.id, "bind-ok", new Date().toISOString())));
+    expect(both.filter(Boolean)).toHaveLength(1);
+
+    const p = await createProduct(ctx, { site: slug, slug: "ship", name: "出貨", price: 100, status: "published", confirm: true });
+    const { order } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: t, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } });
+    const base = { tenant_id: t.id, order_id: order.id, method_id: "m", method_type: "manual" as const, provider: "manual" as const, sub_type: null, logistics_id: null, store: null, tracking_no: null, validation_no: null, stage: false, raw: null };
+    const results = await Promise.allSettled(Array.from({ length: 3 }, (_, i) => store.insertShipment({ ...base, merchant_trade_no: `T${ts}${i}`, status: "created" })));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const active = (await store.getActiveShipmentByOrder(t.id, order.id))!;
+    await store.updateShipment(t.id, active.id, { status: "failed" });
+    // 失敗的不佔名額，可以重建
+    await expect(store.insertShipment({ ...base, merchant_trade_no: `T${ts}x`, status: "created" })).resolves.toBeTruthy();
+  });
 });

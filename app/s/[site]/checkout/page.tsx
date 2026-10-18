@@ -3,6 +3,9 @@ import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { moduleActive, moduleConfig } from "@/lib/site-loader";
 import { invoiceSettings } from "@/modules/invoice/manifest";
+import { shippingSettings } from "@/modules/shipping/manifest";
+import { availableShippingMethods, cvsCookieName, selectionForBrowser } from "@/lib/services/shipping";
+import { cookies } from "next/headers";
 import { currentMember } from "@/lib/site-request";
 import { getStore } from "@/lib/store";
 import { paymentAvailability, shopSettingsSchema, type ShopSettings } from "@/lib/services/shop";
@@ -14,7 +17,7 @@ import { siteHref } from "@/modules/render-types";
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "購物車與結帳", robots: { index: false } };
 
-type Props = { params: Promise<{ site: string }>; searchParams: Promise<{ err?: string; preview?: string }> };
+type Props = { params: Promise<{ site: string }>; searchParams: Promise<{ err?: string; preview?: string; cvs?: string }> };
 
 export default async function CheckoutPage(props: Props) {
   const [{ site: raw }, sp] = await Promise.all([props.params, props.searchParams]);
@@ -24,6 +27,13 @@ export default async function CheckoutPage(props: Props) {
   const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
   const [member, avail] = await Promise.all([currentMember(site.tenant), paymentAvailability(getStore(), site.tenant, settings, { allowSandbox: site.mode === "preview" })]);
   const ctx = makeRenderCtx(site, "/checkout");
+  const allowStage = site.mode === "preview";
+  const shipSettings = moduleActive(site, "shipping") ? shippingSettings.safeParse(moduleConfig(site, "shipping")) : null;
+  const shippingMethods = shipSettings?.success
+    ? (await availableShippingMethods(getStore(), site.tenant, shipSettings.data, { allowStage })).map((m) => ({ id: m.id, type: m.type, label: m.label, fee: m.fee, freeThreshold: m.freeThreshold ?? null, instructions: m.instructions ?? null }))
+    : null;
+  const binding = (await cookies()).get(cvsCookieName(site.tenant.id))?.value;
+  const cvsSelection = shippingMethods ? await selectionForBrowser(getStore(), site.tenant, sp.cvs, binding) : null;
   const inv = moduleActive(site, "invoice") ? invoiceSettings.safeParse(moduleConfig(site, "invoice")) : null;
   const invoiceOptions = inv?.success
     ? { mobile: inv.data.allowMobileBarcode !== false, certificate: inv.data.allowCertificate !== false, donation: inv.data.allowDonation !== false, b2b: inv.data.allowB2B !== false, defaultLoveCode: inv.data.defaultLoveCode ?? null }
@@ -56,6 +66,10 @@ export default async function CheckoutPage(props: Props) {
               methods={{ pchomepay: avail.pchomepay, atm: avail.pchomepayAtm, offline: avail.offline, offlineInstructions: avail.offlineInstructions, sandbox: avail.pchomepaySandbox }}
               previewToken={site.mode === "preview" ? site.previewToken : null}
               invoiceOptions={invoiceOptions}
+              shippingMethods={shippingMethods}
+              cvsSelection={cvsSelection}
+              cvsStartAction={`/s/${slug}/api/shipping/cvs-start`}
+              couponsEnabled={moduleActive(site, "coupons")}
               minOnline={PCHOMEPAY_MIN_AMOUNT}
             />
           )}

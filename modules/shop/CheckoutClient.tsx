@@ -18,8 +18,20 @@ interface Quote {
   lines: QuoteLine[];
   subtotal: number;
   shippingFee: number;
+  shippingSelected?: boolean;
+  discount?: number;
+  couponMessage?: string | null;
   total: number;
   problems: string[];
+}
+
+export interface CheckoutShippingMethod {
+  id: string;
+  type: "cvs" | "home" | "pickup" | "manual";
+  label: string;
+  fee: number;
+  freeThreshold: number | null;
+  instructions: string | null;
 }
 
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
@@ -41,12 +53,75 @@ export function CheckoutClient(props: {
   previewToken?: string | null;
   /** invoice 模組啟用時才有 */
   invoiceOptions?: InvoiceOptions | null;
+  /** shipping 模組啟用時才有（null＝用商店固定運費） */
+  shippingMethods?: CheckoutShippingMethod[] | null;
+  /** 從電子地圖回來、且屬於這個瀏覽器的選店 */
+  cvsSelection?: { id: string; methodId: string; store: { name: string; address: string } } | null;
+  cvsStartAction?: string;
+  /** coupons 模組啟用時顯示折扣碼欄位 */
+  couponsEnabled?: boolean;
 }) {
   const [cart, setCart] = useState<CartLine[] | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [error, setError] = useState("");
   const [method, setMethod] = useState<"pchomepay" | "offline">(props.methods.pchomepay ? "pchomepay" : "offline");
   const [payType, setPayType] = useState<"card" | "atm">("card");
+  const methods = props.shippingMethods ?? null;
+  const [shipId, setShipId] = useState<string>(props.cvsSelection?.methodId ?? (methods && methods.length === 1 ? methods[0]!.id : ""));
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState("");
+  const draftKey = `gb-checkout-${props.slug}`;
+  const shipMethod = methods?.find((m) => m.id === shipId) ?? null;
+  const cvsReady = shipMethod?.type !== "cvs" || props.cvsSelection?.methodId === shipMethod.id;
+
+  // 預覽模式（網站主測試）：從電子地圖回來時網址沒有預覽簽章，用 sessionStorage 補回
+  useEffect(() => {
+    try {
+      const k = `gb-preview-${props.slug}`;
+      if (props.previewToken) sessionStorage.setItem(k, props.previewToken);
+      else {
+        const u = new URL(window.location.href);
+        const saved = sessionStorage.getItem(k);
+        if (saved && u.searchParams.has("cvs") && !u.searchParams.has("preview")) {
+          u.searchParams.set("preview", saved);
+          window.location.replace(u.toString());
+        }
+      }
+    } catch {
+      /* 忽略 */
+    }
+  }, [props.slug, props.previewToken]);
+
+  // 去電子地圖前把填到一半的資料存起來，回來時填回（跨頁導轉會清空表單）
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(draftKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Record<string, string>;
+      const form = document.querySelector<HTMLFormElement>('form[data-gb="checkout-form"]');
+      for (const [k, v] of Object.entries(saved)) {
+        const el = form?.elements.namedItem(k);
+        if (el instanceof HTMLInputElement && el.type !== "radio" && el.type !== "checkbox" && el.type !== "hidden") el.value = v;
+        if (el instanceof HTMLTextAreaElement) el.value = v;
+      }
+      if (saved.__coupon) {
+        setCoupon(saved.__coupon);
+        setCouponInput(saved.__coupon);
+      }
+    } catch {
+      /* 忽略 */
+    }
+  }, [draftKey, cart]);
+  const saveDraft = () => {
+    try {
+      const form = document.querySelector<HTMLFormElement>('form[data-gb="checkout-form"]');
+      const data: Record<string, string> = { __coupon: coupon };
+      if (form) for (const [k, v] of new FormData(form).entries()) if (typeof v === "string" && k !== "items") data[k] = v;
+      sessionStorage.setItem(draftKey, JSON.stringify(data));
+    } catch {
+      /* 忽略 */
+    }
+  };
   const [same, setSame] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -64,7 +139,11 @@ export function CheckoutClient(props: {
       return;
     }
     let alive = true;
-    fetch(props.quoteUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })) }) })
+    fetch(props.quoteUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })), shippingMethodId: shipId || undefined, couponCode: coupon || undefined, preview: props.previewToken ?? undefined }),
+    })
       .then(async (r) => {
         const j = await r.json();
         if (!alive) return;
@@ -76,7 +155,7 @@ export function CheckoutClient(props: {
     return () => {
       alive = false;
     };
-  }, [cart, props.quoteUrl]);
+  }, [cart, props.quoteUrl, shipId, coupon, props.previewToken]);
 
   const setQty = (i: number, qty: number) => {
     if (!cart) return;
@@ -123,7 +202,11 @@ export function CheckoutClient(props: {
         {quote && (
           <div className="mt-4 flex flex-col items-end gap-1 border-t pt-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }} data-gb="totals">
             <span>小計 {twd(quote.subtotal)}</span>
-            <span>運費 {twd(quote.shippingFee)}</span>
+            <span>
+              運費 {twd(quote.shippingFee)}
+              {quote.shippingSelected === false && <span className="gb-muted">（選擇運送方式後確定）</span>}
+            </span>
+            {!!quote.discount && <span data-gb="discount">折扣 −{twd(quote.discount)}</span>}
             <strong className="text-lg">總計 {twd(quote.total)}</strong>
           </div>
         )}
@@ -142,9 +225,17 @@ export function CheckoutClient(props: {
       {noMethod ? (
         <p className="gb-card p-4">此商店尚未開放結帳（付款方式設定中），請稍後再試或直接聯絡店家。</p>
       ) : (
-        <form method="post" action={props.action} className="gb-card flex flex-col gap-4 p-4 md:p-5" data-gb="checkout-form" onSubmit={() => setSubmitting(true)}>
+        <form method="post" action={props.action} className="gb-card flex flex-col gap-4 p-4 md:p-5" data-gb="checkout-form" onSubmit={(e) => {
+            const sub = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+            if (sub?.dataset.gb === "cvs-pick") return; // 去選門市不鎖按鈕
+            try {
+              sessionStorage.removeItem(draftKey);
+            } catch {
+              /* 忽略 */
+            }
+            setSubmitting(true);
+          }}>
           <input type="hidden" name="items" value={JSON.stringify(cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })))} />
-          {props.previewToken && <input type="hidden" name="preview" value={props.previewToken} />}
           {!m && (
             <p className="m-0 text-sm">
               已是會員？<a href={props.loginHref}>登入</a>後訂單會出現在會員中心。也可以直接以訪客身分結帳。
@@ -189,6 +280,66 @@ export function CheckoutClient(props: {
             備註（選填）
             <textarea name="note" maxLength={500} rows={2} className="gb-input" />
           </label>
+          {methods && (
+            <fieldset className="m-0 flex flex-col gap-2 border-0 p-0" data-gb="shipping-methods">
+              <legend className="mb-2 text-lg font-bold">運送方式</legend>
+              <input type="hidden" name="shippingMethodId" value={shipId} />
+              {methods.map((m) => (
+                <label key={m.id} className="flex flex-wrap items-center gap-2 text-sm">
+                  <input type="radio" name="__ship" value={m.id} checked={shipId === m.id} onChange={() => setShipId(m.id)} />
+                  {m.label} · {m.fee === 0 ? "免運" : twd(m.fee)}
+                  {m.freeThreshold !== null && m.fee > 0 && <span className="gb-muted">（滿 {twd(m.freeThreshold)} 免運）</span>}
+                </label>
+              ))}
+              {shipMethod?.instructions && <p className="gb-muted m-0 whitespace-pre-line text-sm">{shipMethod.instructions}</p>}
+              {shipMethod?.type === "cvs" && (
+                <div className="gb-card flex flex-col gap-2 p-3 text-sm" data-gb="cvs-store">
+                  {props.cvsSelection?.methodId === shipMethod.id ? (
+                    <>
+                      <input type="hidden" name="cvsSelectionId" value={props.cvsSelection.id} />
+                      <span>
+                        取貨門市：<strong>{props.cvsSelection.store.name}</strong>（{props.cvsSelection.store.address}）
+                      </span>
+                    </>
+                  ) : (
+                    <span>請先選擇取貨門市。</span>
+                  )}
+                  <button
+                    type="submit"
+                    formAction={props.cvsStartAction}
+                    formNoValidate
+                    name="methodId"
+                    value={shipMethod.id}
+                    onClick={saveDraft}
+                    className="gb-btn self-start"
+                    data-gb="cvs-pick"
+                  >
+                    {props.cvsSelection?.methodId === shipMethod.id ? "重新選擇門市" : "選擇取貨門市"}
+                  </button>
+                  <span className="gb-muted text-xs">超商取貨的收件人姓名需為中文 2–5 字或英文 4–10 字，電話需為手機。</span>
+                </div>
+              )}
+            </fieldset>
+          )}
+          {props.couponsEnabled && (
+            <div className="flex flex-col gap-1 text-sm" data-gb="coupon">
+              <span className="font-medium">折扣碼</span>
+              <input type="hidden" name="couponCode" value={coupon} />
+              <span className="flex flex-wrap gap-2">
+                <input aria-label="折扣碼" value={couponInput} onChange={(e) => setCouponInput(e.target.value.toUpperCase())} maxLength={32} className="gb-input" style={{ width: "12rem" }} />
+                <button type="button" className="gb-btn" onClick={() => setCoupon(couponInput.trim())}>
+                  套用
+                </button>
+                {coupon && (
+                  <button type="button" className="text-sm underline" style={{ background: "none", border: 0, cursor: "pointer", color: "var(--gb-text)" }} onClick={() => { setCoupon(""); setCouponInput(""); }}>
+                    移除
+                  </button>
+                )}
+              </span>
+              {quote?.couponMessage && <span className={quote.discount ? "" : "text-red-700"}>{quote.couponMessage}</span>}
+            </div>
+          )}
+          {props.previewToken && <input type="hidden" name="preview" value={props.previewToken} />}
           {props.invoiceOptions && <InvoiceFields options={props.invoiceOptions} />}
           <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
             <legend className="mb-2 text-lg font-bold">付款方式</legend>
@@ -221,7 +372,7 @@ export function CheckoutClient(props: {
               </p>
             )}
           </fieldset>
-          <button type="submit" className="gb-btn self-start" disabled={submitting || !quote || quote.problems.length > 0 || belowMin}>
+          <button type="submit" className="gb-btn self-start" disabled={submitting || !quote || quote.problems.length > 0 || belowMin || (!!methods && (!shipId || !cvsReady)) || (!!coupon && !quote.discount)}>
             {submitting ? "處理中…" : method === "pchomepay" ? "前往付款" : "送出訂單"}
           </button>
         </form>

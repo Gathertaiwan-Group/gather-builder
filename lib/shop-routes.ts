@@ -15,6 +15,26 @@ import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect }
 import { json } from "./http";
 import { verifyPreviewToken } from "./preview";
 import { invoiceRequestFromForm } from "./invoice/validate";
+import { cvsCookieName, resolveShipping } from "./services/shipping";
+import { applyPromotions } from "./services/promotions";
+
+export const referralCookieName = (tenantId: string) => `gbref_${tenantId.replace(/-/g, "").slice(0, 12)}`;
+
+/** 讀 request 的某個 cookie（不解碼以外的處理） */
+export function cookieValue(req: Request, name: string): string | undefined {
+  const raw = req.headers.get("cookie") ?? "";
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
 
 /** M1：每 IP 每小時下單上限（原 20，降低以減少庫存凍結） */
 export const CHECKOUT_LIMIT_PER_HOUR = 6;
@@ -34,13 +54,28 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
     if (!s) return json({ error: "找不到商店" }, 404);
     const hit = await store.rateHit(`shop-quote:${s.site.tenant.id}`, hashIp(clientIp(req), requireSecret("PREVIEW_SECRET")), 600, QUOTE_LIMIT_PER_10MIN);
     if (!hit.allowed) return json({ error: "請求太頻繁" }, 429);
-    const body = (await req.json().catch(() => null)) as { items?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { items?: unknown; shippingMethodId?: unknown; couponCode?: unknown; email?: unknown; preview?: unknown } | null;
     const priced = await priceCart(store, s.site.tenant.id, body?.items, s.settings);
+    const tenant = s.site.tenant;
+    const allowStage = typeof body?.preview === "string" && verifyPreviewToken(body.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
+    const ship = await resolveShipping(store, tenant, { methodId: typeof body?.shippingMethodId === "string" ? body.shippingMethodId : null, subtotal: priced.subtotal, consume: false, allowStage });
+    const member = (await getSessionMember(store, tenant, memberTokenFromRequest(req, tenant)))?.member ?? null;
+    const promo = await applyPromotions(store, tenant, {
+      subtotal: priced.subtotal,
+      couponCode: typeof body?.couponCode === "string" ? body.couponCode.slice(0, 32) : null,
+      member,
+      email: typeof body?.email === "string" ? body.email.slice(0, 200).toLowerCase() : (member?.email ?? ""),
+      strict: false,
+    });
+    const shippingFee = ship ? ship.fee : priced.shippingFee;
     return json({
       lines: priced.lines.map((l) => ({ productId: l.product_id, variantId: l.variant_id, name: l.name, variantLabel: l.variant_label, unitPrice: l.unit_price, qty: l.qty, lineTotal: l.line_total, lowStock: l.stockAvailable !== null && l.stockAvailable <= 5, slug: l.slug })),
       subtotal: priced.subtotal,
-      shippingFee: priced.shippingFee,
-      total: priced.total,
+      shippingFee,
+      shippingSelected: ship ? !!ship.choice.methodId : true,
+      discount: promo.discount,
+      couponMessage: promo.couponMessage,
+      total: priced.subtotal + shippingFee - promo.discount,
       problems: priced.problems,
     });
   } catch (e) {
@@ -71,6 +106,10 @@ export function checkoutFromForm(f: Record<string, string>) {
     paymentMethod: f.paymentMethod,
     pchomepayType: f.paymentMethod === "pchomepay" && f.pchomepayType === "atm" ? ("atm" as const) : undefined,
     invoice: f.invoiceType ? invoiceRequestFromForm(f) : undefined,
+    shippingMethodId: f.shippingMethodId || undefined,
+    cvsSelectionId: f.cvsSelectionId || undefined,
+    couponCode: f.couponCode?.trim() || undefined,
+    referralCode: f.referralCode?.trim() || undefined,
   };
 }
 
@@ -88,7 +127,11 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
     const member = (await getSessionMember(store, tenant, memberTokenFromRequest(req, tenant)))?.member ?? null;
     // H1：只有帶「有效預覽簽章」的結帳才可以用 sandbox 憑證（網站主自己測試用）
     const allowSandbox = !!form.preview && verifyPreviewToken(form.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
-    const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data: checkoutFromForm(form), settings: s.settings, allowSandbox });
+    const data = checkoutFromForm(form);
+    // 推薦碼只從 cookie 讀（分享連結 ?ref= 設的），表單欄位一律不採信
+    data.referralCode = cookieValue(req, referralCookieName(tenant.id)) || undefined;
+    const cvsBinding = cookieValue(req, cvsCookieName(tenant.id)) ?? null;
+    const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data, settings: s.settings, allowSandbox, cvsBinding });
     if (order.payment_method === "pchomepay") {
       try {
         const pay = await startPchomepayPayment({ store, baseUrl, clientFactory }, { tenant, order, accessKey });
