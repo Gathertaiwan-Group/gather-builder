@@ -16,6 +16,10 @@ import { createPerson } from "@/lib/services/directory";
 import { completeDocumentUpload, createDocumentUpload, downloadDocument, uploadDocumentDirect } from "@/lib/services/downloads";
 import { DOWNLOADS_BUCKET, supabaseFileStorage } from "@/lib/storage/files";
 import { LOOKUP_NOT_FOUND, importCertificates, lookupCertificate } from "@/lib/services/certificates";
+import { createReview, productReviewSummary } from "@/lib/services/reviews";
+import { createProduct, placeOrder } from "@/lib/services/shop";
+import { markOrderPaid } from "@/lib/services/orders";
+import { configureModule } from "@/lib/services/modules";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -41,8 +45,9 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads", "certificates"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads", "certificates", "reviews"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
+    await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "CT" } });
     await publishSite(ctx, { site: slug, confirm: true });
   });
 
@@ -126,5 +131,16 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     const del = await db.from("builder_cert_lookups").delete().eq("tenant_id", tenant.id);
     expect(del.error?.code).toBe("42501");
     expect((await store.listCertLookups(tenant.id, 10)).length).toBe(2);
+  });
+
+  it("reviews：同一訂單同一商品併發 5 次只成立 1 則（DB unique）；未審核不公開", async () => {
+    const tenant = (await store.getTenantBySlug(slug))!;
+    const p = await createProduct(ctx, { site: slug, slug: "teapot", name: "茶壺", price: 800, status: "published", confirm: true });
+    const m = (await store.insertMember({ tenant_id: tenant.id, email: `rv-${ts}@example.com`, password_hash: "x", name: "評價者", phone: null }))!;
+    const { order } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant, member: m, data: { items: [{ productId: p.id, qty: 1 }], contact: { name: "評價者", email: m.email, phone: "0912345678" }, shipping: { name: "評價者", phone: "0912345678", address: "台中" }, paymentMethod: "offline" } });
+    await markOrderPaid(ctx, { site: slug, orderNo: order.order_no, confirm: true });
+    const r = await Promise.allSettled(Array.from({ length: 5 }, () => createReview(store, { tenant, member: m, data: { productId: p.id, orderId: order.id, rating: 5 } })));
+    expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    expect((await productReviewSummary(store, tenant, p.id)).count).toBe(0);
   });
 });

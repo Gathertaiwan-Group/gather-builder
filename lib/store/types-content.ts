@@ -169,7 +169,34 @@ export interface CertLookupRow {
   at: string;
 }
 
+/** reviews：商品評價 */
+export interface ReviewRow {
+  id: string;
+  tenant_id: string;
+  product_id: string;
+  order_id: string;
+  member_id: string;
+  display_name: string;
+  rating: number;
+  body: string;
+  images: string[];
+  status: "pending" | "published" | "hidden";
+  reply: string | null;
+  replied_at: string | null;
+  moderated_by: string | null;
+  moderated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContentStore {
+  // reviews
+  /** 同訂單同商品已有 → 丟 ServiceError(conflict) */
+  insertReview(row: Omit<ReviewRow, "id" | "created_at" | "updated_at" | "reply" | "replied_at" | "moderated_by" | "moderated_at">): Promise<ReviewRow>;
+  updateReview(tenantId: string, id: string, patch: Partial<Pick<ReviewRow, "status" | "reply" | "replied_at" | "moderated_by" | "moderated_at">>): Promise<ReviewRow | null>;
+  getReview(tenantId: string, id: string): Promise<ReviewRow | null>;
+  listReviews(tenantId: string, opts: { productId?: string; memberId?: string; status?: ReviewRow["status"]; limit: number; offset: number }): Promise<{ rows: ReviewRow[]; total: number }>;
+
   // certificates
   /** 依 (tenant, cert_no) upsert，回傳新增／更新筆數 */
   upsertCertificates(rows: Omit<CertificateRow, "id" | "created_at" | "updated_at">[]): Promise<{ inserted: number; updated: number }>;

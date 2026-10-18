@@ -7,6 +7,7 @@ import * as i18n from "../services/i18n";
 import * as directory from "../services/directory";
 import * as downloads from "../services/downloads";
 import * as certificates from "../services/certificates";
+import * as reviews from "../services/reviews";
 import { getFileStorage } from "../storage/files";
 
 /**
@@ -329,6 +330,38 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: RO,
     },
     wrap(async (a) => certificates.listCertificateLookups(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 商品評價（reviews） */
+
+  server.registerTool(
+    "list_reviews",
+    {
+      description: "商品評價（評價者姓名遮罩）。status：pending 待審核（未公開）／published／hidden。需要 site:read。",
+      inputSchema: { site, status: z.enum(["pending", "published", "hidden"]).optional(), productId: z.string().optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => reviews.listReviews(ctx, a)),
+  );
+
+  server.registerTool(
+    "moderate_review",
+    {
+      description: "審核評價：publish 公開（顯示在商品頁、計入平均分）／hide 隱藏。**必須** confirm: true。需要 reviews:write。",
+      inputSchema: { site, reviewId: z.string(), action: z.enum(["publish", "hide"]), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => reviews.moderateReview(ctx, a)),
+  );
+
+  server.registerTool(
+    "reply_review",
+    {
+      description: "店家回覆評價（純文字，1000 字內；空字串＝刪除回覆）。評價已公開時立即顯示。**必須** confirm: true。需要 reviews:write。",
+      inputSchema: { site, reviewId: z.string(), reply: z.string(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => reviews.replyReview(ctx, a)),
   );
 }
 

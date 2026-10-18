@@ -176,6 +176,9 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_certificates` | certificates:read | 證照列表（姓名遮罩、不含生日；證號容錯查單筆） |
 | `set_certificate_status` | certificates:write | 有效／撤銷／停權（`confirm: true`） |
 | `list_certificate_lookups` | certificates:read | 公開查詢紀錄（不含查詢內容） |
+| `list_reviews` | site:read | 商品評價（評價者遮罩；pending 待審核） |
+| `moderate_review` | reviews:write | 公開／隱藏評價（`confirm: true`） |
+| `reply_review` | reviews:write | 店家回覆（純文字；`confirm: true`） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

@@ -221,6 +221,13 @@
 - **查詢紀錄** `builder_cert_lookups`：只記模式、是否查到、IP 與查詢鍵的雜湊（不存姓名、生日原文）；只增不改（service_role 只有 select／insert，真 DB 42501）。
 - scope：`certificates:read`（列表遮罩、不含生日；查詢紀錄）、`certificates:write`（匯入、變更狀態，都需 confirm）。2026-10-19 新增，需重新發行 token。
 
+## 商品評價（reviews 模組）
+
+- `builder_reviews`：unique (order_id, product_id)——**每張訂單每個商品一則**（真 DB 併發 5 次只成立 1 則）。
+- 資格（server 端，`createReview`）：登入中的有效會員、訂單是本人的（`member_id`）、訂單已付款或已出貨、非 sandbox、訂單品項含這個商品。商品頁只對有資格的會員顯示表單（`eligibleOrders`）。每 IP 每小時 10 則。
+- 預設 `pending`（設定 `requireApproval: false` 才直接公開）；店主 `moderate_review`（publish／hide）、`reply_review` 都需 `reviews:write`＋confirm。平均分與列表只算 published。
+- 防 XSS：內文與回覆是**純文字**（不轉 Markdown，React 轉義輸出）；評價者顯示名稱遮罩；圖片只接受設定 `imageHosts` 白名單網域的 https 網址（不含帳密；沒設白名單＝不開放附圖），`referrerPolicy=no-referrer`。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

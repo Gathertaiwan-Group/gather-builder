@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -33,6 +33,7 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const documents = new Map<string, DocumentRow>();
   const certs = new Map<string, CertificateRow>();
   const certLookups: CertLookupRow[] = [];
+  const reviews = new Map<string, ReviewRow>();
   extraSearch.push(async (tenantId, q) =>
     [...documents.values()]
       .filter((d) => d.tenant_id === tenantId && d.status === "published" && d.visibility === "public" && [d.title, d.description, d.category].some((x) => (x ?? "").toLowerCase().includes(q)))
@@ -113,6 +114,27 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async insertReview(row) {
+      if ([...reviews.values()].some((r) => r.order_id === row.order_id && r.product_id === row.product_id)) throw new ServiceError("conflict", "這筆訂單的這個商品已經評價過了");
+      const r: ReviewRow = { ...clone(row), id: randomUUID(), reply: null, replied_at: null, moderated_by: null, moderated_at: null, created_at: now(), updated_at: now() };
+      reviews.set(r.id, r);
+      return clone(r);
+    },
+    async updateReview(tenantId, id, patch) {
+      const r = reviews.get(id);
+      if (!r || r.tenant_id !== tenantId) return null;
+      const next = { ...r, ...patch, updated_at: now() };
+      reviews.set(id, next);
+      return clone(next);
+    },
+    async getReview(tenantId, id) {
+      const r = reviews.get(id);
+      return r && r.tenant_id === tenantId ? clone(r) : null;
+    },
+    async listReviews(tenantId, opts) {
+      const rows = [...reviews.values()].filter((r) => r.tenant_id === tenantId && (!opts.productId || r.product_id === opts.productId) && (!opts.memberId || r.member_id === opts.memberId) && (!opts.status || r.status === opts.status)).sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
     async upsertCertificates(rows) {
       let inserted = 0;
       let updated = 0;

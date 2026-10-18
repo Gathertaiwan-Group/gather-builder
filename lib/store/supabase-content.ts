@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,34 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async insertReview(row) {
+      const r = await db.from("builder_reviews").insert(row).select("*").single();
+      if (r.error?.code === "23505") throw new ServiceError("conflict", "這筆訂單的這個商品已經評價過了");
+      return must(r, "insertReview") as ReviewRow;
+    },
+    async updateReview(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_reviews").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateReview") as ReviewRow | null;
+    },
+    async getReview(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_reviews").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getReview") as ReviewRow | null;
+    },
+    async listReviews(tenantId, opts) {
+      let q = db.from("builder_reviews").select("*", { count: "exact" }).eq("tenant_id", tenantId);
+      if (opts.productId) {
+        if (!isUuid(opts.productId)) return { rows: [], total: 0 };
+        q = q.eq("product_id", opts.productId);
+      }
+      if (opts.memberId) {
+        if (!isUuid(opts.memberId)) return { rows: [], total: 0 };
+        q = q.eq("member_id", opts.memberId);
+      }
+      if (opts.status) q = q.eq("status", opts.status);
+      const r = await q.order("created_at", { ascending: false }).range(opts.offset, opts.offset + opts.limit - 1);
+      if (r.error) throw new Error(`listReviews: ${r.error.message}`);
+      return { rows: (r.data ?? []) as ReviewRow[], total: r.count ?? 0 };
+    },
     async upsertCertificates(rows) {
       if (!rows.length) return { inserted: 0, updated: 0 };
       const tenantId = rows[0]!.tenant_id;
