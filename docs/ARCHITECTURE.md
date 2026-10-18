@@ -188,6 +188,16 @@
 - **儲值訂單取消**：收回本金＋贈送（`capped`，ref `:topup_reverse`）；🔴 已用掉的部分只收回到 0（不讓餘額變負），不足記 `meta.shortfall`＋稽核 `wallet.reverse_shortfall`，由店家與客人另行處理（例如退款時扣除已用金額）。不會自動退款到信用卡。
 - 🔴 **法規**：儲值金屬預收款。正式上線前店家應自行確認是否需依《零售業等禮券定型化契約應記載及不得記載事項》等規定提供履約保證（銀行保證、信託、同業連帶）——平台只提供功能，不提供履約保證。模組說明、MCP 工具說明與後台「會員經營」都有提示。
 
+## 多語（i18n 模組）
+
+- **網址**：預設語言 zh-TW 不加前綴；其他語言 `/s/<slug>/<lang>/…`（en、ja、ko、zh-cn、th、vi、id、fr、de、es）。`middleware.ts` 把 `/s/<slug>/<lang>/<rest>` 改寫成 `/s/<slug>/<rest>` 並設 request header `x-gb-lang`（客戶端自己送的 `x-gb-lang` 一律刪掉；`/s/<slug>/<lang>/api…` 不改寫）。`loadSite` 讀這個 header：語言沒在**目前顯示內容**的 i18n 設定 `languages` 裡（或 i18n 沒開）→ 回 null（404）。所以**所有模組頁面**（商店、文章、活動、課程、會員…）都自動有外文網址；`makeRenderCtx` 的 basePath 帶 `/<lang>`，站內連結（`siteHref`）全部維持在同一語言。頁面路徑不能用語言代碼（`pagePath` 拒絕 /en、/ja/…）。
+- **html lang／hreflang**：root layout 依 `x-gb-lang` 設 `<html lang>`；`pageMetadata` 的 canonical 是目前語言網址，`alternates.languages` 列 zh-Hant-TW、各語言與 x-default；og:locale 依語言。頁首有語言切換（同一頁的各語言網址）。
+- **頁面翻譯存在草稿／快照**：`content.translations[lang] = { pages: { <path>: { title, seoTitle, seoDescription, sections: { <區塊 id>: { <欄位路徑>: { t, ai } } } } }, nav: { <索引>: { t, ai } } }`，跟著 `publish_site` 上線、`rollback` 一起還原；`preview_changes` 的差異會列出「翻譯有變（含 AI 翻譯）」。
+- **可翻譯欄位**（`lib/i18n/translatable.ts`）：區塊 props 的字串葉節點，排除比對鍵與非文字——key 為 id／slug／href／url／src／image／email／phone／code／*Slug／*Id／*Url…，或值是網址、路徑、純數字。渲染時（`SectionList`）只覆蓋「原本存在且為字串、且可翻譯」的位置，**翻譯永遠改不到 slug、價格、id**（記取農經官網比對鍵被翻譯的教訓）。缺翻譯的欄位顯示預設語言。
+- **模組資料翻譯** `builder_translations`（post／product／event／course × lang × field，field 只能是 title／name／excerpt／summary／body_md／description_md）：`draft_value` → `publish_translations`（publish＋confirm）才複製到 `published_value`。前台 `localizeRows()` 已發布網站讀 published、預覽讀草稿。
+- **AI 翻譯** `translate_content`（MCP、後台「多語」按鈕）：Gemini JSON 模式（`lib/ai/translate.ts`），只送可翻譯欄位、只採用送出去的 key（多回的丟掉）；結果一律進草稿並標 `ai: true`；預設不覆蓋店主手動翻譯（`overwrite: true` 才重翻）。限流（`builder_rate_hit`，DB 原子）：每租戶每日 `aiDailyLimit`（預設 50）＋每分鐘 6 次，被擋不呼叫 AI。沒有 `GEMINI_API_KEY` 時只有 is_test 網站用 mock（`[en] 原文`）供 e2e。
+- 已知限制：模組頁面裡的固定按鈕／標籤文字（「加入購物車」「報名」等）第一版仍是中文，只有網站外框（購物車、會員、搜尋、語言、預覽橫幅）有字典；Email 通知仍是中文。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

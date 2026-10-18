@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeProducts, localizeRow, localizeRows } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
@@ -16,7 +17,7 @@ async function load(props: Props) {
   const site = await loadModulePage(raw, "shop", sp.preview);
   if (!site) return null;
   const store = getStore();
-  const product = await store.getProductBySlug(site.tenant.id, slug);
+  const product = await localizeRow(store, site, "product", await store.getProductBySlug(site.tenant.id, slug));
   // 草稿商品只在預覽模式看得到
   if (!product || (product.status !== "published" && site.mode !== "preview")) return null;
   return { site, product, variants: await store.listVariants(site.tenant.id, [product.id]) };

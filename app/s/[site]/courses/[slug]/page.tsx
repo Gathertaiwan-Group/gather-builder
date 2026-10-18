@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeNested, localizeRow } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
@@ -18,8 +19,10 @@ async function load(props: Props) {
   const [{ site: raw, slug }, sp] = await Promise.all([props.params, props.searchParams]);
   const site = await loadModulePage(raw, "courses", sp.preview);
   if (!site) return null;
-  const item = (await publicCourses(getStore(), site.tenant)).find((x) => x.course.slug === slug);
-  return item ? { site, item, sp } : null;
+  const found = (await publicCourses(getStore(), site.tenant)).find((x) => x.course.slug === slug);
+  if (!found) return null;
+  const item = { ...found, course: (await localizeRow(getStore(), site, "course", found.course))! };
+  return { site, item, sp };
 }
 
 export async function generateMetadata(props: Props): Promise<Metadata> {

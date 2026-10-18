@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeProducts, localizeRow, localizeRows } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
@@ -22,7 +23,7 @@ export default async function ShopIndex(props: Props) {
   const site = await loadModulePage(raw, "shop", sp.preview);
   if (!site) notFound();
   const ctx = makeRenderCtx(site, "/shop");
-  const items = await publicProducts(getStore(), site.tenant.id, 100);
+  const items = await localizeProducts(getStore(), site, await publicProducts(getStore(), site.tenant.id, 100));
   return (
     <SiteShell ctx={ctx}>
       <section className="gb-section">

@@ -48,7 +48,8 @@ modules/<id>/
 | `members` | core | `/account`、`/account/login`、`register`、`forgot`、`reset?token=`、`verify?token=` | `builder_members`、`builder_member_sessions`、`builder_member_tokens` | `list_members`、`get_member`、`disable_member` |
 | `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`get_payment_setup_status` |
 
-`shop` 的| `stored-value` | members、shop | `/wallet`（方案與購買）、`/s/<slug>/api/wallet/topup`；結帳「儲值金」；會員中心「我的儲值金」；區塊 `topup_plans`；後台「會員經營」 | `builder_wallet_ledger`（只增不改）、`builder_topup_plans` | `get_member_balance`、`adjust_balance`、`create_topup_plan`、`update_topup_plan`、`list_topup_plans` |
+`shop` 的| `i18n` | core | `/s/<slug>/<lang>/…`（所有頁面）；語言切換；後台「多語」 | `builder_translations`；頁面翻譯在 `content.translations` | `translate_content`、`set_translation`、`list_translations`、`publish_translations` |
+| `stored-value` | members、shop | `/wallet`（方案與購買）、`/s/<slug>/api/wallet/topup`；結帳「儲值金」；會員中心「我的儲值金」；區塊 `topup_plans`；後台「會員經營」 | `builder_wallet_ledger`（只增不改）、`builder_topup_plans` | `get_member_balance`、`adjust_balance`、`create_topup_plan`、`update_topup_plan`、`list_topup_plans` |
 | `loyalty` | members、shop | 結帳「點數折抵」；會員中心「我的點數」；區塊 `loyalty_tiers` | `builder_points_ledger`（只增不改）、`builder_member_tiers`；訂單欄位 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid` | `get_member_points`、`adjust_points`、`list_tiers`、`update_tiers` |
 
 設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`、`onlinePaymentHoldMinutes`（線上刷卡保留，預設 60）、`pchomepayAtm`（另提供 ATM）、`maxQtyPerItem`（預設 10）。
@@ -74,6 +75,7 @@ modules/<id>/
 
 設定（`configure_module`，進草稿、發布後生效）：
 - `loyalty`：`earnPerAmount`（每 X 元 1 點，預設 100）、`pointValue`（1 點＝N 元，預設 1）、`maxRedeemPercent`（單筆折抵上限 %，預設 50）、`redeemEnabled`、`pointsExpireDays`（預設 365）、`tierWindowMonths`（預設 12，0＝累計）、`tiers[]`（`id` 比對鍵、`name`、`minSpend`、`multiplier`、`discountPercent`、`perks`）。全部有預設，`{}` 即啟用。
+- `i18n`：`languages`（en、ja、ko、zh-cn、th、vi、id、fr、de、es）、`aiDailyLimit`（預設 50）、`glossary`（給 AI 的專有名詞指引）。新區塊類型的文字欄位會自動成為可翻譯欄位；比對用的 props 請命名為 `*Slug`／`*Id`／`*Url`／`*Href` 或 slug／id／code 等（`lib/i18n/translatable.ts` 會排除）。
 - `stored-value`：`ownerEmail`、`notice`（儲值頁注意事項，例如履約保證說明）。🔴 儲值金屬預收款，上線前店家須確認履約保證／信託義務。
 - `courses`：`ownerEmail`。區塊 `courses_list`、`course_detail`。
 - `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`、`freeBookingsPerEmailPerDay`（每 email 每天免費預約上限，預設 2）。區塊 `booking_widget`。

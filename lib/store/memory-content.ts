@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, TopupPlanRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, TopupPlanRow, TranslationRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -26,6 +26,8 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   /** 與 SQL 版本對齊（0022 起支援儲值金扣款） */
   const walletEnabled = true;
   const plans = new Map<string, TopupPlanRow>();
+  const translations = new Map<string, TranslationRow>();
+  const trKey = (r: Pick<TranslationRow, "tenant_id" | "entity_type" | "entity_id" | "lang" | "field">) => `${r.tenant_id}|${r.entity_type}|${r.entity_id}|${r.lang}|${r.field}`;
 
   const entries = (l: CreditLedger, tenantId: string, memberId: string) => ledgers[l].filter((e) => e.tenant_id === tenantId && e.member_id === memberId);
   const state = (l: CreditLedger, tenantId: string, memberId: string) => computeLedgerState(entries(l, tenantId, memberId));
@@ -95,6 +97,26 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async upsertTranslationDrafts(rows) {
+      for (const r of rows) {
+        const k = trKey(r);
+        const cur = translations.get(k);
+        translations.set(k, { ...(cur ?? { id: randomUUID(), published_value: null, published_ai: false, published_at: null }), ...clone(r), draft_updated_at: now() } as TranslationRow);
+      }
+    },
+    async listTranslations(tenantId, opts) {
+      return clone([...translations.values()].filter((t) => t.tenant_id === tenantId && (!opts.lang || t.lang === opts.lang) && (!opts.entityType || t.entity_type === opts.entityType) && (!opts.entityIds || opts.entityIds.includes(t.entity_id))));
+    },
+    async publishTranslationDrafts(tenantId, opts, by) {
+      let n = 0;
+      for (const [k, t] of translations) {
+        if (t.tenant_id !== tenantId || t.draft_value === null || (opts.lang && t.lang !== opts.lang) || (opts.entityType && t.entity_type !== opts.entityType) || (opts.entityId && t.entity_id !== opts.entityId)) continue;
+        if (t.draft_value === t.published_value && t.draft_ai === t.published_ai) continue;
+        translations.set(k, { ...t, published_value: t.draft_value, published_ai: t.draft_ai, published_at: now(), updated_by: by });
+        n++;
+      }
+      return n;
+    },
     async insertTopupPlan(row) {
       const r: TopupPlanRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
       plans.set(r.id, r);

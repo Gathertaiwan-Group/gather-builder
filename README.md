@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋內容與在地（i18n 多語＋AI 翻譯、search、directory、downloads、certificates、reviews、announcements）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。
@@ -46,7 +46,7 @@ npm run dev                  # http://localhost:3000
 | `PAYMENT_ENC_KEY` | shop 必要 | 金流憑證加密金鑰（32 bytes，base64 或 64 位 hex，`openssl rand -base64 32`）。換掉會讓既有憑證解不開（需重新輸入） |
 | `CRON_SECRET` | shop 建議 | 每日逾期訂單 cron（`/api/cron/expire-orders`）的 Bearer 金鑰（≥16 字） |
 | `AMEGO_RELAY_URL` / `AMEGO_RELAY_SECRET` | invoice 正式使用必要 | Amego 固定 IP 中繼網址與共享密鑰（header `x-relay-secret`）。沒設＝直連（Amego 會擋浮動 IP） |
-| `GEMINI_API_KEY` | ai-chat 必要 | 沒設時 ai-chat 為 pending_setup、前台不顯示 |
+| `GEMINI_API_KEY` | ai-chat、i18n AI 翻譯必要 | 沒設時 ai-chat 為 pending_setup、前台不顯示；i18n 只能手動翻譯（is_test 網站用 mock 翻譯供 e2e） |
 | `GEMINI_MODEL` | 選填 | 預設 `gemini-2.5-flash`；新 key 若 404 改 `gemini-3.5-flash` |
 | `SUPABASE_ACCESS_TOKEN` | 只給 migrate 腳本 | Management API token，**不要**放進 Vercel 或 repo |
 | `GB_PLATFORM_TOKEN` | 只給 e2e 腳本 | 平台級 MCP token |

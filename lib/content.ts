@@ -33,6 +33,26 @@ export const pageSchema = z
 
 export const navItemSchema = z.object({ label: text(40), href: safeHref }).strict();
 
+/** 多語翻譯（i18n 模組）：跟著草稿／發布走，publish_site 才上線。t＝譯文、ai＝AI 產生（店主改過就變 false） */
+export const trEntry = z.object({ t: z.string().max(20_000), ai: z.boolean().optional() }).strict();
+export const pageTranslationSchema = z
+  .object({
+    title: trEntry.optional(),
+    seoTitle: trEntry.optional(),
+    seoDescription: trEntry.optional(),
+    /** sectionId → 欄位路徑 → 譯文 */
+    sections: z.record(z.string().regex(/^s_[a-z0-9]{6,16}$/), z.record(z.string().max(200), trEntry)).default({}),
+  })
+  .strict();
+export const langTranslationSchema = z
+  .object({
+    pages: z.record(z.string().max(200), pageTranslationSchema).default({}),
+    /** 導覽列索引 → 譯文 */
+    nav: z.record(z.string().regex(/^\d{1,2}$/), trEntry).default({}),
+  })
+  .strict();
+export type LangTranslation = z.infer<typeof langTranslationSchema>;
+
 export const siteContentSchema = z
   .object({
     theme: themeSchema,
@@ -40,6 +60,8 @@ export const siteContentSchema = z
     nav: z.array(navItemSchema).max(12),
     /** 模組設定（configure_module 寫進草稿，發布後才對外生效） */
     moduleSettings: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+    /** i18n：語言代碼 → 翻譯（沒有時不出現這個 key，避免舊網站的快照被誤判為有變更） */
+    translations: z.record(z.string().regex(/^[a-z]{2}(-[a-z]{2})?$/), langTranslationSchema).optional(),
   })
   .strict()
   .superRefine((c, ctx) => {

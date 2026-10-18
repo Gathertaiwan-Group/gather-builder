@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
 import { publicCourses } from "@/lib/services/courses";
+import { localizeNested } from "@/lib/services/i18n";
 import { SiteShell, makeRenderCtx } from "@/components/site/SiteShell";
 import { CourseCards } from "@/modules/courses/sections";
 
@@ -22,7 +23,7 @@ export default async function CoursesIndex(props: Props) {
   const site = await loadModulePage(raw, "courses", sp.preview);
   if (!site) notFound();
   const ctx = makeRenderCtx(site, "/courses");
-  const items = await publicCourses(getStore(), site.tenant);
+  const items = await localizeNested(getStore(), site, "course", await publicCourses(getStore(), site.tenant), "course");
   return (
     <SiteShell ctx={ctx}>
       <section className="gb-section">

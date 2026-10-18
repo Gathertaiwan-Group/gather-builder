@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeRow, localizeRows } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadSite, moduleActive, moduleConfig } from "@/lib/site-loader";
 import { resolveSiteSlug } from "@/lib/tenant-resolve";
@@ -32,12 +33,14 @@ export default async function BlogIndex(props: Props) {
   if (!r) notFound();
   const cfg = moduleConfig<{ listTitle?: string; postsPerPage?: number }>(r.site, "blog");
   const per = cfg.postsPerPage ?? 10;
-  const { rows, total } = await getStore().listPosts(r.site.tenant.id, {
+  const listed = await getStore().listPosts(r.site.tenant.id, {
     status: "published",
     limit: per,
     offset: (r.page - 1) * per,
     publishedBefore: new Date().toISOString(),
   });
+  const total = listed.total;
+  const rows = await localizeRows(getStore(), r.site, "post", listed.rows);
   const pages = Math.max(1, Math.ceil(total / per));
   const ctx = makeRenderCtx(r.site, "/blog");
   const pageHref = (n: number) => {

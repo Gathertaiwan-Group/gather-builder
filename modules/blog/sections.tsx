@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { localizeRow, localizeRows } from "@/lib/services/i18n";
 import { getStore } from "@/lib/store";
 import { siteHref, type SectionComponent } from "../render-types";
 import type { postsListProps } from "./manifest";
@@ -10,12 +11,13 @@ export function formatDate(iso: string | null): string {
 
 export const PostsList: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof postsListProps>;
-  const { rows } = await getStore().listPosts(ctx.site.tenant.id, {
+  const listed = await getStore().listPosts(ctx.site.tenant.id, {
     status: "published",
     limit: p.limit,
     offset: 0,
     publishedBefore: new Date().toISOString(),
   });
+  const rows = await localizeRows(getStore(), ctx.site, "post", listed.rows);
   return (
     <section className="gb-section">
       <div className="gb-container">

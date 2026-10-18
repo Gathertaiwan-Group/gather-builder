@@ -79,6 +79,7 @@ claude mcp list          # 確認狀態 ✓ Connected
 15. 「我要賣線上課」→ `enable_module courses`（付費要 shop）→ `create_course { price }` → `add_lesson`（YouTube 未公開連結；第一課 `isPreview: true`）→ `update_course { patch:{status:"published"}, confirm:true }` → `add_section courses_list` → 發布。學員付款（`mark_order_paid` 或 PChomePay）後自動開通；送課給某人 → `grant_course { email, confirm:true }`。
 17. 「我要做會員點數」→ `enable_module loyalty`（members、shop 自動帶入）→ `update_tiers { tiers:[{id:"silver",name:"銀卡",minSpend:3000,multiplier:1.5,discountPercent:5}] }` → `add_section loyalty_tiers` → 發布。客訴補點 → `adjust_points { email, amount: 50, reason, confirm: true }`。
 18. 「我要開放儲值」→ `enable_module stored-value` → `create_topup_plan { name:"儲 1000 送 100", payAmount:1000, bonusAmount:100, bonusExpireDays:180, status:"published", confirm:true }` → `add_section topup_plans` → 發布。會員付款後自動入帳，結帳可用儲值金付款。🔴 提醒店家確認履約保證／信託義務。
+19. 「網站要有英文版」→ `enable_module i18n { languages: ["en"] }` → `translate_content { lang:"en", target:{type:"page", path:"/"} }`（每頁一次；導覽 `{type:"nav"}`；文章 `{type:"post", slug}`）→ 看結果、需要時 `set_translation` 修改 → `preview_changes`（預覽網址加 /en 看英文）→ `publish_site` ＋ `publish_translations { confirm:true }`。英文網址 `/s/<slug>/en/…`。
 16. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
@@ -157,6 +158,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `adjust_balance` | members:write | 手動增減儲值金（理由必填；扣款不能超過可用；**必須** `confirm: true`） |
 | `create_topup_plan` / `update_topup_plan` | commerce:write | 儲值方案（付 X 得 X＋贈送、贈送到期天數）；上架或改已上架需 publish ＋ confirm |
 | `list_topup_plans` | site:read | 儲值方案列表 |
+| `translate_content` | content:write | AI 翻譯頁面／導覽／文章／商品／活動／課程（只翻文字欄位、進草稿、標記 AI；每日上限） |
+| `set_translation` | content:write | 手動翻譯或修改（key：title、seoTitle、seoDescription、s.<區塊id>.<欄位>、nav.<i>、或模組資料欄位；null＝刪除） |
+| `list_translations` | site:read | 翻譯進度（每語言 × 每頁、模組資料草稿／已發布） |
+| `publish_translations` | publish | 模組資料翻譯上線（**必須** `confirm: true`）；頁面翻譯跟著 `publish_site` |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

@@ -47,5 +47,14 @@ export function diffContent(published: SiteContent | null, draft: SiteContent): 
     if (!same(oldOrder, newOrder)) out.push(`頁面 ${path}：區塊順序調整`);
   }
   for (const [path, p] of oldPages) if (!newPages.has(path)) out.push(`刪除頁面 ${path}「${p.title}」`);
+  // i18n：翻譯跟著草稿走
+  const pt = published.translations ?? {};
+  const dt = draft.translations ?? {};
+  for (const lang of new Set([...Object.keys(pt), ...Object.keys(dt)])) {
+    if (same(pt[lang] ?? null, dt[lang] ?? null)) continue;
+    const paths = [...new Set([...Object.keys(pt[lang]?.pages ?? {}), ...Object.keys(dt[lang]?.pages ?? {})])].filter((x) => !same(pt[lang]?.pages?.[x] ?? null, dt[lang]?.pages?.[x] ?? null));
+    const ai = Object.values(dt[lang]?.pages ?? {}).some((pg) => [pg.title, pg.seoTitle, pg.seoDescription, ...Object.values(pg.sections ?? {}).flatMap((x) => Object.values(x))].some((e) => e?.ai));
+    out.push(`翻譯（${lang}）有變：${paths.join("、") || "導覽列"}${ai ? "（含 AI 翻譯，請確認內容）" : ""}`);
+  }
   return out;
 }

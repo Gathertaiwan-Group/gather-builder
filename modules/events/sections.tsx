@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { localizeNested, localizeRow } from "@/lib/services/i18n";
 import { getStore } from "@/lib/store";
 import { renderMarkdown } from "@/lib/markdown";
 import { currentMember } from "@/lib/site-request";
@@ -49,7 +50,7 @@ export function EventCards({ ctx, items }: { ctx: RenderCtx; items: PublicEvent[
 
 export const EventsList: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof eventsListProps>;
-  const items = await publicEvents(getStore(), ctx.site.tenant, p.limit);
+  const items = await localizeNested(getStore(), ctx.site, "event", await publicEvents(getStore(), ctx.site.tenant, p.limit), "event");
   return (
     <section className="gb-section">
       <div className="gb-container">
@@ -154,7 +155,7 @@ export function EventView({ ctx, view, member, pay, offer, offerToken }: { ctx: 
 export const EventDetail: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof eventDetailProps>;
   const store = getStore();
-  const e = await store.getEventBySlug(ctx.site.tenant.id, p.eventSlug);
+  const e = await localizeRow(store, ctx.site, "event", await store.getEventBySlug(ctx.site.tenant.id, p.eventSlug));
   if (!e || e.status !== "published") return null;
   const [view, member, pay] = await Promise.all([publicEventView(store, ctx.site.tenant, e), currentMember(ctx.site.tenant), payOptionsFor(ctx.site)]);
   return (

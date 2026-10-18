@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeNested, localizeRow } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
@@ -22,7 +23,7 @@ export default async function EventsIndex(props: Props) {
   const site = await loadModulePage(raw, "events", sp.preview);
   if (!site) notFound();
   const ctx = makeRenderCtx(site, "/events");
-  const items = await publicEvents(getStore(), site.tenant, 60);
+  const items = await localizeNested(getStore(), site, "event", await publicEvents(getStore(), site.tenant, 60), "event");
   return (
     <SiteShell ctx={ctx}>
       <section className="gb-section">

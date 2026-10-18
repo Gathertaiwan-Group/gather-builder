@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import "./globals.css";
+import { htmlLang } from "@/lib/i18n/langs";
 
 export const metadata: Metadata = {
   title: { default: "Gather Builder｜給樂數位 模組化建站平台", template: "%s" },
@@ -8,9 +10,11 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // 多語：middleware 從 /s/<slug>/<lang>/… 帶進來的語言（其他頁面為 zh-Hant-TW）
+  const lang = htmlLang((await headers()).get("x-gb-lang"));
   return (
-    <html lang="zh-Hant-TW">
+    <html lang={lang}>
       <body>{children}</body>
     </html>
   );

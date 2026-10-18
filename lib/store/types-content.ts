@@ -74,7 +74,31 @@ export interface TopupPlanRow {
   updated_at: string;
 }
 
+/** i18n：模組資料（文章／商品／活動／課程）的翻譯 */
+export type TrEntityType = "post" | "product" | "event" | "course";
+export interface TranslationRow {
+  id: string;
+  tenant_id: string;
+  entity_type: TrEntityType;
+  entity_id: string;
+  lang: string;
+  field: string;
+  draft_value: string | null;
+  draft_ai: boolean;
+  draft_updated_at: string | null;
+  published_value: string | null;
+  published_ai: boolean;
+  published_at: string | null;
+  updated_by: string | null;
+}
+
 export interface ContentStore {
+  // i18n
+  upsertTranslationDrafts(rows: Pick<TranslationRow, "tenant_id" | "entity_type" | "entity_id" | "lang" | "field" | "draft_value" | "draft_ai" | "updated_by">[]): Promise<void>;
+  listTranslations(tenantId: string, opts: { lang?: string; entityType?: TrEntityType; entityIds?: string[] }): Promise<TranslationRow[]>;
+  /** 草稿 → 已發布（只動有草稿且與已發布不同的列），回傳筆數 */
+  publishTranslationDrafts(tenantId: string, opts: { lang?: string; entityType?: TrEntityType; entityId?: string }, by: string): Promise<number>;
+
   // 儲值方案
   insertTopupPlan(row: Omit<TopupPlanRow, "id" | "created_at" | "updated_at">): Promise<TopupPlanRow>;
   updateTopupPlan(tenantId: string, id: string, patch: Partial<Omit<TopupPlanRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<TopupPlanRow | null>;

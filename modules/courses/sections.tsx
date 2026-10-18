@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { localizeNested, localizeRow } from "@/lib/services/i18n";
 import { getStore } from "@/lib/store";
 import { renderMarkdown } from "@/lib/markdown";
 import { currentMember } from "@/lib/site-request";
@@ -31,7 +32,7 @@ export function CourseCards({ ctx, items }: { ctx: RenderCtx; items: CourseItem[
 
 export const CoursesList: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof coursesListProps>;
-  const items = (await publicCourses(getStore(), ctx.site.tenant)).slice(0, p.limit);
+  const items = await localizeNested(getStore(), ctx.site, "course", (await publicCourses(getStore(), ctx.site.tenant)).slice(0, p.limit), "course");
   return (
     <section className="gb-section">
       <div className="gb-container">
@@ -113,8 +114,9 @@ export function CourseView({ ctx, item, member, enrolled, pay }: { ctx: RenderCt
 export const CourseDetail: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof courseDetailProps>;
   const store = getStore();
-  const item = (await publicCourses(store, ctx.site.tenant)).find((x) => x.course.slug === p.courseSlug);
-  if (!item) return null;
+  const found = (await publicCourses(store, ctx.site.tenant)).find((x) => x.course.slug === p.courseSlug);
+  if (!found) return null;
+  const item = { ...found, course: (await localizeRow(store, ctx.site, "course", found.course))! };
   const [member, pay] = await Promise.all([currentMember(ctx.site.tenant), payOptionsFor(ctx.site)]);
   const enrolled = await canAccessCourse(store, ctx.site.tenant, item.course, member);
   return (

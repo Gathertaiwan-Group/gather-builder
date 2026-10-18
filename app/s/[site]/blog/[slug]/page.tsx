@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeRow, localizeRows } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadSite, moduleActive } from "@/lib/site-loader";
 import { resolveSiteSlug } from "@/lib/tenant-resolve";
@@ -18,7 +19,7 @@ async function load(props: Props) {
   const slug = resolveSiteSlug({ pathSlug: raw });
   const site = slug ? await loadSite(slug, sp.preview ?? null) : null;
   if (!site || !moduleActive(site, "blog")) return null;
-  const post = await getStore().getPostBySlug(site.tenant.id, postSlug);
+  const post = await localizeRow(getStore(), site, "post", await getStore().getPostBySlug(site.tenant.id, postSlug));
   // 草稿文章只在預覽模式看得到
   if (!post || (site.mode !== "preview" && (post.status !== "published" || !post.published_at || post.published_at > new Date().toISOString()))) return null;
   return { site, post };

@@ -5,9 +5,18 @@ import { siteHref, type RenderCtx } from "@/modules/render-types";
 import { LineFloating } from "@/modules/line/sections";
 import { siteBasePath } from "@/lib/tenant-resolve";
 import { ChatWidget } from "@/modules/ai-chat/ChatWidget";
+import { DEFAULT_LANG, langLabel, ui } from "@/lib/i18n/langs";
 
 export function makeRenderCtx(site: LoadedSite, path: string): RenderCtx {
-  return { site, basePath: siteBasePath(site.tenant.slug), path };
+  // 多語：非預設語言的站內連結一律帶 /<lang> 前綴
+  return { site, basePath: `${siteBasePath(site.tenant.slug)}${site.lang && site.lang !== DEFAULT_LANG ? `/${site.lang}` : ""}`, path };
+}
+
+/** 同一頁在各語言的網址（語言切換、hreflang 用）；path 為站內路徑 */
+export function langHref(site: LoadedSite, lang: string, path: string): string {
+  const base = `${siteBasePath(site.tenant.slug)}${lang === DEFAULT_LANG ? "" : `/${lang}`}`;
+  const q = site.mode === "preview" && site.previewToken ? `?preview=${encodeURIComponent(site.previewToken)}` : "";
+  return `${base}${path === "/" ? "" : path}${q}` || "/";
 }
 
 /** 租戶網站外框：主題變數、頁首導覽、頁尾、LINE 浮動鈕、GA4、預覽橫幅 */
@@ -26,7 +35,7 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
       )}
       {site.mode === "preview" && (
         <div className="sticky top-0 z-50 bg-amber-400 px-4 py-2 text-center text-sm font-semibold text-black" data-gb="preview-banner">
-          預覽模式：你看到的是尚未發布的草稿
+          {ui("preview", site.lang)}
         </div>
       )}
       {site.previewRejected && (
@@ -40,18 +49,32 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
           <nav aria-label="主選單" className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
             {site.content.nav.map((n, i) => (
               <a key={i} href={siteHref(ctx, n.href)} className="no-underline" style={{ color: "var(--gb-text)" }}>
-                {n.label}
+                {(site.lang !== DEFAULT_LANG && site.content.translations?.[site.lang]?.nav?.[String(i)]?.t) || n.label}
               </a>
             ))}
+            {moduleActive(site, "search") && (
+              <a href={siteHref(ctx, "/search")} className="no-underline" style={{ color: "var(--gb-text)" }} data-gb="search-link">
+                {ui("search", site.lang)}
+              </a>
+            )}
             {moduleActive(site, "shop") && (
               <a href={siteHref(ctx, "/checkout")} className="no-underline" style={{ color: "var(--gb-text)" }} data-gb="cart-link">
-                購物車
+                {ui("cart", site.lang)}
               </a>
             )}
             {moduleActive(site, "members") && (
               <a href={siteHref(ctx, "/account")} className="no-underline" style={{ color: "var(--gb-text)" }} data-gb="account-link">
-                會員
+                {ui("account", site.lang)}
               </a>
+            )}
+            {site.languages.length > 0 && (
+              <span className="flex gap-2" aria-label={ui("language", site.lang)} data-gb="lang-switch">
+                {[DEFAULT_LANG, ...site.languages].map((l) => (
+                  <a key={l} href={langHref(site, l, ctx.path)} hrefLang={l === DEFAULT_LANG ? "zh-Hant-TW" : l} aria-current={l === site.lang ? "true" : undefined} className="no-underline" style={{ color: "var(--gb-text)", fontWeight: l === site.lang ? 700 : 400 }}>
+                    {langLabel(l)}
+                  </a>
+                ))}
+              </span>
             )}
           </nav>
         </div>

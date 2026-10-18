@@ -22,8 +22,11 @@ export const imageUrl = z
 export const text = (max: number) => z.string().trim().min(1).max(max);
 export const optText = (max: number) => z.string().trim().max(max).optional();
 
+/** 多語網址前綴（與 lib/i18n/langs.ts 的 SUPPORTED_LANGS 一致；寫在這裡避免循環 import） */
+export const LANG_PREFIXES = ["en", "ja", "ko", "zh-cn", "th", "vi", "id", "fr", "de", "es"];
+
 /** 模組保留的站內路徑（部落格、商店、結帳、會員、訂單、站內 API） */
-export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api", "/events", "/book", "/courses", "/learn", "/wallet"];
+export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api", "/events", "/book", "/courses", "/learn", "/wallet", "/search", "/people", "/downloads", "/verify", "/announcements"];
 
 /** 網站內頁路徑：/、/about、/services/web */
 export const pagePath = z
@@ -34,6 +37,9 @@ export const pagePath = z
   })
   .refine((p) => !RESERVED_PATHS.some((r) => p === r || p.startsWith(`${r}/`)), {
     message: `${RESERVED_PATHS.join("、")} 由模組保留`,
+  })
+  .refine((p) => !LANG_PREFIXES.some((l) => p === `/${l}` || p.startsWith(`/${l}/`)), {
+    message: "語言代碼（/en、/ja、/ko、/zh-cn…）保留給多語網址前綴",
   });
 
 export const siteSlug = z

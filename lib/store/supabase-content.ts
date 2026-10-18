@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, TopupPlanRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, TopupPlanRow, TranslationRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,37 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async upsertTranslationDrafts(rows) {
+      if (!rows.length) return;
+      const now = nowIso();
+      must(await db.from("builder_translations").upsert(rows.map((r) => ({ ...r, draft_updated_at: now })), { onConflict: "tenant_id,entity_type,entity_id,lang,field" }), "upsertTranslationDrafts");
+    },
+    async listTranslations(tenantId, opts) {
+      let q = db.from("builder_translations").select("*").eq("tenant_id", tenantId);
+      if (opts.lang) q = q.eq("lang", opts.lang);
+      if (opts.entityType) q = q.eq("entity_type", opts.entityType);
+      if (opts.entityIds) {
+        const ids = opts.entityIds.filter(isUuid);
+        if (!ids.length) return [];
+        q = q.in("entity_id", ids.slice(0, 500));
+      }
+      return (must(await q.limit(5000), "listTranslations") ?? []) as TranslationRow[];
+    },
+    async publishTranslationDrafts(tenantId, opts, by) {
+      let q = db.from("builder_translations").select("*").eq("tenant_id", tenantId).not("draft_value", "is", null);
+      if (opts.lang) q = q.eq("lang", opts.lang);
+      if (opts.entityType) q = q.eq("entity_type", opts.entityType);
+      if (opts.entityId) {
+        if (!isUuid(opts.entityId)) return 0;
+        q = q.eq("entity_id", opts.entityId);
+      }
+      const rows = ((must(await q.limit(5000), "publishTranslationDrafts.list") ?? []) as TranslationRow[]).filter((r) => r.draft_value !== r.published_value || r.draft_ai !== r.published_ai);
+      const now = nowIso();
+      for (const r of rows) {
+        must(await db.from("builder_translations").update({ published_value: r.draft_value, published_ai: r.draft_ai, published_at: now, updated_by: by }).eq("id", r.id).eq("tenant_id", tenantId), "publishTranslationDrafts");
+      }
+      return rows.length;
+    },
     async insertTopupPlan(row) {
       return must(await db.from("builder_topup_plans").insert(row).select("*").single(), "insertTopupPlan") as TopupPlanRow;
     },

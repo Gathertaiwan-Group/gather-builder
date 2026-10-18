@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { localizeNested, localizeRow } from "@/lib/services/i18n";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { getStore } from "@/lib/store";
@@ -18,7 +19,7 @@ async function load(props: Props) {
   const [{ site: raw, slug }, sp] = await Promise.all([props.params, props.searchParams]);
   const site = await loadModulePage(raw, "events", sp.preview);
   if (!site) return null;
-  const e = await getStore().getEventBySlug(site.tenant.id, slug);
+  const e = await localizeRow(getStore(), site, "event", await getStore().getEventBySlug(site.tenant.id, slug));
   // 草稿活動只在預覽模式看得到
   if (!e || (e.status !== "published" && site.mode !== "preview")) return null;
   return { site, e, sp };

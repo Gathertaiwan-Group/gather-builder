@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { localizeProducts, localizeRow, localizeRows } from "@/lib/services/i18n";
 import { getStore } from "@/lib/store";
 import { renderMarkdown } from "@/lib/markdown";
 import { publicProducts, variantLabel } from "@/lib/services/shop";
@@ -40,7 +41,7 @@ export function ProductCards({ ctx, items, columns }: { ctx: RenderCtx; items: {
 
 export const ProductGrid: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof productGridProps>;
-  const items = await publicProducts(getStore(), ctx.site.tenant.id, p.limit);
+  const items = await localizeProducts(getStore(), ctx.site, await publicProducts(getStore(), ctx.site.tenant.id, p.limit));
   return (
     <section className="gb-section">
       <div className="gb-container">
@@ -87,7 +88,7 @@ export async function ProductView({ ctx, product, variants }: { ctx: RenderCtx; 
 export const ProductDetail: SectionComponent = async ({ props, ctx }) => {
   const p = props as z.output<typeof productDetailProps>;
   const store = getStore();
-  const product = await store.getProductBySlug(ctx.site.tenant.id, p.productSlug);
+  const product = await localizeRow(store, ctx.site, "product", await store.getProductBySlug(ctx.site.tenant.id, p.productSlug));
   if (!product || product.status !== "published") return null;
   const variants = await store.listVariants(ctx.site.tenant.id, [product.id]);
   return (
