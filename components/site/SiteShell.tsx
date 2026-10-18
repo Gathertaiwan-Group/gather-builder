@@ -14,7 +14,9 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
   const { site } = ctx;
   const { preset } = resolveTheme(site.content.theme);
   const core = moduleConfig<{ ga4MeasurementId?: string; footerText?: string }>(site, "core");
-  const ga = site.mode === "published" && core.ga4MeasurementId && /^G-[A-Z0-9]+$/.test(core.ga4MeasurementId) ? core.ga4MeasurementId : null;
+  // 會員／結帳／訂單頁的網址可能帶一次性 token 或訂單金鑰：一律不載入 GA（GA 會把完整網址送到 Google）
+  const privatePage = /^\/(account|orders|checkout)(\/|$)/.test(ctx.path);
+  const ga = site.mode === "published" && !privatePage && core.ga4MeasurementId && /^G-[A-Z0-9]+$/.test(core.ga4MeasurementId) ? core.ga4MeasurementId : null;
   return (
     <div className="gb-site" style={themeCssVars(site.content.theme) as React.CSSProperties}>
       {preset.googleFonts && (

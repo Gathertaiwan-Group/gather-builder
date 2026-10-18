@@ -511,6 +511,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
           })
           .describe("要修改的欄位"),
         confirm: z.boolean().optional().describe("影響已上架商品時必填 true"),
+        expectedStock: z.number().int().optional().describe("改 stock 時建議帶入你讀到的目前庫存：期間若有訂單扣庫存就拒絕（避免蓋掉）"),
       },
       annotations: WRITE,
     },

@@ -14,6 +14,9 @@ function must<T>(r: Res<T>, what: string): T {
   return r.data as T;
 }
 
+/** 規格比對鍵：options 依 key 排序後的 JSON */
+export const optionsKey = (o: Record<string, string>) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (s: string) => UUID.test(s);
 
@@ -60,6 +63,12 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
     },
     async insertMemberToken(row) {
       must(await db.from("builder_member_tokens").insert(row), "insertMemberToken");
+    },
+    async invalidateMemberTokens(tenantId, memberId, purpose) {
+      must(
+        await db.from("builder_member_tokens").update({ used_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("member_id", memberId).eq("purpose", purpose).is("used_at", null),
+        "invalidateMemberTokens",
+      );
     },
     async consumeMemberToken(tenantId, tokenHash, purpose, nowIso) {
       // 單一條件更新＝原子：同一個 token 併發消耗只有一個會拿到列
@@ -113,15 +122,23 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       return (must(await db.from("builder_product_variants").select("*").eq("tenant_id", tenantId).in("product_id", valid).order("sort"), "listVariants") ?? []) as VariantRow[];
     },
     async replaceVariants(tenantId, productId, rows) {
-      must(await db.from("builder_product_variants").delete().eq("tenant_id", tenantId).eq("product_id", productId), "replaceVariants.delete");
-      if (!rows.length) return [];
-      return (must(
-        await db
-          .from("builder_product_variants")
-          .insert(rows.map((r) => ({ ...r, tenant_id: tenantId, product_id: productId })))
-          .select("*"),
-        "replaceVariants.insert",
-      ) ?? []) as VariantRow[];
+      // 依 options 比對沿用原本的列：未付款訂單的 variant_id 不會因為「只是改價格」而失效
+      const existing = (must(await db.from("builder_product_variants").select("*").eq("tenant_id", tenantId).eq("product_id", productId), "replaceVariants.read") ?? []) as VariantRow[];
+      const byKey = new Map(existing.map((v) => [optionsKey(v.options), v]));
+      const keep = new Set<string>();
+      for (const r of rows) {
+        const hit = byKey.get(optionsKey(r.options));
+        if (hit && !keep.has(hit.id)) {
+          keep.add(hit.id);
+          must(await db.from("builder_product_variants").update({ price: r.price, sku: r.sku, stock: r.stock, sort: r.sort, options: r.options }).eq("tenant_id", tenantId).eq("id", hit.id), "replaceVariants.update");
+        } else {
+          const ins = must(await db.from("builder_product_variants").insert({ ...r, tenant_id: tenantId, product_id: productId }).select("id").single(), "replaceVariants.insert") as { id: string };
+          keep.add(ins.id);
+        }
+      }
+      const drop = existing.filter((v) => !keep.has(v.id)).map((v) => v.id);
+      if (drop.length) must(await db.from("builder_product_variants").delete().eq("tenant_id", tenantId).in("id", drop), "replaceVariants.delete");
+      return (must(await db.from("builder_product_variants").select("*").eq("tenant_id", tenantId).eq("product_id", productId).order("sort"), "replaceVariants.list") ?? []) as VariantRow[];
     },
 
     /* ---------------------------------------------------------- orders */

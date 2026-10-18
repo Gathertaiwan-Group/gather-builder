@@ -9,7 +9,7 @@ import { loadSite, moduleActive, moduleConfig } from "./site-loader";
 import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
-import { placeOrder, priceCart, shopSettingsSchema, type ShopSettings } from "./services/shop";
+import { orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettingsSchema, type ShopSettings } from "./services/shop";
 import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
@@ -34,7 +34,7 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
     const body = (await req.json().catch(() => null)) as { items?: unknown } | null;
     const priced = await priceCart(store, s.site.tenant.id, body?.items, s.settings);
     return json({
-      lines: priced.lines.map((l) => ({ productId: l.product_id, variantId: l.variant_id, name: l.name, variantLabel: l.variant_label, unitPrice: l.unit_price, qty: l.qty, lineTotal: l.line_total, stockAvailable: l.stockAvailable, slug: l.slug })),
+      lines: priced.lines.map((l) => ({ productId: l.product_id, variantId: l.variant_id, name: l.name, variantLabel: l.variant_label, unitPrice: l.unit_price, qty: l.qty, lineTotal: l.line_total, lowStock: l.stockAvailable !== null && l.stockAvailable <= 5, slug: l.slug })),
       subtotal: priced.subtotal,
       shippingFee: priced.shippingFee,
       total: priced.total,
@@ -85,6 +85,7 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
     if (order.payment_method === "pchomepay") {
       try {
         const pay = await startPchomepayPayment({ store, baseUrl, clientFactory }, { tenant, order, accessKey });
+        await sendOrderPlacedMails({ store, sendMail: getMailer(), baseUrl }, tenant, order, s.settings, orderPageUrl(baseUrl, tenant, order.order_no, accessKey));
         return NextResponse.redirect(pay.paymentUrl, 303);
       } catch (e) {
         // 金流建單失敗：取消訂單並回補庫存，讓客人重新結帳

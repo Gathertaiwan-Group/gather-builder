@@ -12,6 +12,15 @@ import { randomBytes } from "node:crypto";
 export const PCHOMEPAY_MIN_AMOUNT = 30;
 export const PAID_STATUS_CODES = new Set(["S", "00", "1"]);
 
+/**
+ * ATM 虛擬帳號的繳費期限必須比訂單保留時間短，否則客人在訂單逾期取消後才繳款（只能人工退款）。
+ * 保留不到 48 小時 → 不提供 ATM（只刷卡）；否則期限 = 保留天數 − 1（上限 5 天）。
+ */
+export function atmExpireDays(holdHours: number): number | null {
+  if (!Number.isFinite(holdHours) || holdHours < 48) return null;
+  return Math.min(5, Math.floor(holdHours / 24) - 1);
+}
+
 export function pchomepayBase(sandbox: boolean): string {
   return sandbox ? "https://sandbox-api.pchomepay.com.tw" : "https://api.pchomepay.com.tw";
 }
@@ -118,16 +127,17 @@ export function createPchomepayClient(creds: PchomepayCreds, fetchImpl: FetchLik
       return { ok: false, message: `${t.message}${hint}` };
     },
 
-    async createPayment(input: { orderNo: string; amount: number; itemName: string; itemUrl: string; returnUrl: string; notifyUrl: string; buyerEmail?: string }) {
+    async createPayment(input: { orderNo: string; amount: number; itemName: string; itemUrl: string; returnUrl: string; notifyUrl: string; buyerEmail?: string; holdHours: number }) {
+      const atm = atmExpireDays(input.holdHours);
       const body = JSON.stringify({
         order_id: input.orderNo,
-        pay_type: ["CARD", "ATM"],
+        pay_type: atm ? ["CARD", "ATM"] : ["CARD"],
         amount: Math.round(input.amount),
         return_url: input.returnUrl,
         notify_url: input.notifyUrl,
         items: [{ name: input.itemName.slice(0, 100), url: input.itemUrl }],
         buyer_email: input.buyerEmail || undefined,
-        atm_info: { expire_days: 2 },
+        atm_info: atm ? { expire_days: atm } : undefined,
       });
       const res = await call("/v1/payment", { method: "POST", body });
       if (!res) return null;

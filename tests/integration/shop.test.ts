@@ -8,7 +8,7 @@ import { createServiceClient, createSupabaseStore } from "@/lib/store/supabase";
 import { createSite } from "@/lib/services/sites";
 import { configureModule } from "@/lib/services/modules";
 import { publishSite } from "@/lib/services/publish";
-import { createProduct, placeOrder } from "@/lib/services/shop";
+import { createProduct, placeOrder, updateProduct } from "@/lib/services/shop";
 import { cancelOrder, handlePchomepayNotify, markOrderPaid, savePaymentAccount, startPchomepayPayment } from "@/lib/services/orders";
 import { getSessionMember, loginMember, registerMember, resetPassword, sha256 } from "@/lib/services/members";
 import { decryptSecret } from "@/lib/secretbox";
@@ -116,6 +116,32 @@ describe.skipIf(!enabled)("members／shop Supabase 實作（整合）", () => {
     expect(await store.releaseOrderStock(a.id, order.id)).toBe(false);
     expect((await store.getProductById(a.id, p.id))!.stock).toBe(5);
     await expect(markOrderPaid(ctx, { site: slugA, orderId: order.id, confirm: true })).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("規格分支：原子扣規格庫存、改價沿用規格 id、刪除規格後回補不誤補商品層；流水號 ≥ 10000 不截斷", async () => {
+    const a = (await store.getTenantBySlug(slugA))!;
+    const p = await createProduct(ctx, { site: slugA, slug: "tee", name: "T", price: 500, trackInventory: true, stock: 0, status: "published", confirm: true, variants: [{ options: { size: "M" }, stock: 2 }, { options: { size: "L" }, stock: 1 }] });
+    const M = p.variants.find((v) => v.options.size === "M")!;
+    const L = p.variants.find((v) => v.options.size === "L")!;
+    const o1 = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, variantId: M.id, qty: 2 }, { productId: p.id, variantId: L.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } });
+    let vs = await store.listVariants(a.id, [p.id]);
+    expect(vs.map((v) => v.stock).sort()).toEqual([0, 0]);
+    expect((await store.listOrderItems(a.id, o1.order.id)).every((i) => i.deducted_from === "variant")).toBe(true);
+    await expect(placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, variantId: M.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } })).rejects.toThrow(/庫存不足/);
+    // 改價（保留 M、刪掉 L）
+    const up = await updateProduct(ctx, { site: slugA, productId: p.id, confirm: true, patch: { variants: [{ options: { size: "M" }, price: 450, stock: 0 }] } });
+    expect(up.variants[0]!.id).toBe(M.id);
+    await cancelOrder(ctx, { site: slugA, orderId: o1.order.id, confirm: true });
+    vs = await store.listVariants(a.id, [p.id]);
+    expect(vs).toHaveLength(1);
+    expect(vs[0]!.stock).toBe(2); // M 補回 2；L 已刪除不補
+    expect((await store.getProductById(a.id, p.id))!.stock).toBe(0); // 不誤補到商品層
+
+    const db = createServiceClient();
+    await db.from("builder_order_counters").upsert({ tenant_id: a.id, day: "20991230", last: 9999 });
+    const mug = await createProduct(ctx, { site: slugA, slug: "counter", name: "C", price: 10, status: "published", confirm: true });
+    const big = await store.placeOrder(a.id, { order_prefix: "IT", member_id: null, contact, shipping, subtotal: 10, shipping_fee: 0, total: 10, payment_method: "offline", expires_at: new Date(Date.now() + 3600e3).toISOString(), access_key_hash: "x", note: null }, [{ product_id: mug.id, variant_id: null, name: "C", variant_label: null, sku: null, unit_price: 10, qty: 1, line_total: 10 }], "20991230");
+    expect(big.order_no).toBe("IT-20991230-10000");
   });
 
   it("金流憑證加密存放（DB 看不到明文）＋ notify 重複只轉換一次", async () => {

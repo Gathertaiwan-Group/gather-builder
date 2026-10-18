@@ -34,6 +34,11 @@ export default async function ProductsAdmin({ params, searchParams }: { params: 
                 <li key={p.id} className="list-none rounded border p-3 text-sm" data-admin="product-row">
                   <form action={`${action}/update`} method="post" className="flex flex-wrap items-end gap-2">
                     <input type="hidden" name="productId" value={p.id} />
+                    {/* 原值：只送出有改的欄位；庫存帶 expectedStock 防止蓋掉期間被訂單扣掉的庫存 */}
+                    <input type="hidden" name="origPrice" value={p.price} />
+                    <input type="hidden" name="origStock" value={p.stock} />
+                    <input type="hidden" name="origTrack" value={p.trackInventory ? "on" : ""} />
+                    <input type="hidden" name="origStatus" value={p.status} />
                     <strong className="mr-2 w-full sm:w-auto">
                       {p.name} <span className="font-normal text-neutral-500">/{p.slug}</span>
                       {p.variants.length > 0 && <span className="font-normal text-neutral-500">（{p.variants.length} 個規格）</span>}

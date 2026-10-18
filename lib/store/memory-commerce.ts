@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
+import { optionsKey } from "./supabase-commerce";
 import type {
   MemberRow,
   MemberSessionRow,
@@ -37,10 +38,10 @@ export function createMemoryCommerceStore(): CommerceStore {
     if (!o || o.tenant_id !== tenantId || o.stock_released_at) return false;
     orders.set(id, { ...o, stock_released_at: now(), updated_at: now() });
     for (const it of orderItems.filter((i) => i.order_id === id && i.stock_deducted)) {
-      if (it.variant_id) {
-        const v = variants.get(it.variant_id);
+      if (it.deducted_from === "variant") {
+        const v = it.variant_id ? variants.get(it.variant_id) : undefined;
         if (v) variants.set(v.id, { ...v, stock: v.stock + it.qty });
-      } else {
+      } else if (it.deducted_from === "product") {
         const p = products.get(it.product_id);
         if (p) products.set(p.id, { ...p, stock: p.stock + it.qty });
       }
@@ -101,6 +102,9 @@ export function createMemoryCommerceStore(): CommerceStore {
       const t: MemberTokenRow = { ...row, id: randomUUID(), created_at: now(), used_at: null };
       mtokens.set(t.id, t);
     },
+    async invalidateMemberTokens(tenantId, memberId, purpose) {
+      for (const t of mtokens.values()) if (t.tenant_id === tenantId && t.member_id === memberId && t.purpose === purpose && !t.used_at) t.used_at = now();
+    },
     async consumeMemberToken(tenantId, hash, purpose, nowIso) {
       const t = [...mtokens.values()].find((x) => x.token_hash === hash);
       if (!t || t.tenant_id !== tenantId || t.purpose !== purpose || t.used_at || t.expires_at <= nowIso) return null;
@@ -146,10 +150,26 @@ export function createMemoryCommerceStore(): CommerceStore {
       return clone([...variants.values()].filter((v) => v.tenant_id === tenantId && productIds.includes(v.product_id)).sort((a, b) => a.sort - b.sort));
     },
     async replaceVariants(tenantId, productId, rows) {
-      for (const v of [...variants.values()]) if (v.tenant_id === tenantId && v.product_id === productId) variants.delete(v.id);
-      const out = rows.map((r) => ({ ...r, id: randomUUID(), tenant_id: tenantId, product_id: productId, created_at: now() }));
-      for (const v of out) variants.set(v.id, v);
-      return clone(out);
+      const existing = [...variants.values()].filter((v) => v.tenant_id === tenantId && v.product_id === productId);
+      const keep = new Set<string>();
+      for (const r of rows) {
+        const hit = existing.find((v) => !keep.has(v.id) && optionsKey(v.options) === optionsKey(r.options));
+        if (hit) {
+          keep.add(hit.id);
+          variants.set(hit.id, { ...hit, ...r });
+        } else {
+          const v: VariantRow = { ...r, id: randomUUID(), tenant_id: tenantId, product_id: productId, created_at: now() };
+          variants.set(v.id, v);
+          keep.add(v.id);
+        }
+      }
+      for (const v of existing) {
+        if (keep.has(v.id)) continue;
+        variants.delete(v.id);
+        // 模擬 FK on delete set null
+        for (const it of orderItems) if (it.variant_id === v.id) it.variant_id = null;
+      }
+      return clone([...variants.values()].filter((v) => v.tenant_id === tenantId && v.product_id === productId).sort((a, b) => a.sort - b.sort));
     },
 
     async placeOrder(tenantId, order, items, day) {
@@ -211,7 +231,9 @@ export function createMemoryCommerceStore(): CommerceStore {
         updated_at: now(),
       };
       orders.set(id, row);
-      items.forEach((it, i) => orderItems.push({ ...clone(it), id: randomUUID(), tenant_id: tenantId, order_id: id, stock_deducted: plan[i]!.track }));
+      items.forEach((it, i) =>
+        orderItems.push({ ...clone(it), id: randomUUID(), tenant_id: tenantId, order_id: id, stock_deducted: plan[i]!.track, deducted_from: plan[i]!.track ? (it.variant_id ? "variant" : "product") : null }),
+      );
       return { id, order_no: orderNo };
     },
     async getOrderById(tenantId, id) {

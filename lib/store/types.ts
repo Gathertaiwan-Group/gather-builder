@@ -197,6 +197,8 @@ export interface OrderItemRow extends OrderItemInput {
   tenant_id: string;
   order_id: string;
   stock_deducted: boolean;
+  /** 下單時從哪裡扣庫存（回補只補回同一處） */
+  deducted_from: "product" | "variant" | null;
 }
 
 export interface OrderContact {
@@ -349,6 +351,8 @@ export interface Store {
   insertMemberToken(row: Omit<MemberTokenRow, "id" | "created_at" | "used_at">): Promise<void>;
   /** 一次性消耗：條件更新（未使用、未過期、用途相符）成功才回傳該列；否則 null */
   consumeMemberToken(tenantId: string, tokenHash: string, purpose: MemberTokenPurpose, nowIso: string): Promise<MemberTokenRow | null>;
+  /** 讓該會員某用途所有未使用的 token 失效（重設成功後用） */
+  invalidateMemberTokens(tenantId: string, memberId: string, purpose: MemberTokenPurpose): Promise<void>;
 
   // products
   listProducts(tenantId: string, opts: { status?: "draft" | "published"; limit: number; offset: number }): Promise<{ rows: ProductRow[]; total: number }>;
@@ -358,7 +362,7 @@ export interface Store {
   insertProduct(row: Omit<ProductRow, "id" | "created_at" | "updated_at">): Promise<ProductRow>;
   updateProduct(tenantId: string, id: string, patch: Partial<Omit<ProductRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<ProductRow>;
   listVariants(tenantId: string, productIds: string[]): Promise<VariantRow[]>;
-  /** 整份取代某商品的規格 */
+  /** 整份取代某商品的規格：options 相同的沿用原本的列（id 不變、只更新價格／SKU／庫存），其餘新增，多出的刪除 */
   replaceVariants(tenantId: string, productId: string, rows: Omit<VariantRow, "id" | "tenant_id" | "product_id" | "created_at">[]): Promise<VariantRow[]>;
 
   // orders
@@ -410,6 +414,7 @@ export type CommerceStore = Pick<
   | "revokeAllMemberSessions"
   | "insertMemberToken"
   | "consumeMemberToken"
+  | "invalidateMemberTokens"
   | "listProducts"
   | "getProductById"
   | "getProductBySlug"

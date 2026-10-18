@@ -64,6 +64,10 @@
 - **下單**：SQL 函式 `builder_place_order`（單一交易）：逐項 `update … set stock = stock - qty where stock >= qty`（只有 `track_inventory` 的商品扣），任一不足就 raise、整筆回滾；同交易內遞增 `builder_order_counters` 產生 `<前綴>-YYYYMMDD-####`（台北日期）並寫入訂單與明細（明細記錄 `stock_deducted`，回補只補真的扣過的）。
 - **狀態機**：`lib/shop/machine.ts` 是唯一的轉換表（待付款→已付款/取消、已付款→出貨/取消，fulfilled／cancelled 為終點）；寫入一律條件式（`where status = from`），併發只有一個成功。
 - **取消與逾期**：`builder_cancel_order` 在同一交易內轉 cancelled ＋ 呼叫 `builder_release_order_stock`；回補以 `stock_released_at is null` 條件更新為冪等旗標，重複取消／重複回補不會多補。逾期未付（預設 72 小時）在讀取訂單時 lazy 處理，另有每日 cron `/api/cron/expire-orders`（`CRON_SECRET`，Vercel Hobby 只能每日）。
+- **庫存回補對位**：明細記錄 `deducted_from`（product／variant）。`update_product` 帶 variants 時依 options 比對沿用原規格列（id 不變）；被移除的規格才刪除，其未付款訂單取消時不會誤補到商品層。後台／MCP 改庫存可帶 `expectedStock`（後台自動帶），期間被訂單扣過就拒絕，避免把庫存蓋回去。
+- **GA**：`/account`、`/orders`、`/checkout` 一律不載入 GA（網址可能含一次性 token 或訂單金鑰）。
+- **ATM 期限**：保留時間 < 48h 時不提供 ATM（只刷卡）；否則 ATM 期限 = 保留天數 − 1（上限 5），一定早於訂單逾期。
+- **訂單成立信**：線下匯款下單即寄；線上付款要等金流建單成功才寄（建單失敗的訂單會被取消）。
 - **訂單頁存取**：`/s/<slug>/orders/<編號>?k=<存取金鑰>`（DB 只存 sha256），或下單會員本人登入後直接看。頁面 `noindex`、`no-referrer`。
 
 ## 金流（PChomePay，每個租戶自己的商家帳號）
@@ -88,6 +92,10 @@
 |---|---|---|
 | 後台 session 無法單獨撤銷 | cookie 是無狀態 HMAC（12 小時），登出只刪自己瀏覽器的 cookie；外洩的 cookie 在到期前都有效。緊急時只能換 `ADMIN_SESSION_SECRET`（全部登出）。 | 改成 DB session 表（`builder_admin_sessions`，cookie 只放隨機 id），可逐筆撤銷；或換成正式身分系統（多使用者＋2FA）。 |
 | 前台與後台同源 | 租戶網站 `/s/<slug>` 與 `/admin` 同一個 origin。租戶內容雖然不能放程式碼（Markdown 轉義、URL 白名單、props strict），但若未來區塊出現 XSS，就能直接帶著後台 cookie 呼叫 `/api/admin`。 | 後台移到獨立子網域（例如 `admin.builder.gather.tw`，cookie 不設 Domain），租戶網站走子網域／自有網域；再加 CSP。 |
+| 未付款訂單佔庫存 | 訪客下單即扣庫存，保留到逾期（預設 72h）；每 IP 每小時 20 單限流，但多 IP 仍可凍結限量商品。 | 線上付款縮短保留時間、每 email/電話限制同時 pending 單數、提高 cron 頻率。 |
+| 更換 PChomePay 憑證後舊單回查失敗 | notify 回查用「目前」的憑證；正式帳號 A→B 更換後，A 帳號的未完成付款回查會失敗（回 500 讓對方重試），可能逾期取消且不會警示。 | payments 記錄建單時的 app_id、或有 pending 線上付款時禁止更換憑證、回查連續失敗寄警示。 |
+| 所有租戶同源 | `/s/<slug>` 共用一個 origin：cookie 的 path／名稱隔離只防瀏覽器自動帶 cookie，防不了同源 JS。目前租戶無法放自訂程式碼（只允許 G- 格式 GA、Markdown 已消毒）。 | 開放任何自訂 HTML/script/GTM 之前，必須先改子網域或自有網域隔離。 |
+| 登入限流的 email 桶可被拿來鎖帳號 | 任何人對某 email 猜 10 次，該會員 15 分鐘內無法登入。 | 改成 IP＋email 組合，或對已知裝置放寬。 |
 | 會員信件依賴 Resend | 沒設 `RESEND_API_KEY` 時驗證／重設連結只寫 server log（正式站 log 會含一次性連結）。 | 正式站一定要設 Resend；長期改成每個租戶自己的寄件網域。 |
 | 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
 | 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |

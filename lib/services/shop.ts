@@ -38,6 +38,9 @@ export function taipeiDay(d = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit" }).format(d).replace(/-/g, "");
 }
 
+/** 單筆訂單上限（避免 int 溢位；也低於一般金流單筆上限） */
+export const MAX_ORDER_TOTAL = 2_000_000;
+
 export const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 
 /* ================================================================== 商品 */
@@ -116,7 +119,7 @@ export async function createProduct(ctx: ServiceContext, input: { site?: string 
 
 export async function updateProduct(
   ctx: ServiceContext,
-  input: { site?: string | null; productId?: string; slug?: string; confirm?: boolean; patch: Partial<z.input<typeof productInput>> },
+  input: { site?: string | null; productId?: string; slug?: string; confirm?: boolean; expectedStock?: number; patch: Partial<z.input<typeof productInput>> },
 ) {
   requireScope(ctx, "commerce:write");
   const tenant = await resolveTenant(ctx, input.site);
@@ -132,6 +135,10 @@ export async function updateProduct(
   const nextStatus = given.status ?? existing.status;
   if (existing.status === "published" || nextStatus === "published") requireLiveConfirm(ctx, "修改／上架／下架已上架的商品", input.confirm);
   if (p.slug && p.slug !== existing.slug && (await ctx.store.getProductBySlug(tenant.id, p.slug))) throw new ServiceError("conflict", `商品 slug「${p.slug}」已存在`);
+  // 庫存是絕對值：帶 expectedStock 時若期間有人下單（庫存已變）就拒絕，避免把剛扣掉的庫存蓋回去
+  if (given.stock !== undefined && input.expectedStock !== undefined && existing.stock !== input.expectedStock) {
+    throw new ServiceError("conflict", `「${existing.name}」的庫存在你讀取後已變動（目前 ${existing.stock}，你讀到的是 ${input.expectedStock}），請重新讀取後再改`);
+  }
   const patch: Partial<ProductRow> = {};
   if (given.slug !== undefined) patch.slug = p.slug;
   if (given.name !== undefined) patch.name = p.name;
@@ -246,6 +253,7 @@ export async function priceCart(store: Store, tenantId: string, raw: unknown, se
     });
   }
   const subtotal = lines.reduce((s, l) => s + l.line_total, 0);
+  if (subtotal > MAX_ORDER_TOTAL) throw new ServiceError("invalid", `單筆訂單金額上限為 ${twd(MAX_ORDER_TOTAL)}，請分開下單`);
   const threshold = settings.freeShippingThreshold;
   const shippingFee = lines.length === 0 ? 0 : threshold !== undefined && subtotal >= threshold ? 0 : (settings.shippingFee ?? 0);
   return { lines, subtotal, shippingFee, total: subtotal + shippingFee, problems };
@@ -334,17 +342,25 @@ export async function placeOrder(
   const orderUrl = orderPageUrl(deps.baseUrl, tenant, order.order_no, accessKey);
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "order.place", payload: { orderNo: order.order_no, total: order.total, method } });
 
+  // 線上付款：等金流建單成功後才寄（建單失敗訂單會被取消，不能先寄「訂單成立」）
+  if (method === "offline") await sendOrderPlacedMails(deps, tenant, order, settings, orderUrl);
+  return { order, accessKey, orderUrl };
+}
+
+export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow, order: OrderRow, settings: ShopSettings, orderUrl: string) {
+  const method = order.payment_method;
+  const hours = settings.orderExpireHours ?? 72;
+  const offlineInstructions = settings.offlineTransfer?.instructions ?? null;
   const lines = order.items.map((l) => `・${l.name}${l.variant_label ? `（${l.variant_label}）` : ""} × ${l.qty}　${twd(l.line_total)}`).join("\n");
   const sum = `${lines}\n小計 ${twd(order.subtotal)}　運費 ${twd(order.shipping_fee)}　總計 ${twd(order.total)}`;
   const payText =
     method === "offline"
-      ? `付款方式：線下匯款\n${avail.offlineInstructions ?? "店家將與你聯繫付款方式。"}\n請於 ${hours} 小時內完成付款，逾期訂單會自動取消。`
-      : "付款方式：線上付款（PChomePay 支付連）。若尚未完成付款，可由訂單頁重新前往付款。";
+      ? `付款方式：線下匯款\n${offlineInstructions ?? "店家將與你聯繫付款方式。"}\n請於 ${hours} 小時內完成付款，逾期訂單會自動取消。`
+      : "付款方式：線上付款（PChomePay 支付連）。請在付款頁完成付款；未完成付款的訂單會在期限後自動取消。";
   await mailSafe(deps, order.contact.email, `【${tenant.name}】訂單成立 ${order.order_no}`, `${order.contact.name} 你好，\n\n已收到你的訂單 ${order.order_no}：\n${sum}\n\n${payText}\n\n訂單狀態：${orderUrl}`);
   if (settings.ownerEmail) {
     await mailSafe(deps, settings.ownerEmail, `【${tenant.name}】新訂單 ${order.order_no}（${twd(order.total)}，${method === "offline" ? "線下匯款" : "線上付款"}）`, `${sum}\n\n訂購人：${order.contact.name} ${order.contact.email} ${order.contact.phone}\n收件：${order.shipping.name} ${order.shipping.phone} ${order.shipping.address}\n備註：${order.note ?? "-"}`);
   }
-  return { order, accessKey, orderUrl };
 }
 
 export function orderPageUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, orderNo: string, accessKey?: string) {

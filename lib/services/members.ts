@@ -269,6 +269,8 @@ export async function resetPassword(deps: MemberDeps, input: { tenant: TenantRow
   // 能收到重設信＝擁有這個信箱，順便視為已驗證
   await deps.store.updateMember(tenant.id, member.id, { password_hash: await hashPassword(password), email_verified_at: member.email_verified_at ?? new Date().toISOString() });
   const revokedSessions = await deps.store.revokeAllMemberSessions(tenant.id, member.id);
+  // 其他較早寄出、尚未使用的重設連結一併失效
+  await deps.store.invalidateMemberTokens(tenant.id, member.id, "reset_password");
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: "member:self", action: "member.password_reset", payload: { memberId: member.id, revokedSessions } });
   return { message: "密碼已更新，請用新密碼登入（其他裝置已全部登出）。", revokedSessions };
 }

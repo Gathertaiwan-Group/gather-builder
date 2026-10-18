@@ -27,7 +27,14 @@ export default async function OrderPage(props: Props) {
   const site = await loadModulePage(raw, "shop");
   if (!site) notFound();
   const store = getStore();
-  const found = await store.getOrderByNo(site.tenant.id, decodeURIComponent(orderNo));
+  let no = orderNo;
+  try {
+    no = decodeURIComponent(orderNo);
+  } catch {
+    notFound();
+  }
+  if (!/^[A-Z0-9]{2,8}-\d{8}-\d{4,}$/.test(no)) notFound();
+  const found = await store.getOrderByNo(site.tenant.id, no);
   const member = await currentMember(site.tenant);
   if (!found || !canViewOrder(found, sp.k, member)) notFound();
   const order = await expireIfDue(store, found);

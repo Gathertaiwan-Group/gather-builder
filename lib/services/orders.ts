@@ -283,6 +283,7 @@ export async function startPchomepayPayment(
     returnUrl: orderPageUrl(base, tenant, order.order_no, input.accessKey),
     notifyUrl: `${base}/api/pay/pchomepay/notify/${tenant.id}`,
     buyerEmail: order.contact.email,
+    holdHours: order.expires_at ? (new Date(order.expires_at).getTime() - Date.now()) / 3600_000 : 0,
   });
   if (!r) {
     await deps.store.updatePayment(tenant.id, payment.id, { status: "failed" });
