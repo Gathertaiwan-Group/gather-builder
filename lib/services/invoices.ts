@@ -159,12 +159,15 @@ export type IssueOutcome = { status: InvoiceRow["status"]; invoice: InvoiceRow; 
 export async function issueInvoiceForOrder(store: Store, tenant: TenantRow, order: OrderRow, actor: string): Promise<IssueOutcome> {
   if (order.status !== "paid" && order.status !== "fulfilled") throw new ServiceError("invalid", `訂單 ${order.order_no} 尚未付款，不能開立發票`);
   if (order.payment_sandbox) throw new ServiceError("invalid", `訂單 ${order.order_no} 是金流測試環境付款（沒有實際收款），不能開立發票`);
+  // 儲值方案是預收款，不是銷售：發票在儲值金實際消費（訂單用儲值金付款）時開
+  if (order.items.some((i) => (i as { item_kind?: string }).item_kind === "topup")) throw new ServiceError("invalid", `訂單 ${order.order_no} 是儲值方案（預收款），不開立發票；客人用儲值金消費時的訂單才開立`);
+  const amount = invoiceAmount(order);
   const acct = await store.getInvoiceAccount(tenant.id);
   if (!acct) throw new ServiceError("invalid", "尚未設定發票憑證（請平台擁有者到後台「電子發票」輸入）");
   const provider = await providerFactory(store, tenant.id);
   if (!provider) throw new ServiceError("invalid", "尚未設定發票憑證");
 
-  const { row } = await store.ensureInvoice({ tenant_id: tenant.id, order_id: order.id, provider: acct.provider, amount: order.total });
+  const { row } = await store.ensureInvoice({ tenant_id: tenant.id, order_id: order.id, provider: acct.provider, amount });
   if (row.status === "issued" || row.status === "voided" || row.status === "allowance") {
     return { status: row.status, invoice: row, message: `這張訂單已經有發票（${row.invoice_no}）` };
   }
@@ -213,8 +216,8 @@ export async function issueInvoiceForOrder(store: Store, tenant: TenantRow, orde
   const items = await store.listOrderItems(tenant.id, order.id);
   const r = await provider.issue({
     orderNo: order.order_no,
-    total: order.total,
-    items: invoiceLines({ items, shipping_fee: order.shipping_fee, discount_total: order.discount_total, total: order.total }),
+    total: amount,
+    items: invoiceLines({ items, shipping_fee: order.shipping_fee, discount_total: (order.discount_total ?? 0) + (order.tier_discount ?? 0) + (order.points_discount ?? 0), total: amount }),
     buyerEmail: order.contact.email,
     buyerName: order.contact.name,
     request: order.invoice_request ?? { type: "member" },
@@ -229,8 +232,14 @@ export async function issueInvoiceForOrder(store: Store, tenant: TenantRow, orde
 }
 
 /** 付款成功的副作用：租戶設定為自動開立時才開（失敗不影響付款流程） */
+/** 發票金額＝實付（金流／匯款）＋儲值金支付（儲值金是預收款，消費時才算銷售）；點數與等級折扣是折扣 */
+export function invoiceAmount(o: Pick<OrderRow, "total" | "wallet_paid">): number {
+  return o.total + (o.wallet_paid ?? 0);
+}
+
 export async function autoIssueOnPaid(store: Store, tenant: TenantRow, order: OrderRow) {
   try {
+    if (order.items.some((i) => (i as { item_kind?: string }).item_kind === "topup")) return null;
     if (!(await invoiceActive(store, tenant.id))) return null;
     const settings = await publishedInvoiceSettings(store, tenant);
     if (settings.issueMode !== "auto_on_paid" || order.payment_sandbox) return null;
@@ -278,7 +287,7 @@ export async function issueInvoice(ctx: ServiceContext, input: { site?: string |
   if (existing && existing.status !== "pending" && existing.status !== "failed" && existing.status !== "issuing") {
     return { ...invoiceSummary(existing, o.order_no), note: `這張訂單已經有發票（${STATUS_LABEL[existing.status]}），不會重複開立` };
   }
-  requireConfirm(input.confirm, `開立電子發票是法律文件，送出後無法撤回（只能作廢或折讓）。訂單 ${o.order_no}，金額 ${twd(o.total)}`);
+  requireConfirm(input.confirm, `開立電子發票是法律文件，送出後無法撤回（只能作廢或折讓）。訂單 ${o.order_no}，金額 ${twd(invoiceAmount(o))}`);
   const r = await issueInvoiceForOrder(ctx.store, tenant, o, ctx.actor.label);
   return { ...invoiceSummary(r.invoice, o.order_no), note: r.message };
 }

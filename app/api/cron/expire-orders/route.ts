@@ -5,6 +5,7 @@ import { retryDueInvoices } from "@/lib/services/invoices";
 import { json } from "@/lib/http";
 import { runEventsCron } from "@/lib/services/events";
 import { runBookingCron } from "@/lib/services/booking";
+import { runLoyaltyCron } from "@/lib/services/loyalty";
 import { getMailer } from "@/lib/mail";
 import { baseUrlFrom } from "@/lib/runtime";
 
@@ -31,6 +32,9 @@ export async function GET(req: Request) {
   const bk = await runBookingCron(deps).catch((e) => (console.error("[cron] booking", e), { reminded: -1 }));
   // M2：補做失敗的付款／取消副作用（冪等；連續失敗警示店主）
   const hooks = await retryOrderHooks(deps, { limit: 200 }).catch((e) => (console.error("[cron] hooks", e), { scanned: -1, resolved: 0, failed: 0 }));
+  // 第五批：點數到期（FIFO）、等級降級
+  const loyalty = await runLoyaltyCron(getStore()).catch((e) => (console.error("[cron] loyalty", e), { expired: -1, evaluated: 0, changed: 0 }));
+  console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)}`);
   console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks });
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty });
 }

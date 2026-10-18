@@ -48,7 +48,9 @@ modules/<id>/
 | `members` | core | `/account`、`/account/login`、`register`、`forgot`、`reset?token=`、`verify?token=` | `builder_members`、`builder_member_sessions`、`builder_member_tokens` | `list_members`、`get_member`、`disable_member` |
 | `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`get_payment_setup_status` |
 
-`shop` 的設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`、`onlinePaymentHoldMinutes`（線上刷卡保留，預設 60）、`pchomepayAtm`（另提供 ATM）、`maxQtyPerItem`（預設 10）。
+`shop` 的| `loyalty` | members、shop | 結帳「點數折抵」；會員中心「我的點數」；區塊 `loyalty_tiers` | `builder_points_ledger`（只增不改）、`builder_member_tiers`；訂單欄位 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid` | `get_member_points`、`adjust_points`、`list_tiers`、`update_tiers` |
+
+設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`、`onlinePaymentHoldMinutes`（線上刷卡保留，預設 60）、`pchomepayAtm`（另提供 ATM）、`maxQtyPerItem`（預設 10）。
 **金流金鑰不在模組設定裡**：只能由平台擁有者在後台「金流設定」分頁輸入（見 ARCHITECTURE「金流」）。
 `shop` 的狀態除了 settingsSchema 之外還看金流：沒有已驗證的 PChomePay 憑證 → `pending_setup`（`lib/shop/status.ts`），區塊照常顯示，結帳只提供已開放的線下匯款；兩種付款都沒開則結帳頁顯示「尚未開放結帳」。
 
@@ -70,6 +72,7 @@ modules/<id>/
 | `courses` | core、members（付費課程需 shop） | `/courses`、`/courses/<slug>`、`/learn/<課程>/<單元>`；`/s/<slug>/api/courses/buy`、`/api/courses/progress`；會員中心「我的課程」；後台「課程」（手動開通／撤銷、學員） | `builder_courses`、`builder_course_lessons`、`builder_course_enrollments`、`builder_course_progress` | `create_course`、`update_course`、`add_lesson`、`update_lesson`、`list_courses`、`grant_course`、`revoke_course`、`list_enrollments` |
 
 設定（`configure_module`，進草稿、發布後生效）：
+- `loyalty`：`earnPerAmount`（每 X 元 1 點，預設 100）、`pointValue`（1 點＝N 元，預設 1）、`maxRedeemPercent`（單筆折抵上限 %，預設 50）、`redeemEnabled`、`pointsExpireDays`（預設 365）、`tierWindowMonths`（預設 12，0＝累計）、`tiers[]`（`id` 比對鍵、`name`、`minSpend`、`multiplier`、`discountPercent`、`perks`）。全部有預設，`{}` 即啟用。
 - `courses`：`ownerEmail`。區塊 `courses_list`、`course_detail`。
 - `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`、`freeBookingsPerEmailPerDay`（每 email 每天免費預約上限，預設 2）。區塊 `booking_widget`。
 - `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）、`requireEmailConfirm`（免費報名／候補需 email 確認，預設 true）。區塊 `events_list`、`event_detail`。固定頁面另有 `/events/confirm`（email 確認）。

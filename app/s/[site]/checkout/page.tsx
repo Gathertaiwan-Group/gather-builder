@@ -70,6 +70,7 @@ export default async function CheckoutPage(props: Props) {
               cvsSelection={cvsSelection}
               cvsStartAction={`/s/${slug}/api/shipping/cvs-start`}
               couponsEnabled={moduleActive(site, "coupons")}
+              credits={member ? { points: moduleActive(site, "loyalty"), wallet: moduleActive(site, "stored-value") } : null}
               minOnline={PCHOMEPAY_MIN_AMOUNT}
             />
           )}

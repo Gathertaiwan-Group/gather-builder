@@ -18,6 +18,7 @@ import { memberRegistrations } from "@/lib/services/events";
 import { manageUrl, memberBookings } from "@/lib/services/booking";
 import { memberCourses } from "@/lib/services/courses";
 import { fmtTaipei } from "@/lib/services/class-orders";
+import { MemberPoints } from "@/components/site/MemberCredits";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "會員中心", robots: { index: false } };
@@ -62,6 +63,7 @@ export default async function AccountPage(props: Props) {
             儲存
           </button>
         </form>
+        {moduleActive(site, "loyalty") && <MemberPoints tenant={site.tenant} member={member} />}
         {moduleActive(site, "shop") && (
           <div className="gb-card mb-6 p-5" data-gb="my-orders">
             <h2 className="m-0 mb-3 text-lg font-bold">我的訂單</h2>

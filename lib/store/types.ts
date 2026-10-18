@@ -1,8 +1,10 @@
 import type { SiteContent } from "../content";
 import type { ExtStore } from "./types-ext";
 import type { ClassesStore } from "./types-classes";
+import type { ContentStore } from "./types-content";
 export type * from "./types-ext";
 export type * from "./types-classes";
+export type * from "./types-content";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -193,7 +195,8 @@ export interface VariantWrite {
 }
 
 export type OrderStatus = "pending_payment" | "paid" | "fulfilled" | "cancelled";
-export type PaymentMethod = "pchomepay" | "offline";
+/** credit＝全額由點數折抵／儲值金支付（不經金流，下單即付款成功） */
+export type PaymentMethod = "pchomepay" | "offline" | "credit";
 
 export interface OrderItemInput {
   /** 課程類品項（活動票／預約／課程）沒有商品，為 null */
@@ -210,7 +213,7 @@ export interface OrderItemInput {
 export interface OrderItemRow extends OrderItemInput {
   id: string;
   /** product（商品）／event_ticket／booking／course */
-  item_kind?: "product" | "event_ticket" | "booking" | "course";
+  item_kind?: "product" | "event_ticket" | "booking" | "course" | "topup";
   /** 課程類品項的票種／服務／課程 id */
   ref_id?: string | null;
   tenant_id: string;
@@ -263,6 +266,11 @@ export interface OrderRow {
   referral_code: string | null;
   invoice_request: InvoiceRequest | null;
   shipping_choice: ShippingChoice | null;
+  /** 第五批：等級折扣、點數折抵（點數與折抵金額）、儲值金支付。total ＝ 扣掉這些之後要用 payment_method 收的金額 */
+  tier_discount?: number;
+  points_redeemed?: number;
+  points_discount?: number;
+  wallet_paid?: number;
   created_at: string;
   updated_at: string;
 }
@@ -321,7 +329,7 @@ export interface CouponRedemptionRow {
   released_at: string | null;
 }
 
-export interface PlaceOrderInput {
+export type PlaceOrderInput = {
   order_prefix: string;
   member_id: string | null;
   contact: OrderContact;
@@ -339,6 +347,14 @@ export interface PlaceOrderInput {
   referral_code?: string | null;
   invoice_request?: InvoiceRequest | null;
   shipping_choice?: ShippingChoice | null;
+} & OrderCreditsInput;
+
+/** 下單時的等級折扣／點數折抵／儲值金（builder_apply_order_credits 在下單同一交易原子扣用） */
+export interface OrderCreditsInput {
+  tier_discount?: number;
+  points_redeemed?: number;
+  points_discount?: number;
+  wallet_paid?: number;
 }
 
 export interface PaymentAccountRow {
@@ -376,7 +392,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore, ClassesStore {
+export interface Store extends ExtStore, ClassesStore, ContentStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;

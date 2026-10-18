@@ -4,6 +4,7 @@ import { ServiceError } from "../errors";
 import { createSupabaseCommerceStore } from "./supabase-commerce";
 import { createSupabaseExtStore } from "./supabase-ext";
 import { createSupabaseClassesStore } from "./supabase-classes";
+import { createSupabaseContentStore } from "./supabase-content";
 
 /**
  * Supabase 實作。🔴 一律 service role、只在 server 端使用。
@@ -38,6 +39,7 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
     ...createSupabaseCommerceStore(db),
     ...createSupabaseExtStore(db),
     ...createSupabaseClassesStore(db),
+    ...createSupabaseContentStore(db),
     async getTenantBySlug(slug) {
       return must(await db.from("builder_tenants").select("*").eq("slug", slug).maybeSingle(), "getTenantBySlug");
     },

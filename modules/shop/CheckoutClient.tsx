@@ -21,6 +21,16 @@ interface Quote {
   shippingSelected?: boolean;
   discount?: number;
   couponMessage?: string | null;
+  tierName?: string | null;
+  tierDiscount?: number;
+  pointsRedeemed?: number;
+  pointsDiscount?: number;
+  pointsAvailable?: number;
+  maxPoints?: number;
+  pointValue?: number;
+  walletPaid?: number;
+  walletAvailable?: number;
+  creditMessages?: string[];
   total: number;
   problems: string[];
 }
@@ -60,6 +70,8 @@ export function CheckoutClient(props: {
   cvsStartAction?: string;
   /** coupons 模組啟用時顯示折扣碼欄位 */
   couponsEnabled?: boolean;
+  /** 已登入會員且 loyalty／stored-value 啟用時：可用點數／儲值金折抵 */
+  credits?: { points: boolean; wallet: boolean } | null;
 }) {
   const [cart, setCart] = useState<CartLine[] | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
@@ -70,6 +82,10 @@ export function CheckoutClient(props: {
   const [shipId, setShipId] = useState<string>(props.cvsSelection?.methodId ?? (methods && methods.length === 1 ? methods[0]!.id : ""));
   const [couponInput, setCouponInput] = useState("");
   const [coupon, setCoupon] = useState("");
+  const [pointsInput, setPointsInput] = useState("");
+  const [points, setPoints] = useState(0);
+  const [walletInput, setWalletInput] = useState("");
+  const [wallet, setWallet] = useState(0);
   const draftKey = `gb-checkout-${props.slug}`;
   const shipMethod = methods?.find((m) => m.id === shipId) ?? null;
   const cvsReady = shipMethod?.type !== "cvs" || props.cvsSelection?.methodId === shipMethod.id;
@@ -142,7 +158,7 @@ export function CheckoutClient(props: {
     fetch(props.quoteUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ items: cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })), shippingMethodId: shipId || undefined, couponCode: coupon || undefined, preview: props.previewToken ?? undefined }),
+      body: JSON.stringify({ items: cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })), shippingMethodId: shipId || undefined, couponCode: coupon || undefined, preview: props.previewToken ?? undefined, pointsToUse: points || undefined, walletToUse: wallet || undefined }),
     })
       .then(async (r) => {
         const j = await r.json();
@@ -155,7 +171,7 @@ export function CheckoutClient(props: {
     return () => {
       alive = false;
     };
-  }, [cart, props.quoteUrl, shipId, coupon, props.previewToken]);
+  }, [cart, props.quoteUrl, shipId, coupon, props.previewToken, points, wallet]);
 
   const setQty = (i: number, qty: number) => {
     if (!cart) return;
@@ -173,7 +189,9 @@ export function CheckoutClient(props: {
     );
   }
   const noMethod = !props.methods.pchomepay && !props.methods.offline;
-  const belowMin = method === "pchomepay" && !!quote && quote.total < props.minOnline;
+  const usedCredits = !!quote && ((quote.pointsRedeemed ?? 0) > 0 || (quote.walletPaid ?? 0) > 0);
+  const fullyCovered = usedCredits && quote!.total === 0;
+  const belowMin = !fullyCovered && method === "pchomepay" && !!quote && quote.total < props.minOnline;
   const m = props.member;
 
   return (
@@ -207,6 +225,9 @@ export function CheckoutClient(props: {
               {quote.shippingSelected === false && <span className="gb-muted">（選擇運送方式後確定）</span>}
             </span>
             {!!quote.discount && <span data-gb="discount">折扣 −{twd(quote.discount)}</span>}
+            {!!quote.tierDiscount && <span data-gb="tier-discount">{quote.tierName ?? "會員"}折扣 −{twd(quote.tierDiscount)}</span>}
+            {!!quote.pointsDiscount && <span data-gb="points-discount">點數折抵 {quote.pointsRedeemed} 點 −{twd(quote.pointsDiscount)}</span>}
+            {!!quote.walletPaid && <span data-gb="wallet-paid">儲值金 −{twd(quote.walletPaid)}</span>}
             <strong className="text-lg">總計 {twd(quote.total)}</strong>
           </div>
         )}
@@ -339,9 +360,36 @@ export function CheckoutClient(props: {
               {quote?.couponMessage && <span className={quote.discount ? "" : "text-red-700"}>{quote.couponMessage}</span>}
             </div>
           )}
+          {props.credits && (props.credits.points || props.credits.wallet) && (
+            <div className="flex flex-col gap-2 text-sm" data-gb="member-credits">
+              <input type="hidden" name="pointsToUse" value={points || ""} />
+              <input type="hidden" name="walletToUse" value={wallet || ""} />
+              {props.credits.points && (
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">點數折抵</span>
+                  <span className="gb-muted">可用 {quote?.pointsAvailable ?? 0} 點，這筆最多 {quote?.maxPoints ?? 0} 點（1 點＝{twd(quote?.pointValue ?? 1)}）</span>
+                  <input aria-label="使用點數" inputMode="numeric" value={pointsInput} onChange={(e) => setPointsInput(e.target.value.replace(/\D/g, ""))} className="gb-input" style={{ width: "7rem" }} />
+                  <button type="button" className="gb-btn" onClick={() => setPoints(Number(pointsInput) || 0)}>套用</button>
+                  <button type="button" className="text-sm underline" style={{ background: "none", border: 0, cursor: "pointer", color: "var(--gb-text)" }} onClick={() => { const n = quote?.maxPoints ?? 0; setPointsInput(String(n)); setPoints(n); }}>用最多</button>
+                </span>
+              )}
+              {props.credits.wallet && (
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">儲值金</span>
+                  <span className="gb-muted">餘額 {twd(quote?.walletAvailable ?? 0)}</span>
+                  <input aria-label="使用儲值金" inputMode="numeric" value={walletInput} onChange={(e) => setWalletInput(e.target.value.replace(/\D/g, ""))} className="gb-input" style={{ width: "7rem" }} />
+                  <button type="button" className="gb-btn" onClick={() => setWallet(Number(walletInput) || 0)}>套用</button>
+                </span>
+              )}
+              {quote?.creditMessages?.map((m, i) => (
+                <span key={i} className="text-red-700">{m}</span>
+              ))}
+            </div>
+          )}
           {props.previewToken && <input type="hidden" name="preview" value={props.previewToken} />}
           {props.invoiceOptions && <InvoiceFields options={props.invoiceOptions} />}
-          <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
+          {fullyCovered && <p className="m-0 text-sm" data-gb="fully-covered">已用點數／儲值金全額折抵，不需另外付款。</p>}
+          <fieldset className="m-0 flex flex-col gap-2 border-0 p-0" hidden={fullyCovered}>
             <legend className="mb-2 text-lg font-bold">付款方式</legend>
             {props.methods.pchomepay && (
               <label className="flex items-center gap-2 text-sm">
@@ -368,12 +416,12 @@ export function CheckoutClient(props: {
             {method === "offline" && props.methods.offlineInstructions && <p className="gb-muted m-0 whitespace-pre-line text-sm">{props.methods.offlineInstructions}</p>}
             {belowMin && (
               <p role="alert" className="m-0 text-sm" style={{ color: "#b91c1c" }}>
-                線上付款最低金額為 NT${props.minOnline}，請改用其他付款方式或加購商品。
+                {usedCredits ? `折抵後剩 ${twd(quote!.total)}，低於線上付款最低金額 NT$${props.minOnline}：請少用一些點數／儲值金、全額折抵，或改用其他付款方式。` : `線上付款最低金額為 NT$${props.minOnline}，請改用其他付款方式或加購商品。`}
               </p>
             )}
           </fieldset>
           <button type="submit" className="gb-btn self-start" disabled={submitting || !quote || quote.problems.length > 0 || belowMin || (!!methods && (!shipId || !cvsReady)) || (!!coupon && !quote.discount)}>
-            {submitting ? "處理中…" : method === "pchomepay" ? "前往付款" : "送出訂單"}
+            {submitting ? "處理中…" : fullyCovered ? "送出訂單（全額折抵）" : method === "pchomepay" ? "前往付款" : "送出訂單"}
           </button>
         </form>
       )}

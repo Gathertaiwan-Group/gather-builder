@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
 import { COUPON_PER_USER, COUPON_UNAVAILABLE } from "./supabase-commerce";
+import { mapCreditError } from "./supabase-content";
 import { createSupabaseBookingStore } from "./supabase-booking";
 import { createSupabaseCoursesStore } from "./supabase-courses";
 import type {
@@ -25,6 +26,8 @@ function raiseMapped(message: string, what: string): never {
   if (key && RESERVE_ERRORS[key]) throw new ServiceError(RESERVE_ERRORS[key]!.code, RESERVE_ERRORS[key]!.message);
   if (/coupon unavailable/.test(message)) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
   if (/coupon per-user limit/.test(message)) throw new ServiceError("conflict", COUPON_PER_USER);
+  const credit = mapCreditError(message);
+  if (credit) throw credit;
   throw new Error(`${what}: ${message}`);
 }
 

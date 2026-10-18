@@ -13,6 +13,7 @@ import type { InvoiceSettings } from "@/modules/invoice/manifest";
 import { releaseExpiredHolds } from "./orders";
 import { resolveShipping, type ShippingResolution } from "./shipping";
 import { applyPromotions } from "./promotions";
+import { resolveCredits } from "./credits";
 import type { Mailer } from "../mail";
 
 /* ================================================================== 共用 */
@@ -330,6 +331,10 @@ export const checkoutInput = z
     couponCode: z.string().trim().max(32).optional(),
     /** referral 模組：推薦碼（來自分享連結的 cookie） */
     referralCode: z.string().trim().max(16).optional(),
+    /** loyalty 模組：想用多少點折抵（server 依上限比例與可用點數調整） */
+    pointsToUse: z.number().int().min(0).max(10_000_000).optional(),
+    /** stored-value 模組：想用多少儲值金（NT$） */
+    walletToUse: z.number().int().min(0).max(10_000_000).optional(),
   })
   .strict();
 
@@ -414,17 +419,15 @@ async function placeOrderPriced(
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
   const shippingFee = ship ? ship.fee : flatShippingFee(settings, priced.subtotal - promo.discount);
-  const total = priced.subtotal + shippingFee - promo.discount;
+  // 第五批：等級折扣／點數折抵／儲值金（server 計價；原子扣用在 builder_place_order 同一交易）
+  const credits = await resolveCredits(deps.store, tenant, { member, merchandise: priced.subtotal - promo.discount, shippingFee, pointsToUse: d.pointsToUse, walletToUse: d.walletToUse, strict: true });
+  const total = credits.total;
   const avail = await paymentAvailability(deps.store, tenant, settings, { allowSandbox: input.allowSandbox });
-  const method: PaymentMethod = d.paymentMethod;
+  // 全額由點數／儲值金支付 → credit（不經金流，下單即付款成功）
+  const usedCredits = credits.pointsRedeemed > 0 || credits.walletPaid > 0;
+  const method: PaymentMethod = total === 0 && usedCredits ? "credit" : d.paymentMethod;
   const atm = method === "pchomepay" && d.pchomepayType === "atm";
-  if (method === "pchomepay") {
-    if (!avail.pchomepay) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
-    if (atm && !avail.pchomepayAtm) throw new ServiceError("invalid", "此商店未開放 ATM 轉帳，請改用信用卡");
-    if (total < PCHOMEPAY_MIN_AMOUNT) throw new ServiceError("invalid", `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式或加購商品`);
-  } else if (!avail.offline) {
-    throw new ServiceError("invalid", "此商店未開放線下匯款");
-  }
+  assertPaymentMethod(method, total, avail, atm, usedCredits);
 
   const invoiceRequest = await resolveInvoiceRequest(deps.store, tenant, d.invoice);
 
@@ -450,18 +453,58 @@ async function placeOrderPriced(
       discount_total: promo.discount,
       coupon: promo.coupon,
       referral_code: promo.referralCode,
+      tier_discount: credits.tierDiscount,
+      points_redeemed: credits.pointsRedeemed,
+      points_discount: credits.pointsDiscount,
+      wallet_paid: credits.walletPaid,
     },
     priced.lines.map(({ stockAvailable: _s, slug: _g, ...l }) => l),
     taipeiDay(),
   );
-  const order = (await deps.store.getOrderById(tenant.id, id))!;
+  let order = (await deps.store.getOrderById(tenant.id, id))!;
   if (ship?.consumedSelectionId) await deps.store.attachCvsSelectionOrder(tenant.id, ship.consumedSelectionId, order.id);
   const orderUrl = orderPageUrl(deps.baseUrl, tenant, order.order_no, accessKey);
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "order.place", payload: { orderNo: order.order_no, total: order.total, method } });
 
   // 線上付款：等金流建單成功後才寄（建單失敗訂單會被取消，不能先寄「訂單成立」）
   if (method === "offline") await sendOrderPlacedMails(deps, tenant, order, settings, orderUrl);
+  if (method === "credit") order = await settleCreditOrder(deps, tenant, order);
   return { order, accessKey, orderUrl };
+}
+
+/**
+ * 付款方式檢查（shop 與課程類共用）。🔴 線上付款最低 NT$30：用點數／儲值金折到 1–29 元卻選線上付款 → 拒絕，
+ * 請客人少用一點點數／儲值金（保留 NT$30 以上走線上）、全額折抵、或改線下匯款。不會默默改付款方式。
+ */
+export function assertPaymentMethod(method: PaymentMethod, total: number, avail: PaymentAvailability, atm: boolean, usedCredits: boolean) {
+  if (method === "credit") {
+    if (total !== 0) throw new ServiceError("invalid", "付款方式不正確");
+    return;
+  }
+  if (method === "pchomepay") {
+    if (!avail.pchomepay) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
+    if (atm && !avail.pchomepayAtm) throw new ServiceError("invalid", "此商店未開放 ATM 轉帳，請改用信用卡");
+    if (total < PCHOMEPAY_MIN_AMOUNT) {
+      throw new ServiceError(
+        "invalid",
+        usedCredits
+          ? `折抵後剩 NT$${total}，低於線上付款最低金額 NT$${PCHOMEPAY_MIN_AMOUNT}：請少用一些點數／儲值金（讓剩餘金額 ≥ NT$${PCHOMEPAY_MIN_AMOUNT}）、改成全額折抵，或改用其他付款方式`
+          : `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式或加購商品`,
+      );
+    }
+  } else if (!avail.offline) {
+    throw new ServiceError("invalid", "此商店未開放線下匯款");
+  }
+}
+
+/** 全額由點數／儲值金支付的訂單：下單後立刻轉已付款（條件式，只成功一次）並跑付款成功流程 */
+export async function settleCreditOrder(deps: CheckoutDeps, tenant: TenantRow, order: OrderRow): Promise<OrderRow> {
+  const moved = await deps.store.transitionOrder(tenant.id, order.id, "pending_payment", "paid", { paid_at: new Date().toISOString() });
+  if (!moved) return order;
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system", action: "order.paid", payload: { orderNo: moved.order_no, via: "credit", walletPaid: moved.wallet_paid ?? 0, pointsRedeemed: moved.points_redeemed ?? 0 } });
+  const { onOrderPaid } = await import("./orders");
+  await onOrderPaid(deps, tenant, moved, "點數／儲值金全額支付");
+  return moved;
 }
 
 /** invoice 模組啟用時：驗證並回傳發票需求（依店家開放的選項）；未啟用回 null */
@@ -479,7 +522,7 @@ export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow
   const hours = settings.orderExpireHours ?? 72;
   const offlineInstructions = settings.offlineTransfer?.instructions ?? null;
   const lines = order.items.map((l) => `・${l.name}${l.variant_label ? `（${l.variant_label}）` : ""} × ${l.qty}　${twd(l.line_total)}`).join("\n");
-  const sum = `${lines}\n小計 ${twd(order.subtotal)}　運費 ${twd(order.shipping_fee)}${order.discount_total ? `　折扣 −${twd(order.discount_total)}${order.coupon_code ? `（${order.coupon_code}）` : ""}` : ""}　總計 ${twd(order.total)}${order.shipping_choice ? `\n運送方式：${order.shipping_choice.label}${order.shipping_choice.store ? `（${order.shipping_choice.store.name}）` : ""}` : ""}`;
+  const sum = `${lines}\n小計 ${twd(order.subtotal)}　運費 ${twd(order.shipping_fee)}${order.discount_total ? `　折扣 −${twd(order.discount_total)}${order.coupon_code ? `（${order.coupon_code}）` : ""}` : ""}${creditLines(order)}　總計 ${twd(order.total)}${order.shipping_choice ? `\n運送方式：${order.shipping_choice.label}${order.shipping_choice.store ? `（${order.shipping_choice.store.name}）` : ""}` : ""}`;
   const payText =
     method === "offline"
       ? `付款方式：線下匯款\n${offlineInstructions ?? "店家將與你聯繫付款方式。"}\n請於 ${hours} 小時內完成付款，逾期訂單會自動取消。`
@@ -488,6 +531,15 @@ export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow
   if (settings.ownerEmail) {
     await mailSafe(deps, settings.ownerEmail, `【${tenant.name}】新訂單 ${order.order_no}（${twd(order.total)}，${method === "offline" ? "線下匯款" : "線上付款"}）`, `${sum}\n\n訂購人：${order.contact.name} ${order.contact.email} ${order.contact.phone}\n收件：${order.shipping.name} ${order.shipping.phone} ${order.shipping.address}\n備註：${order.note ?? "-"}`);
   }
+}
+
+/** 訂單的等級折扣／點數折抵／儲值金說明（信件用） */
+export function creditLines(o: Pick<OrderRow, "tier_discount" | "points_redeemed" | "points_discount" | "wallet_paid">): string {
+  const parts: string[] = [];
+  if (o.tier_discount) parts.push(`會員等級折扣 −${twd(o.tier_discount)}`);
+  if (o.points_discount) parts.push(`點數折抵 ${o.points_redeemed} 點 −${twd(o.points_discount)}`);
+  if (o.wallet_paid) parts.push(`儲值金支付 −${twd(o.wallet_paid)}`);
+  return parts.length ? `　${parts.join("　")}` : "";
 }
 
 export function orderPageUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, orderNo: string, accessKey?: string) {

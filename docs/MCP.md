@@ -77,6 +77,7 @@ claude mcp list          # 確認狀態 ✓ Connected
 13. 「我要開陶藝工作坊，12/7 下午一場 8 人，一人 1200」→ `enable_module events`（付費要 shop）→ `create_event` → `create_session { capacity: 8 }` → `create_ticket_type { price: 1200 }` → `update_event { patch:{status:"published"}, confirm:true }` → `add_section events_list` → 發布。報名後 `list_registrations`、當天 `check_in`。
 14. 「我要開放一對一諮詢，60 分鐘 1500、收 500 訂金，平日 10–18 點」→ `enable_module booking`（訂金要 shop）→ `create_service { durationMin:60, price:1500, paymentMode:"deposit", depositAmount:500, status:"published", confirm:true }` → `set_weekly_hours { hours:[{weekday:1,start:"10:00",end:"18:00"}…], confirm:true }` → `add_section booking_widget` → 發布。「下週三休假」→ `add_date_override { date, kind:"closed", confirm:true }`。
 15. 「我要賣線上課」→ `enable_module courses`（付費要 shop）→ `create_course { price }` → `add_lesson`（YouTube 未公開連結；第一課 `isPreview: true`）→ `update_course { patch:{status:"published"}, confirm:true }` → `add_section courses_list` → 發布。學員付款（`mark_order_paid` 或 PChomePay）後自動開通；送課給某人 → `grant_course { email, confirm:true }`。
+17. 「我要做會員點數」→ `enable_module loyalty`（members、shop 自動帶入）→ `update_tiers { tiers:[{id:"silver",name:"銀卡",minSpend:3000,multiplier:1.5,discountPercent:5}] }` → `add_section loyalty_tiers` → 發布。客訴補點 → `adjust_points { email, amount: 50, reason, confirm: true }`。
 16. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
@@ -147,6 +148,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `grant_course` / `revoke_course` | attendees:write | 手動開通／撤銷會員的課程存取權（`confirm: true`；撤銷不退款） |
 | `list_enrollments` | attendees:read | 學員（email 遮罩、來源、完成單元數） |
 | `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
+| `get_member_points` | members:read | 會員點數：餘額、可用、即將到期批次（FIFO）、等級、帳本 |
+| `adjust_points` | members:write | 手動加／扣點（理由必填；扣點不能超過可用；**必須** `confirm: true`） |
+| `list_tiers` | site:read | 會員等級（已發布／草稿）與各等級人數 |
+| `update_tiers` | modules:write | 整份取代等級（進草稿，發布後生效） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

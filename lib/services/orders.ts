@@ -10,6 +10,8 @@ import "./referral";
 import "./events";
 import "./booking";
 import "./courses";
+// 第五批：點數（賺點／沖回）
+import "./loyalty";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -253,6 +255,10 @@ export async function getOrder(ctx: ServiceContext, input: { site?: string | nul
     invoiceRequest: o.invoice_request,
     discountTotal: o.discount_total ?? 0,
     couponCode: o.coupon_code,
+    tierDiscount: o.tier_discount ?? 0,
+    pointsRedeemed: o.points_redeemed ?? 0,
+    pointsDiscount: o.points_discount ?? 0,
+    walletPaid: o.wallet_paid ?? 0,
     shippingChoice: o.shipping_choice,
     // 付款紀錄只給狀態，不給閘道原始回應
     payments: payments.map((p) => ({ provider: p.provider, gatewayOrderNo: p.gateway_order_no, amount: p.amount, status: p.status, sandbox: p.sandbox, paidAt: p.paid_at, createdAt: p.created_at })),
@@ -359,7 +365,9 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
     o.status === "paid"
       ? o.payment_method === "pchomepay"
         ? "此訂單已透過 PChomePay 付款：取消不會自動退款，請到 PChomePay 商家後台人工退款。"
-        : "此訂單已收款（線下匯款）：取消不會自動退款，請自行退款給客人。"
+        : o.payment_method === "credit"
+          ? "此訂單全額以點數／儲值金支付：取消會自動退回點數與儲值金，不需另外退款。"
+          : "此訂單已收款（線下匯款）：取消不會自動退款，請自行退款給客人。"
       : null;
   requireConfirm(input.confirm, `取消訂單 ${o.order_no} 會回補庫存且無法復原${refundNote ? `。注意：${refundNote}` : ""}`);
   const r = await ctx.store.cancelOrder(tenant.id, o.id, sourcesFor("cancelled").filter((s) => s === o.status), input.reason?.trim().slice(0, 200) || "cancelled_by_shop");
@@ -373,7 +381,7 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
   return {
     ...orderSummary(after),
     stockReleased: r.stockReleased,
-    refundRequired: !!refundNote,
+    refundRequired: !!refundNote && o.payment_method !== "credit",
     invoiceActionRequired: !!invoiceNote,
     note: [refundNote ?? "訂單已取消，庫存已回補。", invoiceNote].filter(Boolean).join(" "),
   };

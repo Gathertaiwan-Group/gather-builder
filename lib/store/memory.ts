@@ -3,6 +3,7 @@ import { ServiceError } from "../errors";
 import { createMemoryCommerceStore } from "./memory-commerce";
 import { createMemoryExtStore } from "./memory-ext";
 import { createMemoryClassesStore } from "./memory-classes";
+import { createMemoryContentStore } from "./memory-content";
 import type {
   AuditRow,
   DraftRow,
@@ -34,10 +35,12 @@ export function createMemoryStore(): Store {
   const rate = new Map<string, number>();
 
   const classes = createMemoryClassesStore();
+  const content = createMemoryContentStore();
   const store: Store = {
-    ...createMemoryCommerceStore(classes.bridge),
+    ...createMemoryCommerceStore(classes.bridge, content.credits),
     ...createMemoryExtStore(),
     ...classes.store,
+    ...content.store,
     async getTenantBySlug(slug) {
       return clone([...tenants.values()].find((t) => t.slug === slug) ?? null);
     },
@@ -224,5 +227,6 @@ export function createMemoryStore(): Store {
     },
   };
   classes.attach(store);
+  content.attach(store);
   return store;
 }

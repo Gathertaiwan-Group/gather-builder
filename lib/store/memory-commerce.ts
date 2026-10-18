@@ -29,6 +29,8 @@ export interface ReservationBridge {
   releaseSync(tenantId: string, orderId: string, cancelReason: string): void;
 }
 
+import type { CreditsBridge } from "./memory-content";
+
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
 
@@ -36,7 +38,7 @@ const now = () => new Date().toISOString();
  * members／shop 的記憶體實作。語意與 Supabase 實作（含 builder_place_order／cancel／release 函式）一致：
  * 每個方法的讀＋寫都在同一個同步區段完成（JS 單執行緒），等同 DB 的原子條件更新。
  */
-export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceStore & Pick<Store, "placeClassOrder"> {
+export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: CreditsBridge): CommerceStore & Pick<Store, "placeClassOrder"> {
   const members = new Map<string, MemberRow>();
   const sessions = new Map<string, MemberSessionRow>();
   const mtokens = new Map<string, MemberTokenRow>();
@@ -293,6 +295,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
         const uc = userCounts.get(`${cp.id}|${cp.user_key}`) ?? 0;
         if (coupon!.per_user_limit !== null && uc >= coupon!.per_user_limit) throw new ServiceError("conflict", COUPON_PER_USER);
       }
+      credits?.checkSync(tenantId, order.member_id, order);
       for (const s of plan) {
         if (!s.track) continue;
         if (s.kind === "v") {
@@ -339,11 +342,16 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
         referral_code: order.referral_code || null,
         invoice_request: order.invoice_request ? clone(order.invoice_request) : null,
         shipping_choice: order.shipping_choice ? clone(order.shipping_choice) : null,
+        tier_discount: order.tier_discount ?? 0,
+        points_redeemed: order.points_redeemed ?? 0,
+        points_discount: order.points_discount ?? 0,
+        wallet_paid: order.wallet_paid ?? 0,
         created_at: now(),
         updated_at: now(),
       };
       if (order.shipping_choice?.label) row.shipping_method = order.shipping_choice.label;
       orders.set(id, row);
+      credits?.postSync(tenantId, id, order.member_id, order);
       if (cp && coupon) {
         coupons.set(cp.id, { ...coupon, used_count: coupon.used_count + 1, updated_at: now() });
         const k = `${cp.id}|${cp.user_key}`;
@@ -374,6 +382,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
         const uc = userCounts.get(`${cp.id}|${cp.user_key}`) ?? 0;
         if (coupon!.per_user_limit !== null && uc >= coupon!.per_user_limit) throw new ServiceError("conflict", COUPON_PER_USER);
       }
+      credits?.checkSync(tenantId, order.member_id, order);
       const id = randomUUID();
       let reservationId: string | null = null;
       if (res) {
@@ -416,10 +425,15 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
         referral_code: order.referral_code || null,
         invoice_request: order.invoice_request ? clone(order.invoice_request) : null,
         shipping_choice: null,
+        tier_discount: order.tier_discount ?? 0,
+        points_redeemed: order.points_redeemed ?? 0,
+        points_discount: order.points_discount ?? 0,
+        wallet_paid: order.wallet_paid ?? 0,
         created_at: now(),
         updated_at: now(),
       };
       orders.set(id, row);
+      credits?.postSync(tenantId, id, order.member_id, order);
       if (cp && coupon) {
         coupons.set(cp.id, { ...coupon, used_count: coupon.used_count + 1, updated_at: now() });
         const k = `${cp.id}|${cp.user_key}`;
@@ -467,6 +481,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
       const stockReleased = releaseSync(tenantId, id);
       releaseCouponSync(tenantId, id);
       bridge?.releaseSync(tenantId, id, reason);
+      credits?.releaseSync(tenantId, o);
       return { transitioned: true, stockReleased };
     },
     async releaseOrderStock(tenantId, id) {

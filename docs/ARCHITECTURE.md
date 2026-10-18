@@ -163,6 +163,23 @@
 - **權限在伺服器端**：上課頁只用 `lessonForViewer()` 的結果渲染；未開通且不是試看單元時，回傳物件根本沒有 videoUrl／內容／附件，所以付費影片網址不會出現在 HTML（e2e 以實際 HTML 驗證）。課程介紹頁只列單元標題。上課頁 no-referrer、不載入 GA。
 - 進度：`builder_course_progress` (member, lesson) 主鍵，冪等；會員中心「我的課程」顯示完成數。
 
+## 會員經營（loyalty 點數＋等級／stored-value 儲值金）共用規則
+
+- **帳本只增不改**：`builder_points_ledger`、`builder_wallet_ledger`。service_role 只有 select／insert（update／delete／truncate 收回，真 DB 測 42501）。**餘額＝帳本加總**，沒有可改的餘額欄位。唯一寫入入口是 SQL `builder_ledger_post`：每位會員一把交易鎖（`pg_advisory_xact_lock`）、`ref` 冪等鍵（unique(tenant, ref)，例如 `order:<id>:earn`）、寫入前先把已到期的剩餘寫成 `expire`；`strict` 扣帳可用不足就 raise、`capped` 扣到可用為止（不足記 `meta.shortfall`）。
+- **到期（FIFO）**：批次＝正數且非退回的分錄（earn／topup／adjust＋，可帶到期日，null＝不到期排最後）；消耗（負數分錄減掉退回）依到期日先後分配；分配後仍有剩且已過期＝待到期，下一次記帳或每日 cron（`builder_ledger_expire`）寫成 expire。退回（reverse／refund 正數）讓消耗變少，點數回到最後被用掉的批次（那批已到期就會再到期）。SQL `builder_ledger_state` 與 TS `lib/loyalty/ledger.ts` 同一套規則（真 DB 比對測試）。已知限制：調短到期天數後，新批次可能比舊批次先到期，消耗會先算到最早到期的批次。
+- **下單原子扣用**：`builder_place_order`／`builder_place_class_order`（簽章不變）在同一交易呼叫 `builder_apply_order_credits`：寫回訂單 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid`，並以 strict 扣點／扣儲值金——不足整筆回滾（真 DB：可用 300 點、8 張訂單各用 100 點只成立 3 張）。取消／逾期由 `builder_cancel_order` 同交易呼叫 `builder_release_order_credits` 退回（ref 冪等）。
+- **計價**（`lib/services/credits.ts`，server 端；前端只送想用多少）：商品（扣折扣碼）→ 等級折扣 % → 點數折抵（上限＝商品金額 × `maxRedeemPercent`，超過自動降到上限；1 點＝`pointValue` 元）→ 加運費 → 儲值金（最多付到剩下全部）。`total`＝要用付款方式收的錢。免運門檻仍用「折扣碼後」的商品金額（等級／點數折抵不影響免運）。
+- **🔴 線上付款最低 NT$30**：折抵後剩 1–29 元卻選線上付款 → **拒絕**並說明（少用一點點數／儲值金、全額折抵、或改線下匯款），不會默默改付款方式。剩 0 元且有用點數／儲值金 → 付款方式改為 `credit`（不經金流）、下單後立即條件式轉已付款並跑付款成功流程。
+- **發票**：金額＝`total + wallet_paid`（儲值金是預收款，消費時才是銷售）；等級折扣與點數折抵列為折扣。儲值方案訂單不開發票。
+- 只在 shop 結帳提供折抵（活動／預約／課程訂單目前不能用點數或儲值金，但付款後一樣會賺點）。
+
+### loyalty（點數＋等級）
+
+- **賺點**：付款成功 hook（只在真正轉成已付款那次；sandbox 不跑）依「商品淨額＝小計 − 折扣碼 − 等級折扣 − 點數折抵」（不含運費）× 等級倍率：`floor(floor(淨額 / earnPerAmount) × 倍率)`，到期日＝付款時 + `pointsExpireDays`（預設 365）。ref `order:<id>:earn` 冪等。儲值方案訂單不賺（儲值金消費時才賺）。
+- **取消沖回**：折抵的點數由 SQL 同交易退回；這張訂單賺到的點數以 `capped` 沖回（ref `order:<id>:earn_reverse`）——🔴 若已被用掉導致不足：**扣到 0 為止、不讓餘額變負、不追討**，不足部分記在分錄 `meta.shortfall` 與稽核 `loyalty.reverse_shortfall`。
+- **等級**：依 `tierWindowMonths`（預設 12，0＝累計）內已付款的商品淨額（`builder_member_spend`，不含運費、儲值、sandbox）取最高達標等級；`builder_member_tiers` 是快照（超過 1 天自動重算），付款／取消 hook 即時重算，每日 cron 重算全部（降級）。等級影響賺點倍率與等級折扣（商品金額 %）。等級設定在模組設定（`update_tiers`／`configure_module`，草稿→發布）。
+- 會員中心「我的點數」：可用點數、即將到期批次、等級與升級門檻、點數紀錄。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

@@ -5,7 +5,7 @@
  */
 import type { OrderContact, OrderShipping, PaymentMethod, InvoiceRequest } from "./types";
 
-export type ClassItemKind = "event_ticket" | "booking" | "course";
+export type ClassItemKind = "event_ticket" | "booking" | "course" | "topup";
 
 /* ------------------------------------------------------------------ events */
 
@@ -160,7 +160,7 @@ export interface EventReservation {
 export type ClassReservation = { kind: "event"; data: EventReservation } | { kind: "booking"; data: BookingReservation } | null;
 
 /** 課程類訂單（builder_place_class_order 的 p_order） */
-export interface ClassOrderInput {
+export type ClassOrderInput = import("./types").OrderCreditsInput & {
   order_prefix: string;
   member_id: string | null;
   contact: OrderContact;

@@ -87,10 +87,28 @@ export default async function OrderPage(props: Props) {
                 <span data-gb="order-discount">−{twd(order.discount_total)}</span>
               </li>
             )}
+            {!!order.tier_discount && (
+              <li className="flex justify-between gap-3">
+                <span>會員等級折扣</span>
+                <span data-gb="order-tier-discount">−{twd(order.tier_discount)}</span>
+              </li>
+            )}
+            {!!order.points_discount && (
+              <li className="flex justify-between gap-3">
+                <span>點數折抵（{order.points_redeemed} 點）</span>
+                <span data-gb="order-points-discount">−{twd(order.points_discount)}</span>
+              </li>
+            )}
             <li className="flex justify-between gap-3 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
               <span>運費{order.shipping_choice?.label ? `（${order.shipping_choice.label}）` : ""}</span>
               <span>{twd(order.shipping_fee)}</span>
             </li>
+            {!!order.wallet_paid && (
+              <li className="flex justify-between gap-3">
+                <span>儲值金支付</span>
+                <span data-gb="order-wallet-paid">−{twd(order.wallet_paid)}</span>
+              </li>
+            )}
             <li className="flex justify-between gap-3 font-bold">
               <span>總計</span>
               <span data-gb="order-total">{twd(order.total)}</span>

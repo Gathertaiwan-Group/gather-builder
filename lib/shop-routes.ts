@@ -18,6 +18,7 @@ import { verifyPreviewToken } from "./preview";
 import { invoiceRequestFromForm } from "./invoice/validate";
 import { cvsCookieName, resolveShipping } from "./services/shipping";
 import { applyPromotions } from "./services/promotions";
+import { resolveCredits } from "./services/credits";
 
 export const referralCookieName = (tenantId: string) => `gbref_${tenantId.replace(/-/g, "").slice(0, 12)}`;
 
@@ -60,7 +61,7 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
     if (!s) return json({ error: "找不到商店" }, 404);
     const hit = await store.rateHit(`shop-quote:${s.site.tenant.id}`, hashIp(clientIp(req), requireSecret("PREVIEW_SECRET")), 600, QUOTE_LIMIT_PER_10MIN);
     if (!hit.allowed) return json({ error: "請求太頻繁" }, 429);
-    const body = (await req.json().catch(() => null)) as { items?: unknown; shippingMethodId?: unknown; couponCode?: unknown; email?: unknown; preview?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { items?: unknown; shippingMethodId?: unknown; couponCode?: unknown; email?: unknown; preview?: unknown; pointsToUse?: unknown; walletToUse?: unknown } | null;
     const priced = await priceCart(store, s.site.tenant.id, body?.items, s.settings);
     const tenant = s.site.tenant;
     const allowStage = typeof body?.preview === "string" && verifyPreviewToken(body.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
@@ -75,6 +76,8 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
     // M-2：免運門檻用折扣後金額（與下單同一套）
     const ship = await resolveShipping(store, tenant, { methodId: typeof body?.shippingMethodId === "string" ? body.shippingMethodId : null, subtotal: priced.subtotal - promo.discount, consume: false, allowStage });
     const shippingFee = ship ? ship.fee : flatShippingFee(s.settings, priced.subtotal - promo.discount, priced.lines.length > 0);
+    const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? Math.min(v, 10_000_000) : 0);
+    const credits = await resolveCredits(store, tenant, { member, merchandise: priced.subtotal - promo.discount, shippingFee, pointsToUse: num(body?.pointsToUse), walletToUse: num(body?.walletToUse), strict: false });
     return json({
       lines: priced.lines.map((l) => ({ productId: l.product_id, variantId: l.variant_id, name: l.name, variantLabel: l.variant_label, unitPrice: l.unit_price, qty: l.qty, lineTotal: l.line_total, lowStock: l.stockAvailable !== null && l.stockAvailable <= 5, slug: l.slug })),
       subtotal: priced.subtotal,
@@ -82,7 +85,17 @@ export async function handleQuote(req: Request, rawSlug: string, store: Store = 
       shippingSelected: ship ? !!ship.choice.methodId : true,
       discount: promo.discount,
       couponMessage: promo.coupon ? promo.couponMessage : promo.couponMessage ? QUOTE_COUPON_REJECTED : null,
-      total: priced.subtotal + shippingFee - promo.discount,
+      tierName: credits.tierName,
+      tierDiscount: credits.tierDiscount,
+      pointsRedeemed: credits.pointsRedeemed,
+      pointsDiscount: credits.pointsDiscount,
+      pointsAvailable: credits.pointsAvailable,
+      maxPoints: credits.maxPoints,
+      pointValue: credits.pointValue,
+      walletPaid: credits.walletPaid,
+      walletAvailable: credits.walletAvailable,
+      creditMessages: credits.messages,
+      total: credits.total,
       problems: priced.problems,
     });
   } catch (e) {
@@ -117,7 +130,15 @@ export function checkoutFromForm(f: Record<string, string>) {
     cvsSelectionId: f.cvsSelectionId || undefined,
     couponCode: f.couponCode?.trim() || undefined,
     referralCode: f.referralCode?.trim() || undefined,
+    pointsToUse: intField(f.pointsToUse),
+    walletToUse: intField(f.walletToUse),
   };
+}
+
+/** 表單數字欄位：空字串／0 → undefined；非整數 → NaN（交給 zod 回錯） */
+function intField(v: string | undefined): number | undefined {
+  if (!v || !v.trim() || v.trim() === "0") return undefined;
+  return /^\d+$/.test(v.trim()) ? Number(v.trim()) : Number.NaN;
 }
 
 export async function handleCheckout(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor): Promise<Response> {

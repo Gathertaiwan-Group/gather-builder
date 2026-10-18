@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
 import { normalizeEmail } from "../email-normalize";
+import { mapCreditError } from "./supabase-content";
 import type { CommerceStore, CouponRedemptionRow, CouponRow, MemberRow, OrderRow, PaymentAccountRow, PaymentRow, ProductRow, VariantRow } from "./types";
 
 
@@ -171,6 +172,8 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
         if (m) throw new ServiceError("conflict", `庫存不足或商品已下架：${m[1]}。整筆訂單未成立，請調整數量後再試。`);
         if (/coupon unavailable/.test(r.error.message)) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
         if (/coupon per-user limit/.test(r.error.message)) throw new ServiceError("conflict", COUPON_PER_USER);
+        const credit = mapCreditError(r.error.message);
+        if (credit) throw credit;
         throw new Error(`placeOrder: ${r.error.message}`);
       }
       const row = (r.data as { order_id: string; order_no: string }[])[0];
