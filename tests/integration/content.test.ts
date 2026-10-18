@@ -20,6 +20,7 @@ import { createReview, productReviewSummary } from "@/lib/services/reviews";
 import { createProduct, placeOrder } from "@/lib/services/shop";
 import { markOrderPaid } from "@/lib/services/orders";
 import { configureModule } from "@/lib/services/modules";
+import { acknowledgeAnnouncement, createAnnouncement } from "@/lib/services/announcements";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -45,7 +46,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads", "certificates", "reviews"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads", "certificates", "reviews", "announcements"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "CT" } });
     await publishSite(ctx, { site: slug, confirm: true });
@@ -142,5 +143,18 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     const r = await Promise.allSettled(Array.from({ length: 5 }, () => createReview(store, { tenant, member: m, data: { productId: p.id, orderId: order.id, rating: 5 } })));
     expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect((await productReviewSummary(store, tenant, p.id)).count).toBe(0);
+  });
+
+  it("announcements：必讀確認併發只記一次；確認紀錄只增不改（42501）", async () => {
+    const tenant = (await store.getTenantBySlug(slug))!;
+    const a = await createAnnouncement(ctx, { site: slug, title: "必讀", requireAck: true, audience: "members", status: "published", confirm: true });
+    const m = (await store.insertMember({ tenant_id: tenant.id, email: `ack-${ts}@example.com`, password_hash: "x", name: "確認者", phone: null }))!;
+    const r = await Promise.all(Array.from({ length: 4 }, () => acknowledgeAnnouncement(store, { tenant, member: m, announcementId: a.id })));
+    expect(r.filter((x) => x.first)).toHaveLength(1);
+    const up = await db.from("builder_announcement_acks").update({ acked_at: new Date().toISOString() }).eq("tenant_id", tenant.id);
+    expect(up.error?.code).toBe("42501");
+    const del = await db.from("builder_announcement_acks").delete().eq("tenant_id", tenant.id);
+    expect(del.error?.code).toBe("42501");
+    expect((await store.listAnnouncementAcks(tenant.id, { announcementId: a.id })).length).toBe(1);
   });
 });

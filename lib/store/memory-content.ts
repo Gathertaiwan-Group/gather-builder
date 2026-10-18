@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow, AnnouncementRow, AnnouncementAckRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -34,6 +34,8 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const certs = new Map<string, CertificateRow>();
   const certLookups: CertLookupRow[] = [];
   const reviews = new Map<string, ReviewRow>();
+  const announcements = new Map<string, AnnouncementRow>();
+  const acks: AnnouncementAckRow[] = [];
   extraSearch.push(async (tenantId, q) =>
     [...documents.values()]
       .filter((d) => d.tenant_id === tenantId && d.status === "published" && d.visibility === "public" && [d.title, d.description, d.category].some((x) => (x ?? "").toLowerCase().includes(q)))
@@ -114,6 +116,33 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async insertAnnouncement(row) {
+      const r: AnnouncementRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      announcements.set(r.id, r);
+      return clone(r);
+    },
+    async updateAnnouncement(tenantId, id, patch) {
+      const a = announcements.get(id);
+      if (!a || a.tenant_id !== tenantId) return null;
+      const next = { ...a, ...clone(patch), updated_at: now() };
+      announcements.set(id, next);
+      return clone(next);
+    },
+    async getAnnouncement(tenantId, id) {
+      const a = announcements.get(id);
+      return a && a.tenant_id === tenantId ? clone(a) : null;
+    },
+    async listAnnouncements(tenantId, opts) {
+      return clone([...announcements.values()].filter((a) => a.tenant_id === tenantId && (!opts.status || a.status === opts.status)).sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.starts_at ?? "").localeCompare(a.starts_at ?? "") || b.created_at.localeCompare(a.created_at)));
+    },
+    async insertAnnouncementAck(row) {
+      if (acks.some((a) => a.announcement_id === row.announcement_id && a.member_id === row.member_id)) return false;
+      acks.push({ ...row, id: acks.length + 1, acked_at: now() });
+      return true;
+    },
+    async listAnnouncementAcks(tenantId, opts) {
+      return clone(acks.filter((a) => a.tenant_id === tenantId && (!opts.announcementId || a.announcement_id === opts.announcementId) && (!opts.memberId || a.member_id === opts.memberId)));
+    },
     async insertReview(row) {
       if ([...reviews.values()].some((r) => r.order_id === row.order_id && r.product_id === row.product_id)) throw new ServiceError("conflict", "這筆訂單的這個商品已經評價過了");
       const r: ReviewRow = { ...clone(row), id: randomUUID(), reply: null, replied_at: null, moderated_by: null, moderated_at: null, created_at: now(), updated_at: now() };

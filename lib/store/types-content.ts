@@ -189,7 +189,39 @@ export interface ReviewRow {
   updated_at: string;
 }
 
+/** announcements：公告與必讀確認（確認紀錄只增不改） */
+export interface AnnouncementRow {
+  id: string;
+  tenant_id: string;
+  title: string;
+  body_md: string;
+  pinned: boolean;
+  starts_at: string | null;
+  ends_at: string | null;
+  audience: "all" | "members";
+  require_ack: boolean;
+  status: "draft" | "published";
+  created_at: string;
+  updated_at: string;
+}
+export interface AnnouncementAckRow {
+  id: number;
+  tenant_id: string;
+  announcement_id: string;
+  member_id: string;
+  acked_at: string;
+}
+
 export interface ContentStore {
+  // announcements
+  insertAnnouncement(row: Omit<AnnouncementRow, "id" | "created_at" | "updated_at">): Promise<AnnouncementRow>;
+  updateAnnouncement(tenantId: string, id: string, patch: Partial<Omit<AnnouncementRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<AnnouncementRow | null>;
+  getAnnouncement(tenantId: string, id: string): Promise<AnnouncementRow | null>;
+  listAnnouncements(tenantId: string, opts: { status?: AnnouncementRow["status"] }): Promise<AnnouncementRow[]>;
+  /** 第一次確認才寫入（unique），已確認回 false */
+  insertAnnouncementAck(row: Omit<AnnouncementAckRow, "id" | "acked_at">): Promise<boolean>;
+  listAnnouncementAcks(tenantId: string, opts: { announcementId?: string; memberId?: string }): Promise<AnnouncementAckRow[]>;
+
   // reviews
   /** 同訂單同商品已有 → 丟 ServiceError(conflict) */
   insertReview(row: Omit<ReviewRow, "id" | "created_at" | "updated_at" | "reply" | "replied_at" | "moderated_by" | "moderated_at">): Promise<ReviewRow>;

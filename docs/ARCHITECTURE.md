@@ -228,6 +228,11 @@
 - 預設 `pending`（設定 `requireApproval: false` 才直接公開）；店主 `moderate_review`（publish／hide）、`reply_review` 都需 `reviews:write`＋confirm。平均分與列表只算 published。
 - 防 XSS：內文與回覆是**純文字**（不轉 Markdown，React 轉義輸出）；評價者顯示名稱遮罩；圖片只接受設定 `imageHosts` 白名單網域的 https 網址（不含帳密；沒設白名單＝不開放附圖），`referrerPolicy=no-referrer`。
 
+## 公告（announcements 模組）
+
+- `builder_announcements`：上線＝已發布＋已到 `starts_at`＋未過 `ends_at`（即時判斷，不需 cron）；`audience=members` 只對登入會員顯示；置頂在前。發布、改已發布、下架需 publish＋confirm。
+- **必讀確認**：`require_ack` 的上線公告，登入會員在網站外框頂端看到（`MustReadBanner`，只在已發布網站），按「我已閱讀並確認」→ `/s/<slug>/api/announcements/ack`（同源表單）寫 `builder_announcement_acks`——unique(公告, 會員) 只記第一次（併發 4 次只成立 1 筆），🔴 只增不改（service_role 只有 select／insert，真 DB 42501）。確認名單：MCP `list_announcement_acks`（members:read，遮罩）、後台「公告」完整名單（寫稽核 pii.reveal）。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

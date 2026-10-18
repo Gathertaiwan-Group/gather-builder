@@ -17,6 +17,7 @@ const TABS = [
   { path: "/downloads", label: "文件" },
   { path: "/certificates", label: "證照" },
   { path: "/reviews", label: "評價" },
+  { path: "/announcements", label: "公告" },
 ];
 
 export function TenantTabs({ slug, active, name }: { slug: string; active: string; name?: string }) {

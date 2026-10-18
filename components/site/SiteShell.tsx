@@ -6,6 +6,7 @@ import { LineFloating } from "@/modules/line/sections";
 import { siteBasePath } from "@/lib/tenant-resolve";
 import { ChatWidget } from "@/modules/ai-chat/ChatWidget";
 import { DEFAULT_LANG, langLabel, ui } from "@/lib/i18n/langs";
+import { MustReadBanner } from "@/modules/announcements/sections";
 
 export function makeRenderCtx(site: LoadedSite, path: string): RenderCtx {
   // 多語：非預設語言的站內連結一律帶 /<lang> 前綴
@@ -79,6 +80,7 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
           </nav>
         </div>
       </header>
+      {moduleActive(site, "announcements") && site.mode === "published" && <MustReadBanner ctx={ctx} />}
       <main className="flex-1">{children}</main>
       <footer className="mt-8 py-8 text-sm" style={{ background: "var(--gb-surface)" }}>
         <div className="gb-container gb-muted flex flex-wrap justify-between gap-2">

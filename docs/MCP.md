@@ -179,6 +179,9 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_reviews` | site:read | 商品評價（評價者遮罩；pending 待審核） |
 | `moderate_review` | reviews:write | 公開／隱藏評價（`confirm: true`） |
 | `reply_review` | reviews:write | 店家回覆（純文字；`confirm: true`） |
+| `create_announcement` / `update_announcement` | content:write | 公告（置頂、上下架時間、僅會員、必讀確認）；發布或改已發布需 publish ＋ confirm |
+| `list_announcements` | site:read | 公告、是否上線、必讀確認人數 |
+| `list_announcement_acks` | members:read | 必讀確認名單（遮罩） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

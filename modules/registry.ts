@@ -23,10 +23,11 @@ import { manifest as directory } from "./directory/manifest";
 import { manifest as downloads } from "./downloads/manifest";
 import { manifest as certificates } from "./certificates/manifest";
 import { manifest as reviews } from "./reviews/manifest";
+import { manifest as announcements } from "./announcements/manifest";
 import type { ModuleManifest, SectionTypeDef } from "./types";
 
 /** 模組註冊表：程式內唯一真相。新增模組只要在這裡加一行。 */
-export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty, storedValue, i18n, search, directory, downloads, certificates, reviews];
+export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty, storedValue, i18n, search, directory, downloads, certificates, reviews, announcements];
 
 export type Registry = Map<string, ModuleManifest>;
 export const registry: Registry = new Map(MODULES.map((m) => [m.id, m]));

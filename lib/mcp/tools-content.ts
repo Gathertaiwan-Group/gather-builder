@@ -8,6 +8,7 @@ import * as directory from "../services/directory";
 import * as downloads from "../services/downloads";
 import * as certificates from "../services/certificates";
 import * as reviews from "../services/reviews";
+import * as announcements from "../services/announcements";
 import { getFileStorage } from "../storage/files";
 
 /**
@@ -362,6 +363,59 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: WRITE,
     },
     wrap(async (a) => reviews.replyReview(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 公告（announcements） */
+
+  const annFields = {
+    title: z.string(),
+    bodyMd: z.string().optional().describe("內容 Markdown"),
+    pinned: z.boolean().optional(),
+    startsAt: z.string().nullable().optional().describe("上架時間（ISO 8601 帶時區；不填＝發布即上架）"),
+    endsAt: z.string().nullable().optional().describe("下架時間（不填＝不下架）"),
+    audience: z.enum(["all", "members"]).optional().describe("all 所有訪客（預設）／members 僅登入會員"),
+    requireAck: z.boolean().optional().describe("必讀確認：會員登入後要按確認，記錄確認時間（只增不改）"),
+    status: z.enum(["draft", "published"]).optional().describe("預設 draft；published 需要 publish scope＋confirm"),
+  };
+
+  server.registerTool(
+    "create_announcement",
+    {
+      description: "新增公告（置頂、上下架時間、對象、必讀確認）。預設草稿；直接發布需 publish＋confirm。需要 content:write。",
+      inputSchema: { site, ...annFields, confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => announcements.createAnnouncement(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_announcement",
+    {
+      description: "修改公告（patch）。已發布或要發布／下架需 publish＋confirm。需要 content:write。",
+      inputSchema: { site, announcementId: z.string(), patch: z.object(annFields).partial(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => announcements.updateAnnouncement(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_announcements",
+    {
+      description: "公告列表（含草稿、是否上線中、必讀確認人數）。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => announcements.listAnnouncements(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_announcement_acks",
+    {
+      description: "必讀公告的確認名單（會員姓名與 email 遮罩、確認時間；完整資料請到後台）。需要 members:read。",
+      inputSchema: { site, announcementId: z.string() },
+      annotations: RO,
+    },
+    wrap(async (a) => announcements.listAnnouncementAcks(ctx, { ...a, reveal: false })),
   );
 }
 

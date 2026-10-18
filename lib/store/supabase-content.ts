@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow, ReviewRow, AnnouncementRow, AnnouncementAckRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,40 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async insertAnnouncement(row) {
+      return must(await db.from("builder_announcements").insert(row).select("*").single(), "insertAnnouncement") as AnnouncementRow;
+    },
+    async updateAnnouncement(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_announcements").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateAnnouncement") as AnnouncementRow | null;
+    },
+    async getAnnouncement(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_announcements").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getAnnouncement") as AnnouncementRow | null;
+    },
+    async listAnnouncements(tenantId, opts) {
+      let q = db.from("builder_announcements").select("*").eq("tenant_id", tenantId);
+      if (opts.status) q = q.eq("status", opts.status);
+      return (must(await q.order("pinned", { ascending: false }).order("starts_at", { ascending: false, nullsFirst: false }).order("created_at", { ascending: false }).limit(500), "listAnnouncements") ?? []) as AnnouncementRow[];
+    },
+    async insertAnnouncementAck(row) {
+      const r = await db.from("builder_announcement_acks").insert(row);
+      if (r.error?.code === "23505") return false;
+      must(r, "insertAnnouncementAck");
+      return true;
+    },
+    async listAnnouncementAcks(tenantId, opts) {
+      let q = db.from("builder_announcement_acks").select("*").eq("tenant_id", tenantId);
+      if (opts.announcementId) {
+        if (!isUuid(opts.announcementId)) return [];
+        q = q.eq("announcement_id", opts.announcementId);
+      }
+      if (opts.memberId) {
+        if (!isUuid(opts.memberId)) return [];
+        q = q.eq("member_id", opts.memberId);
+      }
+      return (must(await q.order("id").limit(5000), "listAnnouncementAcks") ?? []) as AnnouncementAckRow[];
+    },
     async insertReview(row) {
       const r = await db.from("builder_reviews").insert(row).select("*").single();
       if (r.error?.code === "23505") throw new ServiceError("conflict", "這筆訂單的這個商品已經評價過了");
