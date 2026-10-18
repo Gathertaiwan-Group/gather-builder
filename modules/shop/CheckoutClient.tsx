@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { readCart, writeCart, type CartLine } from "@/lib/shop/cart";
+import { InvoiceFields, type InvoiceOptions } from "@/modules/invoice/InvoiceFields";
 
 interface QuoteLine {
   productId: string;
@@ -38,6 +39,8 @@ export function CheckoutClient(props: {
   minOnline: number;
   /** 預覽模式（網站主自己測試）才有：sandbox 金流只接受帶簽章的結帳 */
   previewToken?: string | null;
+  /** invoice 模組啟用時才有 */
+  invoiceOptions?: InvoiceOptions | null;
 }) {
   const [cart, setCart] = useState<CartLine[] | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
@@ -186,6 +189,7 @@ export function CheckoutClient(props: {
             備註（選填）
             <textarea name="note" maxLength={500} rows={2} className="gb-input" />
           </label>
+          {props.invoiceOptions && <InvoiceFields options={props.invoiceOptions} />}
           <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
             <legend className="mb-2 text-lg font-bold">付款方式</legend>
             {props.methods.pchomepay && (

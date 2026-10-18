@@ -14,6 +14,7 @@ import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
 import { verifyPreviewToken } from "./preview";
+import { invoiceRequestFromForm } from "./invoice/validate";
 
 /** M1：每 IP 每小時下單上限（原 20，降低以減少庫存凍結） */
 export const CHECKOUT_LIMIT_PER_HOUR = 6;
@@ -69,6 +70,7 @@ export function checkoutFromForm(f: Record<string, string>) {
     note: f.note?.trim() ? f.note : undefined,
     paymentMethod: f.paymentMethod,
     pchomepayType: f.paymentMethod === "pchomepay" && f.pchomepayType === "atm" ? ("atm" as const) : undefined,
+    invoice: f.invoiceType ? invoiceRequestFromForm(f) : undefined,
   };
 }
 

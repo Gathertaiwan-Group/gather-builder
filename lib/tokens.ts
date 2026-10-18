@@ -25,6 +25,11 @@ export const ADMIN_ACTOR_SCOPES: Scope[] = [
   "commerce:write",
   "orders:read",
   "orders:write",
+  "invoices:write",
+  "shipping:write",
+  "marketing:write",
+  "newsletter:read",
+  "newsletter:write",
 ];
 
 export function adminActor(): Actor {

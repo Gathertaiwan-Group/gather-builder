@@ -2,12 +2,14 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { shopSettings, type ShopSettings } from "@/modules/shop/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
-import type { MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, Store, TenantRow, VariantRow } from "../store/types";
+import type { InvoiceRequest, MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, Store, TenantRow, VariantRow } from "../store/types";
 import { PCHOMEPAY_MIN_AMOUNT, atmExpireDays } from "../pay/pchomepay";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { publishedModuleSettings, sha256 } from "./members";
 import { optionsKey } from "../store/supabase-commerce";
+import { invoiceRequestSchema } from "../invoice/validate";
+import type { InvoiceSettings } from "@/modules/invoice/manifest";
 import { releaseExpiredHolds } from "./orders";
 
 /* ================================================================== 共用 */
@@ -307,6 +309,8 @@ export const checkoutInput = z
     paymentMethod: z.enum(["pchomepay", "offline"]),
     /** 線上付款的方式：card（預設，保留時間短）／atm（需店家開啟 pchomepayAtm） */
     pchomepayType: z.enum(["card", "atm"]).optional(),
+    /** invoice 模組：發票方式（未啟用時忽略） */
+    invoice: z.unknown().optional(),
   })
   .strict();
 
@@ -369,6 +373,8 @@ export async function placeOrder(
     throw new ServiceError("invalid", "此商店未開放線下匯款");
   }
 
+  const invoiceRequest = await resolveInvoiceRequest(deps.store, tenant, d.invoice);
+
   const accessKey = randomBytes(24).toString("base64url");
   // M1：線上刷卡只保留短時間；ATM 與線下匯款保留 orderExpireHours（ATM 繳費期限由 atmExpireDays 保證更短）
   const hours = method === "pchomepay" && !atm ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
@@ -386,6 +392,7 @@ export async function placeOrder(
       expires_at: new Date(Date.now() + hours * 3600_000).toISOString(),
       access_key_hash: sha256(accessKey),
       note: d.note ?? null,
+      invoice_request: invoiceRequest,
     },
     priced.lines.map(({ stockAvailable: _s, slug: _g, ...l }) => l),
     taipeiDay(),
@@ -397,6 +404,16 @@ export async function placeOrder(
   // 線上付款：等金流建單成功後才寄（建單失敗訂單會被取消，不能先寄「訂單成立」）
   if (method === "offline") await sendOrderPlacedMails(deps, tenant, order, settings, orderUrl);
   return { order, accessKey, orderUrl };
+}
+
+/** invoice 模組啟用時：驗證並回傳發票需求（依店家開放的選項）；未啟用回 null */
+async function resolveInvoiceRequest(store: Store, tenant: TenantRow, raw: unknown): Promise<InvoiceRequest | null> {
+  if (!activeModuleIds(await moduleStates({ store }, tenant.id)).has("invoice")) return null;
+  const s = (await publishedModuleSettings(store, tenant, "invoice")) as InvoiceSettings;
+  const r = parse(invoiceRequestSchema, raw ?? { type: "member" }) as InvoiceRequest;
+  const allowed = { member: true, mobile: s.allowMobileBarcode !== false, certificate: s.allowCertificate !== false, donation: s.allowDonation !== false, b2b: s.allowB2B !== false };
+  if (!allowed[r.type]) throw new ServiceError("invalid", "此商店未開放這種發票方式");
+  return r;
 }
 
 export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow, order: OrderRow, settings: ShopSettings, orderUrl: string) {

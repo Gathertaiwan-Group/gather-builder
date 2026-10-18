@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
-import { moduleConfig } from "@/lib/site-loader";
+import { moduleActive, moduleConfig } from "@/lib/site-loader";
+import { invoiceSettings } from "@/modules/invoice/manifest";
 import { currentMember } from "@/lib/site-request";
 import { getStore } from "@/lib/store";
 import { paymentAvailability, shopSettingsSchema, type ShopSettings } from "@/lib/services/shop";
@@ -23,6 +24,12 @@ export default async function CheckoutPage(props: Props) {
   const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
   const [member, avail] = await Promise.all([currentMember(site.tenant), paymentAvailability(getStore(), site.tenant, settings, { allowSandbox: site.mode === "preview" })]);
   const ctx = makeRenderCtx(site, "/checkout");
+  const inv = moduleActive(site, "invoice") ? invoiceSettings.safeParse(moduleConfig(site, "invoice")) : null;
+  const invoiceOptions = inv?.success
+    ? { mobile: inv.data.allowMobileBarcode !== false, certificate: inv.data.allowCertificate !== false, donation: inv.data.allowDonation !== false, b2b: inv.data.allowB2B !== false, defaultLoveCode: inv.data.defaultLoveCode ?? null }
+    : inv
+      ? { mobile: true, certificate: true, donation: true, b2b: true, defaultLoveCode: null }
+      : null;
   const slug = site.tenant.slug;
   return (
     <SiteShell ctx={ctx}>
@@ -48,6 +55,7 @@ export default async function CheckoutPage(props: Props) {
               loginHref={siteHref(ctx, "/account/login?next=/checkout")}
               methods={{ pchomepay: avail.pchomepay, atm: avail.pchomepayAtm, offline: avail.offline, offlineInstructions: avail.offlineInstructions, sandbox: avail.pchomepaySandbox }}
               previewToken={site.mode === "preview" ? site.previewToken : null}
+              invoiceOptions={invoiceOptions}
               minOnline={PCHOMEPAY_MIN_AMOUNT}
             />
           )}

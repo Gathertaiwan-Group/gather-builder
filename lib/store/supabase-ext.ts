@@ -90,7 +90,7 @@ export function createSupabaseExtStore(db: SupabaseClient): ExtImpl {
       return { rows: (r.data ?? []) as InvoiceRow[], total: r.count ?? 0 };
     },
     async listInvoicesToRetry(limit, maxAttempts) {
-      return (must(await db.from("builder_invoices").select("id, tenant_id").in("status", ["pending", "failed"]).lt("attempts", maxAttempts).order("updated_at").limit(limit), "listInvoicesToRetry") ?? []) as Pick<InvoiceRow, "id" | "tenant_id">[];
+      return (must(await db.from("builder_invoices").select("id, tenant_id, order_id").in("status", ["pending", "failed"]).lt("attempts", maxAttempts).order("updated_at").limit(limit), "listInvoicesToRetry") ?? []) as Pick<InvoiceRow, "id" | "tenant_id" | "order_id">[];
     },
 
     /* -------------------------------------------------------- shipping */

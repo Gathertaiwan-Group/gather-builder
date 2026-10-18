@@ -12,6 +12,11 @@ export const SCOPES = {
   "commerce:write": "建立與修改商品（上架／修改已上架商品另需 publish ＋ confirm）",
   "orders:read": "讀取訂單（含收件個資）與金流設定狀態",
   "orders:write": "標記已收款、出貨、取消訂單（都需 confirm）",
+  "invoices:write": "開立、重試、作廢／折讓電子發票（都需 confirm；讀取用 orders:read）",
+  "shipping:write": "建立出貨單（綠界物流或手動出貨，需 confirm；讀取用 orders:read）",
+  "marketing:write": "建立／停用優惠券、設定推薦 KOL 分潤",
+  "newsletter:read": "讀取電子報訂閱者（個資）與群發紀錄",
+  "newsletter:write": "建立電子報草稿、寄測試信、群發（群發需 confirm）",
 } as const;
 
 export type Scope = keyof typeof SCOPES;

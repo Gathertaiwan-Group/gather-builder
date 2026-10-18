@@ -6,10 +6,11 @@ import { manifest as contactForm } from "./contact-form/manifest";
 import { manifest as line } from "./line/manifest";
 import { manifest as members } from "./members/manifest";
 import { manifest as shop } from "./shop/manifest";
+import { manifest as invoice } from "./invoice/manifest";
 import type { ModuleManifest, SectionTypeDef } from "./types";
 
 /** 模組註冊表：程式內唯一真相。新增模組只要在這裡加一行。 */
-export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop];
+export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice];
 
 export type Registry = Map<string, ModuleManifest>;
 export const registry: Registry = new Map(MODULES.map((m) => [m.id, m]));

@@ -10,6 +10,7 @@ import { siteHref } from "@/modules/render-types";
 import { ORDER_STATUS_LABEL } from "@/lib/shop/machine";
 import { twd } from "@/modules/shop/sections";
 import { expireIfDue } from "@/lib/services/orders";
+import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "會員中心", robots: { index: false } };
@@ -27,6 +28,13 @@ export default async function AccountPage(props: Props) {
   const listed = moduleActive(site, "shop") ? (await store.listOrders(site.tenant.id, { memberId: member.id, limit: 50, offset: 0 })).rows : [];
   // 逾期未付的訂單在讀取時 lazy 取消（冪等）
   const orders = await Promise.all(listed.map((o) => expireIfDue(store, o)));
+  // 發票號與物流追蹤號（有啟用對應模組才有資料）
+  const extras = await Promise.all(
+    orders.map(async (o) => ({
+      invoice: o.invoice_status ? await store.getInvoiceByOrder(site.tenant.id, o.id) : null,
+      shipment: await store.getActiveShipmentByOrder(site.tenant.id, o.id),
+    })),
+  );
   const action = (p: string) => `/s/${site.tenant.slug}/api/account/${p}`;
   return (
     <SiteShell ctx={ctx}>
@@ -49,16 +57,32 @@ export default async function AccountPage(props: Props) {
               <p className="gb-muted m-0 text-sm">還沒有訂單。</p>
             ) : (
               <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
-                {orders.map((o) => (
-                  <li key={o.id} className="flex flex-wrap justify-between gap-2 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
-                    <a href={siteHref(ctx, `/orders/${o.order_no}`)} data-gb="order-link">
-                      {o.order_no}
-                    </a>
-                    <span>
-                      {ORDER_STATUS_LABEL[o.status]} · {twd(o.total)}
-                    </span>
-                  </li>
-                ))}
+                {orders.map((o, i) => {
+                  const inv = extras[i]?.invoice;
+                  const sh = extras[i]?.shipment;
+                  return (
+                    <li key={o.id} className="flex flex-wrap justify-between gap-2 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
+                      <a href={siteHref(ctx, `/orders/${o.order_no}`)} data-gb="order-link">
+                        {o.order_no}
+                      </a>
+                      <span>
+                        {ORDER_STATUS_LABEL[o.status]} · {twd(o.total)}
+                      </span>
+                      {(inv?.invoice_no || sh) && (
+                        <span className="gb-muted w-full text-xs">
+                          {inv?.invoice_no && <span data-gb="invoice-no">發票 {inv.invoice_no}（{INVOICE_LABEL[inv.status] ?? inv.status}）</span>}
+                          {inv?.invoice_no && sh && " · "}
+                          {sh && (
+                            <span data-gb="shipment">
+                              {SHIPMENT_LABEL[sh.status] ?? sh.status}
+                              {sh.tracking_no && <> · 追蹤號 <span data-gb="tracking-no">{sh.tracking_no}</span></>}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

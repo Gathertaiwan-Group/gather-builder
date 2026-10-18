@@ -7,6 +7,7 @@ import { getStore } from "@/lib/store";
 import { canViewOrder, shopSettingsSchema, type ShopSettings } from "@/lib/services/shop";
 import { expireIfDue } from "@/lib/services/orders";
 import { ORDER_STATUS_LABEL } from "@/lib/shop/machine";
+import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 import { SiteShell, makeRenderCtx } from "@/components/site/SiteShell";
 import { OrderClient } from "@/modules/shop/OrderClient";
 import { twd } from "@/modules/shop/sections";
@@ -38,7 +39,11 @@ export default async function OrderPage(props: Props) {
   const member = await currentMember(site.tenant);
   if (!found || !canViewOrder(found, sp.k, member)) notFound();
   const order = await expireIfDue(store, found);
-  const items = await store.listOrderItems(site.tenant.id, order.id);
+  const [items, invoice, shipment] = await Promise.all([
+    store.listOrderItems(site.tenant.id, order.id),
+    order.invoice_status ? store.getInvoiceByOrder(site.tenant.id, order.id) : Promise.resolve(null),
+    store.getActiveShipmentByOrder(site.tenant.id, order.id),
+  ]);
   const parsed = shopSettingsSchema.safeParse(moduleConfig(site, "shop"));
   const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
   const ctx = makeRenderCtx(site, `/orders/${order.order_no}`);
@@ -71,8 +76,14 @@ export default async function OrderPage(props: Props) {
                 <span>{twd(i.line_total)}</span>
               </li>
             ))}
+            {order.discount_total > 0 && (
+              <li className="flex justify-between gap-3 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
+                <span>折扣{order.coupon_code ? `（${order.coupon_code}）` : ""}</span>
+                <span data-gb="order-discount">−{twd(order.discount_total)}</span>
+              </li>
+            )}
             <li className="flex justify-between gap-3 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
-              <span>運費</span>
+              <span>運費{order.shipping_choice?.label ? `（${order.shipping_choice.label}）` : ""}</span>
               <span>{twd(order.shipping_fee)}</span>
             </li>
             <li className="flex justify-between gap-3 font-bold">
@@ -80,6 +91,26 @@ export default async function OrderPage(props: Props) {
               <span data-gb="order-total">{twd(order.total)}</span>
             </li>
           </ul>
+          {(invoice?.invoice_no || shipment || order.shipping_choice?.store) && (
+            <div className="gb-card mt-4 flex flex-col gap-1 p-4 text-sm" data-gb="order-extra">
+              {order.shipping_choice?.store && (
+                <p className="m-0">
+                  取貨門市：{order.shipping_choice.store.name}（{order.shipping_choice.store.address}）
+                </p>
+              )}
+              {shipment && (
+                <p className="m-0" data-gb="shipment">
+                  物流：{SHIPMENT_LABEL[shipment.status] ?? shipment.status}
+                  {shipment.tracking_no && <> · 追蹤號 <span data-gb="tracking-no">{shipment.tracking_no}</span></>}
+                </p>
+              )}
+              {invoice?.invoice_no && (
+                <p className="m-0" data-gb="invoice-no">
+                  電子發票：{invoice.invoice_no}（{INVOICE_LABEL[invoice.status] ?? invoice.status}）
+                </p>
+              )}
+            </div>
+          )}
           <p className="mt-6 text-sm">
             <a href={siteHref(ctx, "/shop")}>← 繼續購物</a>
           </p>

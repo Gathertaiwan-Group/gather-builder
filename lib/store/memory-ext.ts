@@ -109,7 +109,7 @@ export function createMemoryExtStore(): MemoryExt {
       return [...invoices.values()]
         .filter((i) => (i.status === "pending" || i.status === "failed") && i.attempts < maxAttempts)
         .slice(0, limit)
-        .map((i) => ({ id: i.id, tenant_id: i.tenant_id }));
+        .map((i) => ({ id: i.id, tenant_id: i.tenant_id, order_id: i.order_id }));
     },
 
     /* -------------------------------------------------------- shipping */

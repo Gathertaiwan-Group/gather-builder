@@ -10,6 +10,7 @@ import * as tokens from "../services/tokens";
 import * as members from "../services/members";
 import * as shop from "../services/shop";
 import * as orders from "../services/orders";
+import * as invoices from "../services/invoices";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -596,6 +597,71 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: RO,
     },
     wrap(async (a) => orders.getPaymentSetupStatus(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 電子發票（invoice） */
+
+  server.registerTool(
+    "get_invoice_setup_status",
+    {
+      description:
+        "查電子發票設定狀態：invoice 模組狀態、開立時機（manual／auto_on_paid）、憑證是否已設定與驗證、是否已設固定 IP 中繼。🔴 只能查狀態：Amego 憑證只能由平台擁有者在後台輸入，MCP 沒有設定或讀出金鑰的工具。需要 orders:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => invoices.getInvoiceSetupStatus(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_invoices",
+    {
+      description: "列出發票（訂單編號、狀態 pending／issuing／issued／failed／voided／allowance、發票號、金額、錯誤）。需要 orders:read。",
+      inputSchema: { site, status: z.enum(["pending", "issuing", "issued", "failed", "voided", "allowance"]).optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => invoices.listInvoices(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_invoice",
+    {
+      description: "查某張訂單的發票（狀態、發票號、能否作廢 canVoid、客人選的發票方式）。需要 orders:read。",
+      inputSchema: { site, ...orderRef },
+      annotations: RO,
+    },
+    wrap(async (a) => invoices.getInvoice(ctx, a)),
+  );
+
+  server.registerTool(
+    "issue_invoice",
+    {
+      description:
+        "為已付款訂單開立電子發票（法律文件，開出後只能作廢或折讓）。同一訂單只會有一張（重複呼叫會回傳既有發票）。必須先讓使用者確認，再帶 confirm: true。需要 invoices:write。",
+      inputSchema: { site, ...orderRef, confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => invoices.issueInvoice(ctx, a)),
+  );
+
+  server.registerTool(
+    "retry_invoice",
+    {
+      description: "重試開立失敗的發票（會先向供應商反查，已開過就認回、不會重開）。必須帶 confirm: true。需要 invoices:write。",
+      inputSchema: { site, ...orderRef, confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => invoices.retryInvoice(ctx, a)),
+  );
+
+  server.registerTool(
+    "void_invoice",
+    {
+      description:
+        "作廢或折讓已開立的發票：同一期（雙月）內 → 作廢；已跨期 → 自動改開折讓單（預設全額，可帶 allowanceAmount 部分折讓）。回傳 action 說明實際做了哪一種。無法復原，必須帶 confirm: true。需要 invoices:write。",
+      inputSchema: { site, ...orderRef, reason: z.string().optional().describe("原因（最多 20 字）"), allowanceAmount: z.number().int().optional().describe("跨期折讓金額（NT$ 含稅），省略＝全額"), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => invoices.voidInvoice(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

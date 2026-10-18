@@ -2,6 +2,7 @@ import type { OrderRow, OrderStatus, PaymentRow, Store, TenantRow } from "../sto
 import { ORDER_STATUS_LABEL, assertTransition, canTransition, sourcesFor } from "../shop/machine";
 import { classifyPchomepayQuery, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
 import { getMailer } from "../mail";
+import { autoIssueOnPaid } from "./invoices";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -116,6 +117,9 @@ export async function expireIfDue(store: Store, order: OrderRow, now = Date.now(
   const r = await store.cancelOrder(order.tenant_id, order.id, ["pending_payment"], "expired");
   if (r.transitioned) {
     await store.insertAudit({ tenant_id: order.tenant_id, actor: "system", action: "order.expire", payload: { orderNo: order.order_no, stockReleased: r.stockReleased } });
+    const t = await store.getTenantById(order.tenant_id);
+    const after = await store.getOrderById(order.tenant_id, order.id);
+    if (t && after) await runCancelHooks(store, t, after);
   }
   return (await store.getOrderById(order.tenant_id, order.id)) ?? order;
 }
@@ -200,6 +204,10 @@ export async function getOrder(ctx: ServiceContext, input: { site?: string | nul
     shippingMethod: o.shipping_method,
     shippingTracking: o.shipping_tracking,
     invoiceStatus: o.invoice_status,
+    invoiceRequest: o.invoice_request,
+    discountTotal: o.discount_total ?? 0,
+    couponCode: o.coupon_code,
+    shippingChoice: o.shipping_choice,
     // 付款紀錄只給狀態，不給閘道原始回應
     payments: payments.map((p) => ({ provider: p.provider, gatewayOrderNo: p.gateway_order_no, amount: p.amount, status: p.status, sandbox: p.sandbox, paidAt: p.paid_at, createdAt: p.created_at })),
     allowedNext: (["paid", "fulfilled", "cancelled"] as OrderStatus[]).filter((s) => canTransition(o.status, s)),
@@ -222,6 +230,39 @@ function transitionGuard(o: OrderRow, to: OrderStatus) {
 
 /** 付款成功的副作用（只在「真正轉換成功」那一次呼叫）：通知客人與店主 */
 export async function onOrderPaid(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow, via: string, opts: { sandbox?: boolean } = {}) {
+  await onOrderPaidMails(deps, tenant, order, via, opts);
+  if (opts.sandbox) return;
+  // 模組副作用（各自冪等、失敗不影響付款）：自動開發票、推薦回饋／分潤
+  await autoIssueOnPaid(deps.store, tenant, order);
+  for (const hook of paidHooks) {
+    try {
+      await hook(deps, tenant, order);
+    } catch (e) {
+      console.error("[order.paid hook] 失敗", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+type PaidHook = (deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow) => Promise<void>;
+type CancelHook = (store: Store, tenant: TenantRow, order: OrderRow) => Promise<void>;
+const paidHooks: PaidHook[] = [];
+const cancelHooks: CancelHook[] = [];
+/** 模組註冊「付款成功」與「訂單取消」副作用（referral 用；避免循環 import） */
+export function registerOrderHooks(h: { paid?: PaidHook; cancelled?: CancelHook }) {
+  if (h.paid && !paidHooks.includes(h.paid)) paidHooks.push(h.paid);
+  if (h.cancelled && !cancelHooks.includes(h.cancelled)) cancelHooks.push(h.cancelled);
+}
+export async function runCancelHooks(store: Store, tenant: TenantRow, order: OrderRow) {
+  for (const hook of cancelHooks) {
+    try {
+      await hook(store, tenant, order);
+    } catch (e) {
+      console.error("[order.cancel hook] 失敗", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+async function onOrderPaidMails(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow, via: string, opts: { sandbox?: boolean }) {
   const settings = await publishedShopSettings(deps.store, tenant);
   const url = orderPageUrl(deps.baseUrl, tenant, order.order_no);
   if (opts.sandbox) {
@@ -301,7 +342,17 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
   if (!r.transitioned) throw new ServiceError("conflict", `訂單 ${o.order_no} 狀態已被其他操作改變，請重新讀取`);
   await audit(ctx, tenant.id, "order.cancel", { orderNo: o.order_no, from: o.status, stockReleased: r.stockReleased });
   const after = (await ctx.store.getOrderById(tenant.id, o.id))!;
-  return { ...orderSummary(after), stockReleased: r.stockReleased, refundRequired: !!refundNote, note: refundNote ?? "訂單已取消，庫存已回補。" };
+  await runCancelHooks(ctx.store, tenant, after);
+  // 已開立發票的訂單取消：提示作廢（同期）或折讓（跨期）
+  const inv = await ctx.store.getInvoiceByOrder(tenant.id, o.id);
+  const invoiceNote = inv?.status === "issued" ? `此訂單已開立發票 ${inv.invoice_no}：請用 void_invoice（confirm: true）處理——同一期會作廢，跨期會改開折讓單。` : null;
+  return {
+    ...orderSummary(after),
+    stockReleased: r.stockReleased,
+    refundRequired: !!refundNote,
+    invoiceActionRequired: !!invoiceNote,
+    note: [refundNote ?? "訂單已取消，庫存已回補。", invoiceNote].filter(Boolean).join(" "),
+  };
 }
 
 /* ================================================================== 金流憑證 */

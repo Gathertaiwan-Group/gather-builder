@@ -4,6 +4,7 @@ const TABS = [
   { path: "/products", label: "商品" },
   { path: "/orders", label: "訂單" },
   { path: "/payments", label: "金流設定" },
+  { path: "/invoices", label: "電子發票" },
 ];
 
 export function TenantTabs({ slug, active, name }: { slug: string; active: string; name?: string }) {
