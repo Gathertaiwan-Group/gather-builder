@@ -35,7 +35,29 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+      # 2026-10-19 曾有循環 import（TDZ）只在 next build／執行時才爆，typecheck＋test 抓不到 → CI 也要 build。
+      # 用假值讓 build 不需連線真實服務。
+      - name: Build check
+        run: npm run build
+        env:
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-dummy-service-role-key
+          ADMIN_PASSWORD: ci-dummy-password
+          ADMIN_SESSION_SECRET: ci-dummy-session-secret-0123456789
+          PREVIEW_SECRET: ci-dummy-preview-secret-0123456789
+          PAYMENT_ENC_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
       - name: Deploy (without git metadata)
         run: |
-          rm -rf .git
+          rm -rf .git .next
           npx --yes vercel@54.4.1 deploy --prod --yes --token "${{ secrets.VERCEL_TOKEN }}"
+
+      # 部署後探針：平台首頁與示範租戶頁必須 200，否則 workflow 失敗（GitHub 會寄信）。
+      - name: Post-deploy smoke
+        run: |
+          sleep 10
+          for p in / /s/demo-coffee-local; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://gather-builder.vercel.app$p")
+            echo "$p -> $code"
+            [ "$code" = "200" ] || exit 1
+          done
