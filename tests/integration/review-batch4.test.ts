@@ -61,6 +61,7 @@ describe.skipIf(!enabled)("第四批審查修正（整合）", () => {
     expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     const ok = (r.find((x) => x.status === "fulfilled") as PromiseFulfilledResult<Awaited<ReturnType<typeof registerEvent>>>).value;
     expect(ok.kind).toBe("pending");
+    if (ok.kind !== "pending") return;
     // 把保留期限改到過去（模擬 30 分鐘後），同一人再報名 → SQL 先釋放舊保留再接受
     await db.from("builder_event_registrations").update({ hold_expires_at: new Date(Date.now() - 60_000).toISOString() }).eq("id", ok.registration.id);
     const again = await registerEvent(deps, { tenant: t, member: null, data: { sessionId: s.id, ticketTypeId: tk.id, qty: 1, contact: c("sameperson@gmail.com") } });
