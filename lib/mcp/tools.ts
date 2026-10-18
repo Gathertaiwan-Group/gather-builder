@@ -12,6 +12,7 @@ import * as shop from "../services/shop";
 import * as orders from "../services/orders";
 import * as invoices from "../services/invoices";
 import * as shipping from "../services/shipping";
+import * as coupons from "../services/coupons";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -707,6 +708,59 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: RO,
     },
     wrap(async (a) => shipping.listShipments(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 優惠券（coupons） */
+
+  server.registerTool(
+    "create_coupon",
+    {
+      description:
+        "建立折扣碼（立即可用）：kind fixed（折 value 元）或 percent（折 value%，必須帶 maxDiscount 折抵上限）；可設 minSubtotal 最低消費、startsAt/endsAt（ISO 時間含時區）、maxUses 總次數、perUserLimit 每人次數。第一版一張訂單只能用一張折扣碼。需要 marketing:write。",
+      inputSchema: {
+        site,
+        code: z.string().describe("折扣碼（3–32 碼英數，會轉大寫）"),
+        kind: z.enum(["fixed", "percent"]),
+        value: z.number().int().describe("fixed：折抵金額 NT$；percent：百分比 1–100"),
+        maxDiscount: z.number().int().optional().describe("百分比券必填：最多折多少 NT$"),
+        minSubtotal: z.number().int().optional(),
+        startsAt: z.string().optional(),
+        endsAt: z.string().optional(),
+        maxUses: z.number().int().optional(),
+        perUserLimit: z.number().int().optional(),
+        note: z.string().optional(),
+      },
+      annotations: WRITE,
+    },
+    wrap(async (a) => coupons.createCoupon(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_coupon",
+    {
+      description: "修改折扣碼：停用／啟用（active）、改結束時間、總次數或每人次數上限、備註。不能改折扣金額（請停用後另建）。需要 marketing:write。",
+      inputSchema: {
+        site,
+        code: z.string(),
+        active: z.boolean().optional(),
+        endsAt: z.string().nullable().optional(),
+        maxUses: z.number().int().nullable().optional(),
+        perUserLimit: z.number().int().nullable().optional(),
+        note: z.string().optional(),
+      },
+      annotations: WRITE,
+    },
+    wrap(async (a) => coupons.updateCoupon(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_coupons",
+    {
+      description: "列出折扣碼（含已使用次數、上限、期間、是否啟用、來源 manual／referral）。需要 site:read。",
+      inputSchema: { site, active: z.boolean().optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => coupons.listCoupons(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

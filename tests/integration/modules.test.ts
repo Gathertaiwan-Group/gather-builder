@@ -8,7 +8,8 @@ import { createSite } from "@/lib/services/sites";
 import { configureModule, enableModule } from "@/lib/services/modules";
 import { publishSite } from "@/lib/services/publish";
 import { createProduct, placeOrder } from "@/lib/services/shop";
-import { markOrderPaid } from "@/lib/services/orders";
+import { cancelOrder, markOrderPaid } from "@/lib/services/orders";
+import { createCoupon } from "@/lib/services/coupons";
 import { autoIssueOnPaid, saveInvoiceAccount, setInvoiceProviderFactoryForTests, verifyInvoiceAccount } from "@/lib/services/invoices";
 import { createMockProvider } from "@/lib/invoice/mock";
 import { adminActor } from "@/lib/tokens";
@@ -37,6 +38,7 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     await createSite(ctx, { slug, name: slug, modules: ["shop"], test: true });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, shippingFee: 0, orderPrefix: "IM", maxQtyPerItem: 50 } });
     await enableModule(ctx, { site: slug, moduleId: "invoice", config: { issueMode: "auto_on_paid" } });
+    await enableModule(ctx, { site: slug, moduleId: "coupons" });
     await publishSite(ctx, { site: slug, confirm: true });
   });
 
@@ -98,5 +100,32 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     await store.updateShipment(t.id, active.id, { status: "failed" });
     // 失敗的不佔名額，可以重建
     await expect(store.insertShipment({ ...base, merchant_trade_no: `T${ts}x`, status: "created" })).resolves.toBeTruthy();
+  });
+
+  it("優惠券：真 DB 併發下單不超用（總次數＋每人次數）、取消回補冪等", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const p = await createProduct(ctx, { site: slug, slug: "cp", name: "券商品", price: 500, status: "published", confirm: true });
+    await createCoupon(ctx, { site: slug, code: `IT${ts}`.toUpperCase().slice(0, 32), kind: "fixed", value: 100, maxUses: 3 });
+    const code = `IT${ts}`.toUpperCase().slice(0, 32);
+    const run = (email: string) => placeOrder({ store, baseUrl: "http://itest" }, { tenant: t, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact: { ...contact, email }, shipping, paymentMethod: "offline", couponCode: code } });
+    const r = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => run(`race${i}@example.com`)));
+    const ok = r.filter((x) => x.status === "fulfilled") as PromiseFulfilledResult<Awaited<ReturnType<typeof run>>>[];
+    expect(ok).toHaveLength(3);
+    for (const f of r.filter((x) => x.status === "rejected")) expect(String((f as PromiseRejectedResult).reason.message)).toMatch(/優惠券已用完|折扣碼無法使用/);
+    const c = (await store.getCouponByCode(t.id, code))!;
+    expect(c.used_count).toBe(3);
+    expect(ok[0]!.value.order.discount_total).toBe(100);
+    expect(ok[0]!.value.order.total).toBe(400);
+    // 取消一張 → 回補；重複呼叫回補函式不會多補
+    await cancelOrder(ctx, { site: slug, orderId: ok[0]!.value.order.id, confirm: true });
+    expect(await store.releaseCoupon(t.id, ok[0]!.value.order.id)).toBe(false);
+    expect((await store.getCouponByCode(t.id, code))!.used_count).toBe(2);
+
+    // 每人一次：同一個 email 併發 4 張只成功 1 張
+    const code2 = `PU${ts}`.toUpperCase().slice(0, 32);
+    await createCoupon(ctx, { site: slug, code: code2, kind: "fixed", value: 10, perUserLimit: 1 });
+    const same = await Promise.allSettled(Array.from({ length: 4 }, () => placeOrder({ store, baseUrl: "http://itest" }, { tenant: t, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact: { ...contact, email: "same-user@example.com" }, shipping, paymentMethod: "offline", couponCode: code2 } })));
+    expect(same.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    expect(await store.getCouponUserCount((await store.getCouponByCode(t.id, code2))!.id, "email:same-user@example.com")).toBe(1);
   });
 });
