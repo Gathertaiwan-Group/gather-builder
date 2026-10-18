@@ -1,4 +1,6 @@
 import type { SiteContent } from "../content";
+import type { ExtStore } from "./types-ext";
+export type * from "./types-ext";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -248,8 +250,66 @@ export interface OrderRow {
   shipping_tracking: string | null;
   /** 付款來自 PChomePay 測試環境（sandbox）：不是真的收到錢，不能出貨 */
   payment_sandbox: boolean;
+  discount_total: number;
+  coupon_id: string | null;
+  coupon_code: string | null;
+  referral_code: string | null;
+  invoice_request: InvoiceRequest | null;
+  shipping_choice: ShippingChoice | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 結帳時客人選的發票方式（存在訂單上，開立時使用） */
+export type InvoiceRequest =
+  | { type: "member" }
+  | { type: "mobile"; carrier: string }
+  | { type: "certificate"; carrier: string }
+  | { type: "donation"; loveCode: string }
+  | { type: "b2b"; taxId: string; title: string };
+
+/** 結帳時選的運送方式（server 依店家已發布設定寫入，不信任前端的運費） */
+export interface ShippingChoice {
+  methodId: string;
+  type: "cvs" | "home" | "pickup" | "manual";
+  provider: "ecpay" | "manual";
+  subType: string | null;
+  label: string;
+  fee: number;
+  store: { id: string; name: string; address: string; outside: boolean } | null;
+  cvsSelectionId: string | null;
+}
+
+export interface CouponRow {
+  id: string;
+  tenant_id: string;
+  code: string;
+  kind: "fixed" | "percent";
+  value: number;
+  max_discount: number | null;
+  min_subtotal: number;
+  starts_at: string | null;
+  ends_at: string | null;
+  max_uses: number | null;
+  used_count: number;
+  per_user_limit: number | null;
+  assigned_member_id: string | null;
+  active: boolean;
+  source: "manual" | "referral";
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CouponRedemptionRow {
+  id: string;
+  tenant_id: string;
+  coupon_id: string;
+  order_id: string;
+  user_key: string;
+  amount: number;
+  created_at: string;
+  released_at: string | null;
 }
 
 export interface PlaceOrderInput {
@@ -264,6 +324,12 @@ export interface PlaceOrderInput {
   expires_at: string;
   access_key_hash: string;
   note: string | null;
+  discount_total?: number;
+  /** 套用的優惠券：在 builder_place_order 同一交易內原子扣總次數與每人次數 */
+  coupon?: { id: string; code: string; user_key: string } | null;
+  referral_code?: string | null;
+  invoice_request?: InvoiceRequest | null;
+  shipping_choice?: ShippingChoice | null;
 }
 
 export interface PaymentAccountRow {
@@ -301,7 +367,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store {
+export interface Store extends ExtStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;
@@ -421,6 +487,18 @@ export interface Store {
   /** 條件式更新付款狀態（目前狀態 = from 才寫）；回傳是否真的轉換 */
   transitionPayment(tenantId: string, id: string, from: PaymentRow["status"], to: PaymentRow["status"], patch: Partial<Pick<PaymentRow, "raw" | "paid_at">>): Promise<boolean>;
 
+  // coupons（扣用在 placeOrder 的同一交易；回補在 cancelOrder 的同一交易）
+  /** code 重複丟 ServiceError(conflict) */
+  insertCoupon(row: Omit<CouponRow, "id" | "created_at" | "updated_at" | "used_count">): Promise<CouponRow>;
+  updateCoupon(tenantId: string, id: string, patch: Partial<Pick<CouponRow, "active" | "ends_at" | "max_uses" | "per_user_limit" | "note" | "min_subtotal">>): Promise<CouponRow | null>;
+  getCouponByCode(tenantId: string, code: string): Promise<CouponRow | null>;
+  getCouponById(tenantId: string, id: string): Promise<CouponRow | null>;
+  listCoupons(tenantId: string, opts: { active?: boolean; limit: number; offset: number }): Promise<{ rows: CouponRow[]; total: number }>;
+  getCouponUserCount(couponId: string, userKey: string): Promise<number>;
+  getRedemptionByOrder(tenantId: string, orderId: string): Promise<CouponRedemptionRow | null>;
+  /** 冪等回補（builder_release_coupon） */
+  releaseCoupon(tenantId: string, orderId: string): Promise<boolean>;
+
   // 原子限流（固定時間窗）
   rateHit(bucket: string, key: string, windowSeconds: number, limit: number): Promise<{ count: number; allowed: boolean }>;
 
@@ -429,8 +507,11 @@ export interface Store {
   listAudit(tenantId: string | null, limit: number): Promise<AuditRow[]>;
 }
 
+/** 需要碰訂單表、所以跟 commerce 實作放在一起的 ext 方法 */
+export type OrderLinkedExt = "setOrderFields" | "countPaidOrdersFor";
+
 /** members／shop 相關的 Store 方法（Supabase 與記憶體各自實作） */
-export type CommerceStore = Pick<
+export type CommerceStore = Pick<Store, OrderLinkedExt> & Pick<
   Store,
   | "insertMember"
   | "getMemberByEmail"
@@ -473,4 +554,12 @@ export type CommerceStore = Pick<
   | "listPaymentsForOrder"
   | "updatePayment"
   | "transitionPayment"
+  | "insertCoupon"
+  | "updateCoupon"
+  | "getCouponByCode"
+  | "getCouponById"
+  | "listCoupons"
+  | "getCouponUserCount"
+  | "getRedemptionByOrder"
+  | "releaseCoupon"
 >;

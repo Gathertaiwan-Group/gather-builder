@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { optionsKey } from "./supabase-commerce";
+import { COUPON_PER_USER, COUPON_UNAVAILABLE } from "./supabase-commerce";
 import type {
+  CouponRedemptionRow,
+  CouponRow,
   MemberRow,
   MemberSessionRow,
   MemberTokenRow,
@@ -49,7 +52,64 @@ export function createMemoryCommerceStore(): CommerceStore {
     return true;
   };
 
+  const coupons = new Map<string, CouponRow>();
+  const redemptions = new Map<string, CouponRedemptionRow>(); // key = order_id
+  const userCounts = new Map<string, number>();
+  const releaseCouponSync = (tenantId: string, orderId: string): boolean => {
+    const r = redemptions.get(orderId);
+    if (!r || r.tenant_id !== tenantId || r.released_at) return false;
+    redemptions.set(orderId, { ...r, released_at: now() });
+    const c = coupons.get(r.coupon_id);
+    if (c) coupons.set(c.id, { ...c, used_count: Math.max(0, c.used_count - 1), updated_at: now() });
+    const k = `${r.coupon_id}|${r.user_key}`;
+    userCounts.set(k, Math.max(0, (userCounts.get(k) ?? 0) - 1));
+    return true;
+  };
+
   const store: CommerceStore = {
+    async insertCoupon(row) {
+      if ([...coupons.values()].some((c) => c.tenant_id === row.tenant_id && c.code === row.code)) throw new ServiceError("conflict", "優惠碼已存在，請換一個");
+      const c: CouponRow = { ...clone(row), id: randomUUID(), used_count: 0, created_at: now(), updated_at: now() };
+      coupons.set(c.id, c);
+      return clone(c);
+    },
+    async updateCoupon(tenantId, id, patch) {
+      const c = coupons.get(id);
+      if (!c || c.tenant_id !== tenantId) return null;
+      const next = { ...c, ...patch, updated_at: now() };
+      coupons.set(id, next);
+      return clone(next);
+    },
+    async getCouponByCode(tenantId, code) {
+      return clone([...coupons.values()].find((c) => c.tenant_id === tenantId && c.code === code) ?? null);
+    },
+    async getCouponById(tenantId, id) {
+      const c = coupons.get(id);
+      return c && c.tenant_id === tenantId ? clone(c) : null;
+    },
+    async listCoupons(tenantId, opts) {
+      const rows = [...coupons.values()].filter((c) => c.tenant_id === tenantId && (opts.active === undefined || c.active === opts.active)).sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
+    async getCouponUserCount(couponId, userKey) {
+      return userCounts.get(`${couponId}|${userKey}`) ?? 0;
+    },
+    async getRedemptionByOrder(tenantId, orderId) {
+      const r = redemptions.get(orderId);
+      return r && r.tenant_id === tenantId ? clone(r) : null;
+    },
+    async releaseCoupon(tenantId, orderId) {
+      return releaseCouponSync(tenantId, orderId);
+    },
+    async setOrderFields(tenantId, orderId, patch) {
+      const o = orders.get(orderId);
+      if (o && o.tenant_id === tenantId) orders.set(orderId, { ...o, ...patch, updated_at: now() });
+    },
+    async countPaidOrdersFor(tenantId, who, excludeOrderId) {
+      return [...orders.values()].filter(
+        (o) => o.tenant_id === tenantId && o.id !== excludeOrderId && (o.status === "paid" || o.status === "fulfilled") && ((who.memberId && o.member_id === who.memberId) || o.contact.email.toLowerCase() === who.email.toLowerCase()),
+      ).length;
+    },
     async insertMember(row) {
       if ([...members.values()].some((m) => m.tenant_id === row.tenant_id && m.email === row.email)) return null;
       const m: MemberRow = { ...row, id: randomUUID(), email_verified_at: null, status: "active", created_at: now(), last_login_at: null };
@@ -204,6 +264,23 @@ export function createMemoryCommerceStore(): CommerceStore {
         if (p!.track_inventory && stock < total) throw new ServiceError("conflict", `庫存不足或商品已下架：${it.name}。整筆訂單未成立，請調整數量後再試。`);
         plan.push({ kind: it.variant_id ? "v" : "p", id: it.variant_id ?? it.product_id, qty: it.qty, track: p!.track_inventory });
       }
+      // 優惠券：與 builder_place_order 同語意（總次數、每人次數、期間、最低消費），檢查都在扣庫存之前（同步區段＝原子）
+      const cp = order.coupon ?? null;
+      let coupon: CouponRow | undefined;
+      if (cp) {
+        if (!cp.user_key) throw new Error("builder: coupon user key missing");
+        coupon = coupons.get(cp.id);
+        const t = Date.now();
+        const usable =
+          coupon && coupon.tenant_id === tenantId && coupon.active &&
+          (!coupon.starts_at || new Date(coupon.starts_at).getTime() <= t) &&
+          (!coupon.ends_at || new Date(coupon.ends_at).getTime() > t) &&
+          (coupon.max_uses === null || coupon.used_count < coupon.max_uses) &&
+          order.subtotal >= coupon.min_subtotal;
+        if (!usable) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
+        const uc = userCounts.get(`${cp.id}|${cp.user_key}`) ?? 0;
+        if (coupon!.per_user_limit !== null && uc >= coupon!.per_user_limit) throw new ServiceError("conflict", COUPON_PER_USER);
+      }
       for (const s of plan) {
         if (!s.track) continue;
         if (s.kind === "v") {
@@ -244,10 +321,23 @@ export function createMemoryCommerceStore(): CommerceStore {
         shipping_method: null,
         shipping_tracking: null,
         payment_sandbox: false,
+        discount_total: order.discount_total ?? 0,
+        coupon_id: cp?.id ?? null,
+        coupon_code: cp?.code ?? null,
+        referral_code: order.referral_code || null,
+        invoice_request: order.invoice_request ? clone(order.invoice_request) : null,
+        shipping_choice: order.shipping_choice ? clone(order.shipping_choice) : null,
         created_at: now(),
         updated_at: now(),
       };
+      if (order.shipping_choice?.label) row.shipping_method = order.shipping_choice.label;
       orders.set(id, row);
+      if (cp && coupon) {
+        coupons.set(cp.id, { ...coupon, used_count: coupon.used_count + 1, updated_at: now() });
+        const k = `${cp.id}|${cp.user_key}`;
+        userCounts.set(k, (userCounts.get(k) ?? 0) + 1);
+        redemptions.set(id, { id: randomUUID(), tenant_id: tenantId, coupon_id: cp.id, order_id: id, user_key: cp.user_key, amount: order.discount_total ?? 0, created_at: now(), released_at: null });
+      }
       items.forEach((it, i) =>
         orderItems.push({ ...clone(it), id: randomUUID(), tenant_id: tenantId, order_id: id, stock_deducted: plan[i]!.track, deducted_from: plan[i]!.track ? (it.variant_id ? "variant" : "product") : null }),
       );
@@ -280,7 +370,9 @@ export function createMemoryCommerceStore(): CommerceStore {
       const o = orders.get(id);
       if (!o || o.tenant_id !== tenantId || !from.includes(o.status)) return { transitioned: false, stockReleased: false };
       orders.set(id, { ...o, status: "cancelled", cancelled_at: now(), cancel_reason: reason, updated_at: now() });
-      return { transitioned: true, stockReleased: releaseSync(tenantId, id) };
+      const stockReleased = releaseSync(tenantId, id);
+      releaseCouponSync(tenantId, id);
+      return { transitioned: true, stockReleased };
     },
     async releaseOrderStock(tenantId, id) {
       return releaseSync(tenantId, id);

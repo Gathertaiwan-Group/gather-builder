@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Store, TenantRow, TokenRow, RevisionSummary } from "./types";
 import { ServiceError } from "../errors";
 import { createSupabaseCommerceStore } from "./supabase-commerce";
+import { createSupabaseExtStore } from "./supabase-ext";
 
 /**
  * Supabase 實作。🔴 一律 service role、只在 server 端使用。
@@ -34,6 +35,7 @@ const REVISION_COLS = "id, tenant_id, number, note, published_by, published_at";
 export function createSupabaseStore(db: SupabaseClient = createServiceClient()): Store {
   return {
     ...createSupabaseCommerceStore(db),
+    ...createSupabaseExtStore(db),
     async getTenantBySlug(slug) {
       return must(await db.from("builder_tenants").select("*").eq("slug", slug).maybeSingle(), "getTenantBySlug");
     },

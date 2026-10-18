@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { CommerceStore, MemberRow, OrderRow, PaymentAccountRow, PaymentRow, ProductRow, VariantRow } from "./types";
+import type { CommerceStore, CouponRedemptionRow, CouponRow, MemberRow, OrderRow, PaymentAccountRow, PaymentRow, ProductRow, VariantRow } from "./types";
 
 
 
@@ -16,6 +16,9 @@ function must<T>(r: Res<T>, what: string): T {
 
 /** 規格比對鍵：options 依 key 排序後的 JSON */
 export const optionsKey = (o: Record<string, string>) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+
+export const COUPON_UNAVAILABLE = "優惠券已用完、已過期、未達最低消費或已停用，訂單未成立，請移除優惠碼後再試。";
+export const COUPON_PER_USER = "這張優惠券你已達使用次數上限，訂單未成立。";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (s: string) => UUID.test(s);
@@ -165,6 +168,8 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       if (r.error) {
         const m = /insufficient stock: (.*)$/.exec(r.error.message);
         if (m) throw new ServiceError("conflict", `庫存不足或商品已下架：${m[1]}。整筆訂單未成立，請調整數量後再試。`);
+        if (/coupon unavailable/.test(r.error.message)) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
+        if (/coupon per-user limit/.test(r.error.message)) throw new ServiceError("conflict", COUPON_PER_USER);
         throw new Error(`placeOrder: ${r.error.message}`);
       }
       const row = (r.data as { order_id: string; order_no: string }[])[0];
@@ -229,6 +234,56 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
         await db.from("builder_orders").select("*").eq("tenant_id", tenantId).in("id", ids.slice(0, 500)).eq("status", "pending_payment").lt("expires_at", nowIso).order("expires_at").limit(limit),
         "expiredForProducts.orders",
       ) ?? []) as OrderRow[];
+    },
+
+    /* ---------------------------------------------------------- coupons */
+    async insertCoupon(row) {
+      return must(await db.from("builder_coupons").insert(row).select("*").single(), "insertCoupon") as CouponRow;
+    },
+    async updateCoupon(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_coupons").update({ ...patch, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateCoupon") as CouponRow | null;
+    },
+    async getCouponByCode(tenantId, code) {
+      return must(await db.from("builder_coupons").select("*").eq("tenant_id", tenantId).eq("code", code).maybeSingle(), "getCouponByCode") as CouponRow | null;
+    },
+    async getCouponById(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_coupons").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getCouponById") as CouponRow | null;
+    },
+    async listCoupons(tenantId, opts) {
+      let q = db.from("builder_coupons").select("*", { count: "exact" }).eq("tenant_id", tenantId);
+      if (opts.active !== undefined) q = q.eq("active", opts.active);
+      const r = await q.order("created_at", { ascending: false }).range(opts.offset, opts.offset + opts.limit - 1);
+      if (r.error) throw new Error(`listCoupons: ${r.error.message}`);
+      return { rows: (r.data ?? []) as CouponRow[], total: r.count ?? 0 };
+    },
+    async getCouponUserCount(couponId, userKey) {
+      if (!isUuid(couponId)) return 0;
+      const r = must(await db.from("builder_coupon_user_counts").select("count").eq("coupon_id", couponId).eq("user_key", userKey).maybeSingle(), "getCouponUserCount") as { count: number } | null;
+      return r?.count ?? 0;
+    },
+    async getRedemptionByOrder(tenantId, orderId) {
+      if (!isUuid(orderId)) return null;
+      return must(await db.from("builder_coupon_redemptions").select("*").eq("tenant_id", tenantId).eq("order_id", orderId).maybeSingle(), "getRedemptionByOrder") as CouponRedemptionRow | null;
+    },
+    async setOrderFields(tenantId, orderId, patch) {
+      must(await db.from("builder_orders").update({ ...patch, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", orderId), "setOrderFields");
+    },
+    async countPaidOrdersFor(tenantId, who, excludeOrderId) {
+      const base = () => db.from("builder_orders").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).in("status", ["paid", "fulfilled"]).neq("id", excludeOrderId);
+      const byEmail = await base().eq("contact->>email", who.email.toLowerCase());
+      if (byEmail.error) throw new Error(`countPaidOrdersFor: ${byEmail.error.message}`);
+      let n = byEmail.count ?? 0;
+      if (who.memberId && isUuid(who.memberId)) {
+        const byMember = await base().eq("member_id", who.memberId).neq("contact->>email", who.email.toLowerCase());
+        if (byMember.error) throw new Error(`countPaidOrdersFor: ${byMember.error.message}`);
+        n += byMember.count ?? 0;
+      }
+      return n;
+    },
+    async releaseCoupon(tenantId, orderId) {
+      return !!must(await db.rpc("builder_release_coupon", { p_tenant: tenantId, p_order: orderId }), "releaseCoupon");
     },
 
     /* ---------------------------------------------------------- payments */

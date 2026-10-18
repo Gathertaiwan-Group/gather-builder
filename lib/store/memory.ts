@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { createMemoryCommerceStore } from "./memory-commerce";
+import { createMemoryExtStore } from "./memory-ext";
 import type {
   AuditRow,
   DraftRow,
@@ -33,6 +34,7 @@ export function createMemoryStore(): Store {
 
   return {
     ...createMemoryCommerceStore(),
+    ...createMemoryExtStore(),
     async getTenantBySlug(slug) {
       return clone([...tenants.values()].find((t) => t.slug === slug) ?? null);
     },
