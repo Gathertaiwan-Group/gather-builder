@@ -204,6 +204,14 @@
 - 頁面：在目前顯示的快照（已發布或預覽草稿）裡比對頁面標題、SEO 描述與所有區塊的可翻譯文字（已套用目前語言的翻譯）。
 - 模組資料：SQL `builder_search_content`——`strpos(lower(欄位), lower(關鍵字))` 片語比對（中文可搜；不用 LIKE，`%`／`_` 不會變萬用字元；不新增 extension，不用 pg_trgm）。**只搜該租戶、只搜已發布**（文章另要求發布時間已到）。🔴 課程只比對課程介紹與已發布單元的「標題」，**絕不搜單元內文**（付費內容），摘要也只取課程介紹。外文網址另搜「已發布」的翻譯，命中後再確認主資料已發布才列出。模組沒開的種類不出現。人員名錄、公開文件由各自模組擴充同一個函式。
 
+## 內容型模組（directory／downloads）
+
+- **directory**：`builder_people`；上架、改已上架、下架需 publish＋confirm（同 publish_site 門檻）。聯絡方式（email／電話／網站）預設不公開，`show_contact` 才在前台顯示（前台讀取一律經 `publicPerson()` 遮掉）。已公開人員納入站內搜尋。
+- **downloads**：檔案放**私有** bucket `builder-downloads`（`scripts/ensure-buckets.mjs` 以 Storage API 建立；🔴 只准 builder- 開頭的 bucket，程式碼也擋），物件路徑 `<tenant_id>/<document_id>/<淨化檔名>`（DB check 保證在自己的租戶資料夾）。
+  - 上傳：後台表單直傳 ≤ 4MB（Vercel body 4.5MB 限制）；更大的檔案（≤ 50MB，bucket 上限）用 `create_document_upload` 取得**簽名上傳網址**直傳 Storage，再 `complete_document_upload`（伺服器確認檔案存在與大小）。檔名淨化（去路徑、控制字元、保留字元；顯示名保留中文；儲存 key 為 ASCII），副檔名白名單（pdf、Office、odt／ods、csv、txt、zip、jpg／png／webp、mp3／mp4），不接受 html／svg／js／exe。
+  - 下載：前台連結一律是 `/s/<slug>/downloads/<id>`；伺服器檢查已上架、🔴 限會員的文件要有效會員 session（cookie 屬於該網站、會員未停用），通過才原子計次（`builder_bump_download`）並 302 到 **60 秒**簽名網址（公開文件也一樣，方便統計；`Content-Disposition: attachment`）。未登入 → 導到登入頁。每 IP 每 10 分鐘 120 次。
+  - 只有公開且已上架的文件進站內搜尋。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

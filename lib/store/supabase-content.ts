@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,28 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async insertDocument(row) {
+      return must(await db.from("builder_documents").insert(row).select("*").single(), "insertDocument") as DocumentRow;
+    },
+    async updateDocument(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_documents").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateDocument") as DocumentRow | null;
+    },
+    async getDocument(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_documents").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getDocument") as DocumentRow | null;
+    },
+    async listDocuments(tenantId, opts) {
+      let q = db.from("builder_documents").select("*").eq("tenant_id", tenantId);
+      if (opts.status) q = q.eq("status", opts.status);
+      if (opts.visibility) q = q.eq("visibility", opts.visibility);
+      return (must(await q.order("sort").order("created_at", { ascending: false }).limit(1000), "listDocuments") ?? []) as DocumentRow[];
+    },
+    async bumpDownload(tenantId, id) {
+      if (!isUuid(id)) return null;
+      const r = must(await db.rpc("builder_bump_download", { p_tenant: tenantId, p_doc: id }), "bumpDownload");
+      return r === null || r === undefined ? null : Number(r);
+    },
     async insertPerson(row) {
       return must(await db.from("builder_people").insert(row).select("*").single(), "insertPerson") as PersonRow;
     },

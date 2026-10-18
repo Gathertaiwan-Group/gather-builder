@@ -164,6 +164,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `publish_translations` | publish | 模組資料翻譯上線（**必須** `confirm: true`）；頁面翻譯跟著 `publish_site` |
 | `create_person` / `update_person` | content:write | 人員名錄（姓名、職稱、分類、照片、簡介、聯絡方式預設不公開）；上架或改已上架需 publish ＋ confirm |
 | `list_people` | site:read | 人員與分類 |
+| `create_document_upload` | content:write | 新增文件並取得簽名上傳網址（PUT 檔案，≤ 50MB；檔名淨化、副檔名白名單） |
+| `complete_document_upload` | content:write | 確認檔案已上傳（伺服器檢查存在與大小）；`publish: true` 上架需 publish ＋ confirm |
+| `update_document` | content:write | 標題、分類、公開／限會員、上下架（已上架或要上架需 publish ＋ confirm） |
+| `list_documents` | site:read | 文件與下載次數 |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

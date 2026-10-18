@@ -91,14 +91,14 @@ export async function searchSite(store: Store, site: LoadedSite, qRaw: string, l
     if (seen.has(key)) continue;
     let slug = h.slug;
     let title = h.title;
-    if (!slug || !title) {
+    if (!title || (!slug && h.kind !== "document")) {
       const e = await resolveEntity(store, site.tenant.id, h.kind, h.id);
       if (!e) continue;
       slug = e.slug;
       title = e.title;
     }
     seen.add(key);
-    (byKind[h.kind] ??= []).push({ id: h.id, slug, title, body: h.body ?? "" });
+    (byKind[h.kind] ??= []).push({ id: h.id, slug: slug ?? "", title, body: h.body ?? "" });
   }
   for (const [kind, rows] of Object.entries(byKind)) {
     // 標題套用目前語言（缺翻譯維持中文）

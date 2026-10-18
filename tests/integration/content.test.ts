@@ -13,6 +13,8 @@ import { loadSite } from "@/lib/site-loader";
 import { searchSite } from "@/lib/services/search";
 import { addLesson, createCourse } from "@/lib/services/courses";
 import { createPerson } from "@/lib/services/directory";
+import { completeDocumentUpload, createDocumentUpload, downloadDocument, uploadDocumentDirect } from "@/lib/services/downloads";
+import { DOWNLOADS_BUCKET, supabaseFileStorage } from "@/lib/storage/files";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -25,8 +27,11 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
   const db = enabled ? createServiceClient() : (null as never);
   const ctx: ServiceContext = { actor: { ...adminActor(), label: "itest" }, store, baseUrl: "http://itest", previewSecret: "itest-secret-xxxx" };
 
+  const uploaded: string[] = [];
   afterAll(async () => {
     if (!enabled) return;
+    // 只刪這次測試在 builder-downloads 自己租戶資料夾下建立的物件（Storage API）
+    if (uploaded.length) await db.storage.from(DOWNLOADS_BUCKET).remove(uploaded);
     const t = await db.from("builder_tenants").select("id").eq("slug", slug).maybeSingle();
     if (t.data) await db.from("builder_rate_limits").delete().like("bucket", `%${t.data.id}%`);
     await db.from("builder_tenants").delete().eq("slug", slug);
@@ -35,7 +40,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
     await publishSite(ctx, { site: slug, confirm: true });
   });
@@ -76,5 +81,35 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     await createPerson(ctx, { site: slug, slug: "draft-person", name: "陳草稿", title: "主治醫師" });
     const site = (await loadSite(slug, null, store, { lang: null }))!;
     expect((await searchSite(store, site, "主治醫師")).results.map((r) => r.href)).toEqual(["/people/chen"]);
+  });
+
+  it("downloads（真 Storage builder-downloads）：簽名上傳 PUT → 確認 → 限會員擋未登入 → 簽名網址可下載、過期後失效", async () => {
+    const storage = supabaseFileStorage(db);
+    const tenant = (await store.getTenantBySlug(slug))!;
+    const up = await createDocumentUpload(ctx, { site: slug, fileName: "測試文件.txt", title: "整合測試文件", visibility: "members" }, storage);
+    const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "content-type": up.contentType }, body: "hello builder" });
+    expect(put.ok).toBe(true);
+    const doc = await completeDocumentUpload(ctx, { site: slug, documentId: up.documentId, publish: true, confirm: true }, storage);
+    uploaded.push((await store.getDocument(tenant.id, up.documentId))!.file_path!);
+    expect(doc).toMatchObject({ status: "published", sizeBytes: 13 });
+    await expect(downloadDocument(store, storage, { tenant, documentId: up.documentId, member: null })).rejects.toMatchObject({ code: "unauthorized" });
+    const m = (await store.insertMember({ tenant_id: tenant.id, email: `dl-${Date.now()}@example.com`, password_hash: "x", name: "會員", phone: null }))!;
+    const r = await downloadDocument(store, storage, { tenant, documentId: up.documentId, member: m });
+    const got = await fetch(r.url);
+    expect(got.status).toBe(200);
+    expect(await got.text()).toBe("hello builder");
+    expect(got.headers.get("content-disposition") ?? "").toMatch(/attachment/);
+    // 過期：直接要一個 1 秒的簽名網址，等 3 秒
+    const short = await storage.signedDownloadUrl(doc.id ? (await store.getDocument(tenant.id, up.documentId))!.file_path! : "", 1, "x.txt");
+    await new Promise((res) => setTimeout(res, 3000));
+    const expired = await fetch(short);
+    expect(expired.status).toBeGreaterThanOrEqual(400);
+    expect((await store.getDocument(tenant.id, up.documentId))!.download_count).toBe(1);
+    // 表單直傳
+    const d2 = await uploadDocumentDirect(ctx, { site: slug, fileName: "a.txt", bytes: new TextEncoder().encode("x"), title: "直傳" }, storage);
+    uploaded.push((await store.getDocument(tenant.id, d2.id))!.file_path!);
+    // 匿名 key 讀不到私有 bucket（沒有簽名就不能下載）
+    const anon = await fetch(`${process.env.SUPABASE_URL}/storage/v1/object/public/${DOWNLOADS_BUCKET}/${uploaded[0]}`);
+    expect(anon.status).toBeGreaterThanOrEqual(400);
   });
 });

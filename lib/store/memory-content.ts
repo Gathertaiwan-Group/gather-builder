@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -30,6 +30,12 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   /** directory／downloads 的記憶體搜尋來源（各模組的記憶體實作接上） */
   const extraSearch: ((tenantId: string, q: string) => Promise<SearchHit[]>)[] = [];
   const people = new Map<string, PersonRow>();
+  const documents = new Map<string, DocumentRow>();
+  extraSearch.push(async (tenantId, q) =>
+    [...documents.values()]
+      .filter((d) => d.tenant_id === tenantId && d.status === "published" && d.visibility === "public" && [d.title, d.description, d.category].some((x) => (x ?? "").toLowerCase().includes(q)))
+      .map((d) => ({ kind: "document", id: d.id, slug: null, title: d.title, body: `${d.category ?? ""}\n${d.description ?? ""}`, rank: d.title.toLowerCase().includes(q) ? 2 : 1 })),
+  );
   extraSearch.push(async (tenantId, q) =>
     [...people.values()]
       .filter((p) => p.tenant_id === tenantId && p.status === "published" && [p.name, p.title, p.category, p.bio_md].some((x) => (x ?? "").toLowerCase().includes(q)))
@@ -105,6 +111,32 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async insertDocument(row) {
+      const r: DocumentRow = { ...clone(row), id: row.id ?? randomUUID(), download_count: 0, created_at: now(), updated_at: now() };
+      if (r.file_path && !r.file_path.startsWith(`${r.tenant_id}/`)) throw new Error("file_path 必須在租戶資料夾");
+      documents.set(r.id, r);
+      return clone(r);
+    },
+    async updateDocument(tenantId, id, patch) {
+      const d = documents.get(id);
+      if (!d || d.tenant_id !== tenantId) return null;
+      const next = { ...d, ...clone(patch), updated_at: now() };
+      documents.set(id, next);
+      return clone(next);
+    },
+    async getDocument(tenantId, id) {
+      const d = documents.get(id);
+      return d && d.tenant_id === tenantId ? clone(d) : null;
+    },
+    async listDocuments(tenantId, opts) {
+      return clone([...documents.values()].filter((d) => d.tenant_id === tenantId && (!opts.status || d.status === opts.status) && (!opts.visibility || d.visibility === opts.visibility)).sort((a, b) => a.sort - b.sort || b.created_at.localeCompare(a.created_at)));
+    },
+    async bumpDownload(tenantId, id) {
+      const d = documents.get(id);
+      if (!d || d.tenant_id !== tenantId || d.status !== "published") return null;
+      documents.set(id, { ...d, download_count: d.download_count + 1 });
+      return d.download_count + 1;
+    },
     async insertPerson(row) {
       if ([...people.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
       const r: PersonRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };

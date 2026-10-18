@@ -5,6 +5,8 @@ import * as loyalty from "../services/loyalty";
 import * as wallet from "../services/wallet";
 import * as i18n from "../services/i18n";
 import * as directory from "../services/directory";
+import * as downloads from "../services/downloads";
+import { getFileStorage } from "../storage/files";
 
 /**
  * 第五、六批 MCP 工具（會員經營、內容與在地）：只做參數宣告與轉送，邏輯全在 lib/services。
@@ -232,6 +234,57 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: RO,
     },
     wrap(async (a) => directory.listPeople(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 文件下載（downloads） */
+
+  const docMeta = {
+    title: z.string(),
+    category: z.string().optional(),
+    description: z.string().optional(),
+    visibility: z.enum(["public", "members"]).optional().describe("public 公開（預設）／members 限會員（伺服器檢查登入）"),
+    sort: z.number().int().optional(),
+  };
+
+  server.registerTool(
+    "create_document_upload",
+    {
+      description:
+        "新增一份文件並取得「簽名上傳網址」（檔案直傳私有 Storage，最大 50MB，不經 Vercel）。拿到 uploadUrl 後用 PUT 上傳檔案（Content-Type 用回傳的值），再呼叫 complete_document_upload。檔名會淨化、副檔名限白名單（pdf、Office、圖片、zip、mp3／mp4…）。需要 content:write。",
+      inputSchema: { site, fileName: z.string().describe("原始檔名（含副檔名）"), sizeBytes: z.number().int().optional(), ...docMeta },
+      annotations: WRITE,
+    },
+    wrap(async (a) => downloads.createDocumentUpload(ctx, a, getFileStorage())),
+  );
+
+  server.registerTool(
+    "complete_document_upload",
+    {
+      description: "確認文件檔案已上傳（伺服器檢查檔案存在與大小）。publish: true 直接上架（需 publish＋confirm），否則為草稿。需要 content:write。",
+      inputSchema: { site, documentId: z.string(), publish: z.boolean().optional(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => downloads.completeDocumentUpload(ctx, a, getFileStorage())),
+  );
+
+  server.registerTool(
+    "update_document",
+    {
+      description: "修改文件（標題、分類、說明、公開／限會員、上架 status: published／下架 draft）。已上架或要上架需 publish＋confirm。需要 content:write。",
+      inputSchema: { site, documentId: z.string(), patch: z.object({ ...docMeta, title: z.string().optional(), status: z.enum(["draft", "published"]).optional() }), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => downloads.updateDocument(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_documents",
+    {
+      description: "文件列表（含草稿、上傳中）與下載次數。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => downloads.listDocuments(ctx, a)),
   );
 }
 

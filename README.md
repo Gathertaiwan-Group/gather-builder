@@ -28,6 +28,7 @@ npm run dev                  # http://localhost:3000
 | `PCHOMEPAY_SANDBOX_APP_ID=… PCHOMEPAY_SANDBOX_SECRET=… node --env-file=.env.local scripts/e2e-pchomepay-sandbox.mjs http://localhost:3100` | 只限本機＋sandbox：後台輸入測試金鑰→驗證→（沒有預覽簽章被拒）→帶預覽簽章結帳 303 到 sandbox 付款頁（不刷卡） |
 | `node --env-file=.env.local scripts/e2e-marketing.mjs http://localhost:3100` | 第三批端到端：開站→shop＋coupons＋shipping＋invoice（mock 供應商）→商品與折扣碼→會員結帳套券→收款→開發票→手動出貨→會員中心看到發票號與追蹤號；`--quick` 為正式站精簡版（+ `--newsletter-test` 寄一封測試電子報到 gathertaiwan@gmail.com；不知道正式站後台密碼時用 `--admin-base=http://localhost:3210` 讓後台動作打共用同一個 DB 的本機） |
 | `node --env-file=.env.local scripts/e2e-classes.mjs http://localhost:3210` | 第四批端到端：events（容量 1、付費保留、候補遞補、CSV）＋booking（每週時段、同時段被拒、.ics）＋courses（未付款 HTML 不含影片網址、付款後開通上課）；需要 `SUPABASE_URL`／`SUPABASE_SERVICE_ROLE_KEY`（測試用時間注入，只改這次建立的 is_test 租戶）與 `PREVIEW_SECRET`（重算遞補連結）。`--quick` 跳過遞補認領 |
+| `node --env-file=.env.local scripts/ensure-buckets.mjs` | 建立 Storage bucket（只建 builder- 開頭：`builder-downloads` 私有、50MB），冪等 |
 | `npx tsx scripts/e2e-ecpay-stage.mts` | 綠界物流 **stage**（官方公開測試特店）：電子地圖、建立測試物流單、模擬狀態通知（記憶體 Store，不寫 DB） |
 | `npx tsx scripts/amego-test-env.mts [--issue]` | Amego **官方公開測試公司**（統編 12345678）：驗證／（--issue）開立→反查→重複 OrderId→作廢、折讓 |
 

@@ -123,7 +123,34 @@ export interface PersonRow {
   updated_at: string;
 }
 
+/** downloads：文件（檔案在私有 bucket builder-downloads） */
+export interface DocumentRow {
+  id: string;
+  tenant_id: string;
+  title: string;
+  category: string | null;
+  description: string | null;
+  file_path: string | null;
+  file_name: string | null;
+  content_type: string | null;
+  size_bytes: number | null;
+  visibility: "public" | "members";
+  status: "uploading" | "draft" | "published";
+  download_count: number;
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContentStore {
+  // downloads
+  insertDocument(row: Omit<DocumentRow, "id" | "created_at" | "updated_at" | "download_count"> & { id?: string }): Promise<DocumentRow>;
+  updateDocument(tenantId: string, id: string, patch: Partial<Omit<DocumentRow, "id" | "tenant_id" | "created_at" | "updated_at" | "download_count">>): Promise<DocumentRow | null>;
+  getDocument(tenantId: string, id: string): Promise<DocumentRow | null>;
+  listDocuments(tenantId: string, opts: { status?: DocumentRow["status"]; visibility?: DocumentRow["visibility"] }): Promise<DocumentRow[]>;
+  /** 原子 +1（只算已發布），回傳新次數；不存在回 null */
+  bumpDownload(tenantId: string, id: string): Promise<number | null>;
+
   // directory
   insertPerson(row: Omit<PersonRow, "id" | "created_at" | "updated_at">): Promise<PersonRow>;
   updatePerson(tenantId: string, id: string, patch: Partial<Omit<PersonRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<PersonRow | null>;
