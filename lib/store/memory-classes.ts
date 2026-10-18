@@ -39,6 +39,9 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
   const tickets = new Map<string, TicketTypeRow>();
   const regs = new Map<string, RegistrationRow>();
   const waitlist = new Map<string, WaitlistRow>();
+  // 記憶體版的建立順序（毫秒時間戳可能相同；DB 是微秒 now()＋id，這裡用插入順序確保嚴格 FIFO）
+  const waitSeq = new Map<string, number>();
+  const fifo = (a: WaitlistRow, b: WaitlistRow) => a.created_at.localeCompare(b.created_at) || (waitSeq.get(a.id) ?? 0) - (waitSeq.get(b.id) ?? 0);
   const pii: PiiAccessRow[] = [];
   const providers = new Map<string, ProviderRow>();
   const services = new Map<string, ServiceRow>();
@@ -318,13 +321,14 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       if ([...waitlist.values()].some((w) => w.session_id === row.session_id && w.email_norm === row.email_norm && (w.status === "waiting" || w.status === "offered"))) return null;
       const r: WaitlistRow = { ...clone(row), id: randomUUID(), status: "waiting", offered_at: null, offer_expires_at: null, claimed_registration_id: null, created_at: now(), updated_at: now() };
       waitlist.set(r.id, r);
+      waitSeq.set(r.id, waitSeq.size + 1);
       return clone(r);
     },
     async getWaitlist(tenantId, id) {
       return clone(own(waitlist, tenantId, id) ?? null);
     },
     async listWaitlist(tenantId, sessionId) {
-      return clone([...waitlist.values()].filter((w) => w.tenant_id === tenantId && w.session_id === sessionId).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)));
+      return clone([...waitlist.values()].filter((w) => w.tenant_id === tenantId && w.session_id === sessionId).sort(fifo));
     },
     async updateWaitlist(tenantId, id, from, patch) {
       const w = own(waitlist, tenantId, id);
@@ -345,7 +349,7 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       const until = new Date(Math.min(t + Math.max(1, Math.min(hours, 168)) * 3600_000, new Date(s.starts_at).getTime())).toISOString();
       const out: WaitlistRow[] = [];
       for (;;) {
-        const w = [...waitlist.values()].filter((x) => x.session_id === s.id && x.status === "waiting").sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))[0];
+        const w = [...waitlist.values()].filter((x) => x.session_id === s.id && x.status === "waiting").sort(fifo)[0];
         if (!w) break;
         if (usedSeats(s) + w.qty > s.capacity) break;
         const tt = tickets.get(w.ticket_type_id);
