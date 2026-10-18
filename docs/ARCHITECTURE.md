@@ -39,7 +39,7 @@
 
 - MCP：`Authorization: Bearer <token>` → `authenticateBearer()` 比對 `builder_api_tokens.token_hash`（sha256，原文只在建立時顯示一次）、未撤銷 → `Actor { tenantId, scopes }`，更新 `last_used_at`。
 - 刻意不做 OAuth 流程、不提供 `/.well-known/oauth-*`、401 不帶 `resource_metadata`（避免客戶端誤走 OAuth discovery）。
-- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
+- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
 - 預覽連結：HMAC-SHA256 簽 `{ tenantId, exp }`，1 小時有效（`lib/preview.ts`）。
 - 後台：單一密碼 → HMAC cookie（`lib/adminAuth.ts`），middleware 擋 `/admin` 與 `/api/admin`，頁面與 API 再驗一次；後台 POST 檢查 Origin 防 CSRF。
 - token 發行：發出的 scopes 必須是呼叫者 scopes 的子集（`issue_site_token` 超出直接拒絕；`create_site` 取交集，沒有任何網站 scope 就不發）。
@@ -90,6 +90,38 @@
 - **🔴 sandbox 憑證（H1）**：sandbox 憑證只在「帶有效預覽簽章」的結帳可用（結帳頁在 `?preview=` 模式會把簽章帶進表單，`handleCheckout` 驗簽後才允許）；已發布網站的一般訪客看不到線上付款。sandbox 付款成功的訂單標記 `builder_orders.payment_sandbox`，店主信寫「請勿出貨」，`fulfill_order` 一律拒絕；後台訂單列表顯示 sandbox 標記；「測試環境」勾選框預設不勾。
 - 🔴 規則：正式金鑰不准拿來測試；`scripts/e2e-pchomepay-sandbox.mjs` 只允許 localhost＋sandbox，且不跟隨付款頁。notify 用單元／整合測試模擬（mock 回查結果）。
 
+## 發票（invoice 模組）
+
+- **供應商介面** `lib/invoice/provider.ts`：`issue`／`void`／`allowance`／`query`／`verify`，結果三態（成功／可重試／永久錯誤）。第一家 `lib/invoice/amego.ts`（官方文件 https://invoice.amego.tw/api_doc/ ：`/json/f0401` 開立、`/json/f0501` 作廢（陣列）、`/json/g0401` 折讓（陣列、未稅＋稅額、AllowanceType 2）、`/json/invoice_query` 反查；`md5(data+time+appKey)`，data 只序列化一次）。另有 `mock`（只限 `is_test` 租戶，e2e 用）。
+- **憑證**：`builder_invoice_accounts`（賣方統編＋App Key，secretbox 加密綁租戶），**只能從平台後台輸入**；MCP 只有 `get_invoice_setup_status`。
+- **🔴 固定 IP 中繼**：Amego 用 IP 白名單、Vercel 出口 IP 浮動。設 env `AMEGO_RELAY_URL`＋`AMEGO_RELAY_SECRET` 後所有呼叫經中繼（header `x-relay-secret`，只在走中繼時送）；沒設就直連，後台與 `get_invoice_setup_status` 會警示。中繼要放行 `/json/f0401`、`/json/f0501`、`/json/g0401`、`/json/invoice_query`。
+- **回應判讀**：每個回應都是 HTTP 200，只看 body 數字 `code`；**沒有數字 code 的回應（中繼自己的 `{"error":…}`、WAF 擋頁、非 JSON）一律視為「暫時失敗可重試」**（小時光曾被誤判成永久失敗卡三天）。`71`＝反查查無（確定沒開過）、`3040171`＝OrderId 重複（2026-10-19 於 Amego 官方測試公司實測）→ 反查認回；`14`（IP 錯誤）可重試；其他非 0 視為資料錯誤，不再自動重試（人工 `retry_invoice` 仍可）。
+- **開立（claim-then-act）**：`builder_invoices.order_id` 唯一（同一訂單只會有一列）→ 條件式宣告 `issuing`（attempts＋1，併發只有一個打供應商；卡住 10 分鐘可重新宣告）→ 第 2 次以後**一定先反查**（已開過就認回不重開；反查失敗＝不知道，這次不開）。OrderId＝訂單編號。
+- **開立時機**：每租戶設定，預設**手動**（後台或 `issue_invoice confirm:true`）；`auto_on_paid` 時在 `onOrderPaid`（付款真正轉換成功那一次）呼叫，失敗不影響付款。sandbox 付款與未付款訂單不開。每日 cron 重試可重試的失敗。
+- **載具**：會員載具（不帶載具欄位＝Amego 會員載具）、手機條碼 `3J0002`（`/^\/[0-9A-Z.+-]{7}$/`）、自然人憑證 `CQ0001`（2 英文＋14 數字）、捐贈 NPOBAN（3–7 碼數字）、三聯式（統編檢查碼：權數 1,2,1,2,1,2,4,1，加權和可被 5 整除、第 7 碼為 7 時加 1 也可）。資料存訂單 `invoice_request`。
+- **作廢 vs 折讓**：發票日期與今天（台北）在同一期（雙月）→ 作廢；跨期 → 自動改開折讓（預設全額、可部分）。保守規則：不採用次期申報期限前的寬限。已開立訂單取消時回傳提示 `void_invoice`。
+- 訂單 `invoice_status` 同步；會員中心與訂單頁顯示發票號。
+
+## 物流（shipping 模組）
+
+- **運送方式**存在 shipping 模組設定（草稿／發布）。`resolveShipping()` 依**已發布設定**計運費（各方式運費＋滿額免運），試算與下單同一套，前端送的運費一律不採信。沒啟用 shipping 時沿用 shop 的固定運費。
+- **綠界憑證**：`builder_shipping_accounts`（MerchantID＋{HashKey, HashIV} 加密、`stage` 旗標、C2C／B2C），只能後台輸入。**stage 帳號只在帶預覽簽章的結帳提供綠界方式**（同 PChomePay sandbox 規則），stage 物流單不會真的寄送。
+- **電子地圖選店**：`cvs-start` 建 `builder_cvs_selections`（MerchantTradeNo 20 碼隨機、只存 sha256；另一個瀏覽器秘密存成 binding cookie `gbcvs_<tenant>`、只存 sha256）→ 整頁 POST 到綠界 `/Express/map` → 綠界頁面 POST 回 `/api/ship/ecpay/map/<tenantId>`（**沒有 CheckMacValue**）：驗 MerchantID＝該租戶、子類型相符、暫存未使用未過期才寫門市 → 303 回結帳頁。下單時 `consumeCvsSelection` 要同租戶＋binding 相符＋已選門市＋未使用未過期（原子），失敗歸還。別人的瀏覽器拿不到 binding，綁不到別人的結帳。
+- **物流單**：`create_shipment confirm:true`。綠界：先寫 `builder_shipments`（同一訂單只能一張有效出貨單，partial unique index）再打 `/Express/Create`；回應 `1|key=value…`（只解析尾段）、C2C 成功 RtnCode `300`、B2C／宅配 `1`，並驗回應 CheckMacValue；失敗標 `failed`（釋放名額，可重建）。收件人姓名（中文 2–5／英文 4–10、不可混合數字空白符號）與手機在結帳就先擋。訂單維持「已付款」，**以物流狀態為準**：狀態通知回報寄出（2030／3024…）才轉「已出貨」；手動出貨／自取直接轉。綠界物流單存在時 `fulfill_order` 會被拒。
+- **狀態通知** `/api/ship/ecpay/notify/<tenantId>`：CheckMacValue 依官方演算法（參數 A→Z 不分大小寫排序、前後加 HashKey／HashIV、.NET URL encode、小寫、MD5、大寫；官方範例向量測試）以**常數時間比較**，不符回 `0|CheckMacValueError`（綠界會重送）；MerchantID、AllPayLogisticsID 也要相符；正確回純文字 `1|OK`。狀態只往前走。
+- 官方測試特店（https://developers.ecpay.com.tw/?p=7398）：C2C 2000933、B2C 2000132（官方公開測試值，只用於 stage；見 `lib/shipping/ecpay.ts`）。`scripts/e2e-ecpay-stage.mts` 實測 stage。
+
+## 行銷（coupons／referral／newsletter／ai-chat）
+
+- **折扣碼**：`applyPromotions()` 在 `priceCart()` 之後計折扣（只算商品小計），第一版一單一張。**原子扣用在 `builder_place_order` 同一交易**：`used_count < max_uses` 條件更新＋`builder_coupon_user_counts` upsert（`count < per_user_limit`），任一不足 raise 整筆回滾，併發不超用（真 DB 測 8 搶 3）。取消／逾期由 `builder_cancel_order` 呼叫 `builder_release_coupon`（`released_at is null` 冪等）。每人＝登入會員 id，訪客＝email。
+- **推薦**：會員推薦碼；分享連結 `/s/<slug>/api/ref/<碼>` 設 HttpOnly cookie，結帳只從 cookie 讀（表單欄位不採信），自己推薦自己（同會員或同 email）忽略。付款成功 hook：首次付款（該人無其他已付款訂單）→ `builder_referrals` unique(tenant, referee_key) 保證只一次 → 發限推薦人本人、單次、有效期的回饋券。KOL 分潤 `builder_referral_ledger`：service_role 只有 select／insert（只增不改），取消時另記 reverse，unique(order_id, kind) 保證只各一筆。
+- **電子報**：雙重確認（確認 token sha256、48h、一次性）；群發 `draft → sending` 條件式只成功一次、`sent` 後拒絕；寄送列 unique(broadcast, subscriber) 只建「已確認」者、寄前再查一次狀態；每次 50 封、逐封記錄結果、`remaining` 再呼叫接續不重寄。退訂 token＝HMAC(PREVIEW_SECRET, broadcast:subscriber)，DB 存 sha256、一次性；退訂頁 GET 只顯示按鈕、POST 才退訂。🔴 `is_test` 租戶群發只寄 `gathertaiwan@gmail.com`；RFC 2606 保留網域（example.com、.test…）一律不實際寄出（`lib/mail.ts`）。
+- **AI 客服**：知識＝該租戶已發布頁面文字＋已上架商品＋運費＋設定 `extraKnowledge`；Gemini REST（`gemini-2.5-flash`、`thinkingBudget: 0`，`GEMINI_MODEL` 可覆寫）。限流：每站每 IP 每日、每站每日（`builder_rate_hit`），被擋不呼叫 AI。回覆中不在商品／運費資料內的金額一律遮成「價格請以商品頁為準」。對話以 (tenant, session) 存 `builder_ai_chats`；訪客訊息出現 email／電話就寫一筆詢問（每段對話一次）。
+
+## 訂單事件 hook
+
+`lib/services/order-hooks.ts`：模組在載入時註冊「付款成功」「訂單取消」副作用（目前 referral），`onOrderPaid`／`cancelOrder`／逾期取消呼叫；每個 hook 自己冪等、失敗只記 log。發票自動開立直接在 `onOrderPaid` 呼叫。
+
 ## 已知風險（第一版刻意不處理）
 
 | 風險 | 現況 | 日後方案 |
@@ -104,6 +136,14 @@
 | 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
 | 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |
 | 會員密碼重設只寄信 | 沒有「登入中改密碼」頁、沒有 2FA。 | 會員中心加改密碼（需舊密碼）＋ email 變更流程。 |
+| 發票中繼尚未架設 | gather-builder 還沒有自己的固定 IP 中繼；沒設 `AMEGO_RELAY_URL` 時正式 Amego 帳號會被 IP 白名單擋（code 14，標可重試）。 | 架 Railway／固定 IP 中繼（可參考 alice-store/ops/amego-relay），請 Amego 放行，設兩個 env。 |
+| 發票作廢期限採保守規則 | 只有同一期（雙月）可作廢，跨期一律折讓；未採用次期申報前的寬限。 | 依會計需求加設定。 |
+| 開立中卡住 | 宣告後行程被砍，列會停在 issuing 10 分鐘，之後重新宣告會先反查。 | 加 cron 主動掃 issuing。 |
+| 綠界建單卡在 created | 寫入出貨單後、綠界回應前行程被砍，出貨單會停在 created（無物流編號），會擋住重建。 | 後台加「標為失敗」或用 QueryLogisticsTradeInfo 反查。 |
+| 電子地圖選店的跨頁導轉 | 結帳表單用 sessionStorage 暫存填寫內容；隱私模式或關閉分頁會遺失。 | 改用綠界「取得門市清單」API 在頁內選店。 |
+| 每人折扣碼次數以 email 區分訪客 | 訪客換 email 可再用一次（會員以 id 計）。 | 限定會員才能用、或加手機驗證。 |
+| 電子報分批靠人觸發 | 每次 `send_broadcast` 寄 50 封，名單大時要多次呼叫。 | 背景佇列／cron 接續。 |
+| AI 客服知識是即時組的 | 每則訊息都重組知識（商品最多 60 個、全文 30k 字），大型網站會變慢。 | 快取知識或改 RAG。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點

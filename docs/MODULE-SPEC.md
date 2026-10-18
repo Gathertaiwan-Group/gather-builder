@@ -52,9 +52,28 @@ modules/<id>/
 **金流金鑰不在模組設定裡**：只能由平台擁有者在後台「金流設定」分頁輸入（見 ARCHITECTURE「金流」）。
 `shop` 的狀態除了 settingsSchema 之外還看金流：沒有已驗證的 PChomePay 憑證 → `pending_setup`（`lib/shop/status.ts`），區塊照常顯示，結帳只提供已開放的線下匯款；兩種付款都沒開則結帳頁顯示「尚未開放結帳」。
 
-### 下一批（這次刻意不做，資料結構已預留）
+`invoice`／`shipping`／`coupons`／`referral`／`newsletter`／`ai-chat` 的細節見下表與 ARCHITECTURE「發票」「物流」「行銷」。
 
-- **發票**：`builder_orders.invoice_status`（null = 未處理）。發票模組接 `onOrderPaid`（`lib/services/orders.ts`）之後開立，狀態寫回此欄。
-- **物流**：`builder_orders.shipping_method`、`shipping_tracking`（`fulfill_order` 已可寫入單號）。物流模組要做的是運費規則（目前只有固定運費＋滿額免運）與托運單串接。
-- **行銷**：折扣碼／活動價要在 `priceCart()`（server 端計價唯一入口）加一步，前端仍然不能決定價格。
-- **退款**：目前取消已付款訂單不會自動退款（會清楚提示需到 PChomePay 後台人工退款）。
+| id | 依賴 | 固定頁面／端點 | 資料表 | MCP 工具 |
+|---|---|---|---|---|
+| `invoice` | shop | 結帳頁發票欄位；後台「電子發票」 | `builder_invoice_accounts`、`builder_invoices`（order_id 唯一） | `get_invoice_setup_status`、`list_invoices`、`get_invoice`、`issue_invoice`、`retry_invoice`、`void_invoice` |
+| `shipping` | shop | `/s/<slug>/api/shipping/cvs-start`、`/api/ship/ecpay/map/<tenantId>`、`/api/ship/ecpay/notify/<tenantId>`；後台「物流」 | `builder_shipping_accounts`、`builder_cvs_selections`、`builder_shipments` | `get_shipping_setup_status`、`create_shipment`、`get_shipment`、`list_shipments` |
+| `coupons` | shop | 結帳頁折扣碼；後台「行銷」 | `builder_coupons`、`builder_coupon_redemptions`、`builder_coupon_user_counts` | `create_coupon`、`update_coupon`、`list_coupons` |
+| `referral` | members、coupons | `/s/<slug>/api/ref/<碼>`（分享連結）；會員中心；後台「行銷」 | `builder_referral_codes`、`builder_referrals`、`builder_referral_ledger`（只增不改） | `list_referrals`、`set_referral_kol` |
+| `newsletter` | core | 區塊 `newsletter_signup`；`/api/s/<slug>/newsletter`、`/s/<slug>/newsletter/confirm`、`/newsletter/unsubscribe`；後台「電子報」 | `builder_newsletter_subscribers`、`builder_newsletter_broadcasts`、`builder_newsletter_deliveries` | `list_subscribers`、`create_broadcast`、`send_test_broadcast`、`send_broadcast`、`list_broadcasts` |
+| `ai-chat` | core | 右下角客服；`/api/s/<slug>/ai-chat`；後台「AI 客服」 | `builder_ai_chats` | `list_ai_chats` |
+
+設定（`configure_module`，進草稿、發布後生效）：
+- `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。
+- `shipping`：`methods[]`（`id`、`type` cvs／home／pickup／manual、`provider` ecpay／manual、`subType`、`label`、`fee`、`freeThreshold`、`instructions`）、`sender`（使用綠界時必填）、`goodsName`。`methods` 至少一種，否則 `pending_setup`。
+- `coupons`：無設定（折扣碼用 MCP／後台建立）。
+- `referral`：`rewardCoupon { kind, value, maxDiscount, minSubtotal, validDays }`（必填，否則 `pending_setup`）、`kolEnabled`。
+- `newsletter`：`footer`、`rateLimitPerHour`。
+- `ai-chat`：`assistantName`、`greeting`、`extraKnowledge`、`perIpDailyLimit`（30）、`dailyLimit`（300）、`collectLeads`。平台沒設 `GEMINI_API_KEY` → `pending_setup`。
+
+模組間的副作用（付款成功、訂單取消）走 `lib/services/order-hooks.ts` 註冊，各 hook 自己冪等、失敗不影響主流程；發票自動開立直接在 `onOrderPaid` 呼叫。
+
+### 尚未做
+
+- **退款**：取消已付款訂單仍不會自動退款（PChomePay 需人工）；發票作廢／折讓已可用。
+- **多張折扣碼併用**、**活動價**、**超商取貨付款（COD）**、**逆物流**、**電子報 HTML 版型與排程寄送**。

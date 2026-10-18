@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。
@@ -25,7 +25,10 @@ npm run dev                  # http://localhost:3000
 | `node --env-file=.env.local scripts/e2e-mcp.mjs http://localhost:3100` | MCP 端到端（開站→改→發布→改版→還原）；`--quick` 為精簡版 |
 | `node --env-file=.env.local scripts/e2e-security.mjs http://localhost:3100` | 隔離、scope、401、聯絡表單、honeypot、限流、後台撤銷 token |
 | `node --env-file=.env.local scripts/e2e-shop.mjs http://localhost:3100` | 會員＋電商端到端（開站→商品→會員註冊/登入→結帳（線下匯款）→收款→出貨→會員中心）；`--quick` 為正式站精簡版 |
-| `PCHOMEPAY_SANDBOX_APP_ID=… PCHOMEPAY_SANDBOX_SECRET=… node --env-file=.env.local scripts/e2e-pchomepay-sandbox.mjs http://localhost:3100` | 只限本機＋sandbox：後台輸入測試金鑰→驗證→結帳 303 到 sandbox 付款頁（不刷卡） |
+| `PCHOMEPAY_SANDBOX_APP_ID=… PCHOMEPAY_SANDBOX_SECRET=… node --env-file=.env.local scripts/e2e-pchomepay-sandbox.mjs http://localhost:3100` | 只限本機＋sandbox：後台輸入測試金鑰→驗證→（沒有預覽簽章被拒）→帶預覽簽章結帳 303 到 sandbox 付款頁（不刷卡） |
+| `node --env-file=.env.local scripts/e2e-marketing.mjs http://localhost:3100` | 第三批端到端：開站→shop＋coupons＋shipping＋invoice（mock 供應商）→商品與折扣碼→會員結帳套券→收款→開發票→手動出貨→會員中心看到發票號與追蹤號；`--quick` 為正式站精簡版（+ `--newsletter-test` 寄一封測試電子報到 gathertaiwan@gmail.com） |
+| `npx tsx scripts/e2e-ecpay-stage.mts` | 綠界物流 **stage**（官方公開測試特店）：電子地圖、建立測試物流單、模擬狀態通知（記憶體 Store，不寫 DB） |
+| `npx tsx scripts/amego-test-env.mts [--issue]` | Amego **官方公開測試公司**（統編 12345678）：驗證／（--issue）開立→反查→重複 OrderId→作廢、折讓 |
 
 ## 環境變數
 
@@ -37,10 +40,13 @@ npm run dev                  # http://localhost:3000
 | `ADMIN_SESSION_SECRET` | ✓ | 後台 cookie HMAC 金鑰（≥16 字） |
 | `PREVIEW_SECRET` | ✓ | 預覽連結簽章與 IP 雜湊金鑰 |
 | `APP_URL` | 建議 | 對外網址，用來產生預覽連結；沒設就用 request 的 host |
-| `RESEND_API_KEY` | 選填 | 有設才寄聯絡表單通知信（收件人在 contact-form 模組設定 `notifyEmail`） |
+| `RESEND_API_KEY` | 正式站必要 | 會員驗證信、重設密碼、訂單信、電子報、聯絡表單通知。沒設時信件不寄（只寫 log）。RFC 2606 保留網域（example.com、.test…）一律不寄 |
 | `RESEND_FROM` | 選填 | 寄件者 |
 | `PAYMENT_ENC_KEY` | shop 必要 | 金流憑證加密金鑰（32 bytes，base64 或 64 位 hex，`openssl rand -base64 32`）。換掉會讓既有憑證解不開（需重新輸入） |
 | `CRON_SECRET` | shop 建議 | 每日逾期訂單 cron（`/api/cron/expire-orders`）的 Bearer 金鑰（≥16 字） |
+| `AMEGO_RELAY_URL` / `AMEGO_RELAY_SECRET` | invoice 正式使用必要 | Amego 固定 IP 中繼網址與共享密鑰（header `x-relay-secret`）。沒設＝直連（Amego 會擋浮動 IP） |
+| `GEMINI_API_KEY` | ai-chat 必要 | 沒設時 ai-chat 為 pending_setup、前台不顯示 |
+| `GEMINI_MODEL` | 選填 | 預設 `gemini-2.5-flash`；新 key 若 404 改 `gemini-3.5-flash` |
 | `SUPABASE_ACCESS_TOKEN` | 只給 migrate 腳本 | Management API token，**不要**放進 Vercel 或 repo |
 | `GB_PLATFORM_TOKEN` | 只給 e2e 腳本 | 平台級 MCP token |
 

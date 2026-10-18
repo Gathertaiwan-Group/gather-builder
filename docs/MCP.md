@@ -28,8 +28,14 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 | `commerce:write` | 建立／修改商品（上架、改已上架商品、下架另需 `publish` ＋ `confirm: true`） |
 | `orders:read` | 讀訂單（含收件個資）、金流設定狀態 |
 | `orders:write` | 標記已收款（線下匯款）、出貨、取消（都需 `confirm: true`） |
+| `invoices:write` | 開立、重試、作廢／折讓電子發票（都需 `confirm: true`；讀取用 `orders:read`） |
+| `shipping:write` | 建立出貨單（綠界物流單或手動出貨，需 `confirm: true`；讀取用 `orders:read`） |
+| `marketing:write` | 建立／修改折扣碼、設定推薦 KOL 分潤比例 |
+| `newsletter:read` | 讀電子報訂閱者（個資）與群發紀錄 |
+| `newsletter:write` | 電子報草稿、寄測試信、群發（群發需 `confirm: true`） |
 
 > 新 scope 是 2026-10 加的：之前發行的 token 沒有這些 scope，需重新發行（`create_site` 發出的 token 取呼叫者 scope 的交集）。
+> 第三批（invoices／shipping／marketing／newsletter）的 scope 於 2026-10-19 加入，同樣需要重新發行 token 才拿得到。
 
 ## 在 Claude Code 連線
 
@@ -61,7 +67,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 7. 「OK 發布」→ `publish_site { confirm: true, expectedDraftVersion: <preview_changes 回的 draftVersion> }`
 8. 「改壞了，回到上一版」→ `list_revisions` → `rollback { number, confirm: true }`
 9. 「我要開始賣東西」→ `enable_module shop`（members 自動帶入）→ `configure_module shop { offlineTransfer, shippingFee, ownerEmail }` → `create_product`（上架要 confirm）→ `add_section product_grid` → 預覽、發布。線上刷卡要請平台擁有者到後台「金流設定」輸入 PChomePay 金鑰並驗證（`get_payment_setup_status` 可查進度）。
-10. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
+10. 「我要開發票」→ `enable_module invoice` → 請平台擁有者在後台「電子發票」輸入 Amego 憑證並驗證（`get_invoice_setup_status` 查進度）→ 付款後 `issue_invoice { orderNo, confirm: true }`（或 `configure_module invoice { issueMode: "auto_on_paid" }` 改成自動）。
+11. 「我要超商取貨」→ `enable_module shipping { methods:[{id:"seven",type:"cvs",provider:"ecpay",subType:"UNIMARTC2C",label:"7-11 取貨",fee:60}], sender:{...} }` → 平台擁有者在後台「物流」輸入綠界憑證 → 發布 → 付款後 `create_shipment { orderNo, confirm: true }`。
+12. 「來辦個活動」→ `enable_module coupons` → `create_coupon { code:"FALL15", kind:"percent", value:15, maxDiscount:200 }`；電子報 `create_broadcast` → `send_test_broadcast` → 使用者確認 → `send_broadcast { confirm: true }`。
+13. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
 
@@ -96,6 +105,23 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `fulfill_order` | orders:write | 已付款 → 已出貨（可帶物流單號，`confirm: true`） |
 | `cancel_order` | orders:write | 取消並回補庫存（`confirm: true`）；已付款訂單**不會自動退款**，回傳 note 會提示人工退款 |
 | `get_payment_setup_status` | orders:read | 金流設定狀態（是否已驗證、sandbox／正式、遮罩後的 APP ID）。🔴 **沒有**設定或讀出金鑰的工具：金鑰只能由平台擁有者在後台輸入 |
+| `get_invoice_setup_status` | orders:read | 發票設定狀態（模組、開立時機、憑證是否驗證、是否已設固定 IP 中繼）。🔴 **沒有**設定或讀出 Amego 金鑰的工具 |
+| `list_invoices` / `get_invoice` | orders:read | 發票列表／某訂單發票（狀態、發票號、canVoid） |
+| `issue_invoice` | invoices:write | 為已付款訂單開立發票（**必須** `confirm: true`；同一訂單只會有一張） |
+| `retry_invoice` | invoices:write | 重試失敗的發票（先反查、已開過就認回；`confirm: true`） |
+| `void_invoice` | invoices:write | 同期作廢、跨期自動改開折讓（可帶 `allowanceAmount`；`confirm: true`） |
+| `get_shipping_setup_status` | orders:read | 運送方式、綠界帳號狀態（測試／正式）。🔴 **沒有**設定或讀出綠界金鑰的工具 |
+| `create_shipment` | shipping:write | 建綠界物流單（訂單在物流回報寄出後自動轉已出貨）或手動出貨（帶 `trackingNumber`）；`confirm: true` |
+| `get_shipment` / `list_shipments` | orders:read | 出貨單（門市、物流狀態、追蹤號、事件） |
+| `create_coupon` / `update_coupon` | marketing:write | 折扣碼（固定／百分比＋上限、最低消費、期間、總次數、每人次數；停用） |
+| `list_coupons` | site:read | 折扣碼與使用次數 |
+| `list_referrals` | members:read | 推薦報表（推薦人、推薦數、分潤 earn−reverse） |
+| `set_referral_kol` | marketing:write | 設定會員推薦碼的 KOL 分潤比例（0–50%） |
+| `list_subscribers` / `list_broadcasts` | newsletter:read | 電子報訂閱者、群發紀錄與寄送統計 |
+| `create_broadcast` | newsletter:write | 電子報草稿（主旨＋Markdown） |
+| `send_test_broadcast` | newsletter:write | 寄測試信到指定的一個信箱 |
+| `send_broadcast` | newsletter:write | 群發給已確認未退訂者（**必須** `confirm: true`；同一份只能一次；每次 50 封，`remaining > 0` 再呼叫接續） |
+| `list_ai_chats` | inquiries:read | AI 客服對話摘要 |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |
