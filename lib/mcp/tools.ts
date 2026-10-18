@@ -588,7 +588,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     "cancel_order",
     {
       description:
-        "取消訂單（待付款或已付款），會回補庫存且無法復原。🔴 已付款訂單取消「不會自動退款」：PChomePay 訂單需到 PChomePay 商家後台人工退款，線下匯款需自行退款——回傳的 note 會說明。必須帶 confirm: true。需要 orders:write。",
+        "取消訂單（待付款或已付款），會回補庫存且無法復原。🔴 已付款訂單取消「不會自動退款」：要退款請改用 refund_order（支援的金流）或到金流商家後台人工退款，線下匯款需自行退款——回傳的 note 會說明。必須帶 confirm: true。需要 orders:write。",
       inputSchema: { site, ...orderRef, reason: z.string().optional(), confirm: z.boolean().optional() },
       annotations: DESTRUCTIVE,
     },
@@ -596,10 +596,21 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   );
 
   server.registerTool(
+    "refund_order",
+    {
+      description:
+        "全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需設定退刷密碼〕；PChomePay 與綠界不支援，請到商家後台人工退款）。金額＝該筆線上付款金額，每筆付款只能退一次（重複呼叫會被拒）；退款成功後已付款訂單會自動取消（回補庫存、撤銷課程等）。結果不明（逾時）不會自動重送，請到金流後台確認。🔴 會真的把錢退給客人：必須先讓使用者確認，再帶 confirm: true。需要 orders:write。",
+      inputSchema: { site, ...orderRef, reason: z.string().max(200).optional(), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => orders.refundOrder(ctx, a)),
+  );
+
+  server.registerTool(
     "get_payment_setup_status",
     {
       description:
-        "查金流設定狀態：PChomePay 憑證是否已設定／驗證、測試或正式環境、shop 模組狀態、是否開放線下匯款。🔴 只能查狀態：金鑰只能由平台擁有者在後台輸入，MCP 沒有設定或讀出金鑰的工具（請勿要求使用者在對話中貼金鑰）。需要 orders:read。",
+        "查金流設定狀態：PChomePay 與藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi 各家的憑證是否已設定／驗證、測試或正式環境、是否支援後台退款、shop 模組狀態、是否開放線下匯款。🔴 只能查狀態：金鑰只能由平台擁有者在後台輸入，MCP 沒有設定或讀出金鑰的工具（請勿要求使用者在對話中貼金鑰）。需要 orders:read。",
       inputSchema: { site },
       annotations: RO,
     },

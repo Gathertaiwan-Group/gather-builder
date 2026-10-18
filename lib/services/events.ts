@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_IDS } from "../pay/types";
 import { RESERVE_ERRORS } from "../store/reserve-errors";
 import type { EventRow, EventSessionRow, MemberRow, OrderRow, RegistrationRow, RegistrationStatus, Store, TenantRow, TicketTypeRow, WaitlistRow } from "../store/types";
 import type { EventsSettings } from "@/modules/events/manifest";
@@ -420,7 +421,7 @@ export const registerInput = z
     ticketTypeId: z.string().trim().min(1).max(64),
     qty: z.coerce.number().int().min(1).max(20),
     contact: classContactInput,
-    paymentMethod: z.enum(["offline", "pchomepay"]).optional(),
+    paymentMethod: z.enum(["offline", ...PROVIDER_IDS]).optional(),
     couponCode: z.string().trim().max(32).optional(),
     referralCode: z.string().trim().max(16).optional(),
     note: optText(500),

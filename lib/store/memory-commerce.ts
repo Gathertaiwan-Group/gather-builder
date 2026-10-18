@@ -508,6 +508,16 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
     async getPaymentAccount(tenantId, provider) {
       return clone(accounts.get(`${tenantId}|${provider}`) ?? null);
     },
+    async listPaymentAccounts(tenantId) {
+      return clone([...accounts.values()].filter((a) => a.tenant_id === tenantId));
+    },
+    async claimPaymentConfirm(tenantId, id, staleBeforeIso) {
+      const p = payments.get(id);
+      if (!p || p.tenant_id !== tenantId || p.status !== "pending") return false;
+      if (p.confirm_claimed_at && p.confirm_claimed_at > staleBeforeIso) return false;
+      payments.set(id, { ...p, confirm_claimed_at: now(), confirm_attempts: (p.confirm_attempts ?? 0) + 1, updated_at: now() });
+      return true;
+    },
     async upsertPaymentAccount(row) {
       const k = `${row.tenant_id}|${row.provider}`;
       const prev = accounts.get(k);
@@ -530,7 +540,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
     },
     async insertPayment(row) {
       if ([...payments.values()].some((p) => p.gateway_order_no === row.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
-      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, query_failures: 0, last_query_error: null, alerted_at: null, created_at: now(), updated_at: now() };
+      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, query_failures: 0, last_query_error: null, alerted_at: null, gateway_trade_no: null, confirm_claimed_at: null, confirm_attempts: 0, created_at: now(), updated_at: now() };
       payments.set(p.id, p);
       return clone(p);
     },

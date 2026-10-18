@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_IDS } from "../pay/types";
 import type { CourseRow, EnrollmentRow, LessonRow, MemberRow, OrderRow, Store, TenantRow } from "../store/types";
 import type { CoursesSettings } from "@/modules/courses/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
@@ -258,7 +259,7 @@ export const buyInput = z
   .object({
     courseId: z.string().trim().min(1).max(64),
     contact: z.object({ name: text(80), phone: z.string().trim().min(6, { message: "請填寫電話" }).max(40) }).strict(),
-    paymentMethod: z.enum(["offline", "pchomepay"]).optional(),
+    paymentMethod: z.enum(["offline", ...PROVIDER_IDS]).optional(),
     couponCode: z.string().trim().max(32).optional(),
     referralCode: z.string().trim().max(16).optional(),
   })

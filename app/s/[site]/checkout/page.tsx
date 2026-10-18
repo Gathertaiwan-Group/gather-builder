@@ -63,7 +63,7 @@ export default async function CheckoutPage(props: Props) {
               shopHref={siteHref(ctx, "/shop")}
               member={member ? { name: member.name ?? "", email: member.email, phone: member.phone ?? "" } : null}
               loginHref={siteHref(ctx, "/account/login?next=/checkout")}
-              methods={{ pchomepay: avail.pchomepay, atm: avail.pchomepayAtm, offline: avail.offline, offlineInstructions: avail.offlineInstructions, sandbox: avail.pchomepaySandbox }}
+              methods={{ pchomepay: avail.pchomepay, atm: avail.pchomepayAtm, offline: avail.offline, offlineInstructions: avail.offlineInstructions, sandbox: avail.pchomepaySandbox, online: avail.online }}
               previewToken={site.mode === "preview" ? site.previewToken : null}
               invoiceOptions={invoiceOptions}
               shippingMethods={shippingMethods}

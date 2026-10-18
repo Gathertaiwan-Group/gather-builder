@@ -203,10 +203,12 @@ describe("MCP 沒有任何能設定或讀出金流 secret 的工具", () => {
     );
     const j = (await res.json()) as { result: { tools: { name: string; inputSchema: { properties?: Record<string, unknown> } }[] } };
     const names = j.result.tools.map((t) => t.name);
-    for (const n of ["create_product", "list_orders", "mark_order_paid", "cancel_order", "get_payment_setup_status", "list_members", "disable_member"]) expect(names).toContain(n);
+    for (const n of ["create_product", "list_orders", "mark_order_paid", "cancel_order", "get_payment_setup_status", "list_members", "disable_member", "refund_order"]) expect(names).toContain(n);
     expect(names.filter((n) => /payment_account|credential|secret|set_payment|configure_payment/.test(n))).toEqual([]);
     const allProps = j.result.tools.flatMap((t) => Object.keys(t.inputSchema.properties ?? {}));
-    expect(allProps.filter((p) => /secret|app_?id|password/i.test(p))).toEqual([]);
+    expect(allProps.filter((p) => /secret|app_?id|password|hash_?key|hash_?iv|merchant_?id|channel|cust_?id/i.test(p))).toEqual([]);
+    // 第七批：refund_order、cancel_subscription 都要 confirm（工具 schema 有 confirm 參數）
+    for (const n of ["refund_order"]) expect(Object.keys(j.result.tools.find((t) => t.name === n)!.inputSchema.properties ?? {})).toContain("confirm");
   });
 });
 

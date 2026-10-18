@@ -5,6 +5,7 @@ import { adminContext, requireAdminPage } from "@/lib/adminServer";
 import { getTenantBySlugAdmin } from "@/lib/services/admin";
 import { getOrder, listOrders } from "@/lib/services/orders";
 import { ServiceError } from "@/lib/services/context";
+import { PROVIDER_LABEL, REFUND_CAPABLE, type ProviderId } from "@/lib/pay/types";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +27,7 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
         <Card title={`訂單 ${detail.orderNo}`}>
           <div className="text-sm" data-admin="order-detail">
             <p className="mt-0">
-              {detail.statusLabel} · {detail.paymentMethod === "offline" ? "線下匯款" : detail.paymentMethod === "credit" ? "點數／儲值金" : "PChomePay"}
+              {detail.statusLabel} · {detail.paymentMethod === "offline" ? "線下匯款" : detail.paymentMethod === "credit" ? "點數／儲值金" : (PROVIDER_LABEL[detail.paymentMethod as ProviderId] ?? detail.paymentMethod)}
               {detail.paymentSandbox && <strong className="ml-1 rounded bg-amber-100 px-1 text-amber-800" data-admin="sandbox-badge">測試付款・不能出貨</strong>} · 總計 {twd(detail.total)}（小計 {twd(detail.subtotal)}＋運費 {twd(detail.shippingFee)}）
             </p>
             <p>
@@ -79,6 +80,21 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
                 儲值取消試算：{detail.topupReversal.note}
               </p>
             )}
+            {detail.payments.some((p) => p.status === "paid" || p.status === "paid_after_cancel") && REFUND_CAPABLE.has(detail.payments[0]!.provider as ProviderId) && (
+              <form action={act} method="post" className="mt-2 flex flex-wrap items-center gap-1" data-admin="refund-form">
+                <input type="hidden" name="orderNo" value={detail.orderNo} />
+                <input type="hidden" name="action" value="refund" />
+                <input name="reason" placeholder="退款原因（選填）" className="rounded border px-2 py-1 text-xs" maxLength={200} />
+                <label className="flex items-center gap-1 text-xs">
+                  <input type="checkbox" name="confirm" required />
+                  確認全額退款（會真的退錢、無法撤回）
+                </label>
+                <button type="submit" className="rounded border border-red-300 px-3 py-1 text-red-700">
+                  退款
+                </button>
+              </form>
+            )}
+            {detail.refunds.length > 0 && <p className="text-xs text-neutral-600">退款紀錄：{detail.refunds.map((r) => `${twd(r.amount)} ${r.status}${r.error ? `（${r.error}）` : ""}`).join("；")}</p>}
             {detail.status === "paid" && detail.paymentMethod === "pchomepay" && <p className="text-xs text-amber-700">取消已付款的 PChomePay 訂單不會自動退款，需到 PChomePay 商家後台人工退款。</p>}
           </div>
         </Card>

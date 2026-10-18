@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { isOnlineMethod } from "@/lib/pay/types";
 import { notFound } from "next/navigation";
 import { loadModulePage } from "@/lib/site-page";
 import { currentMember } from "@/lib/site-request";
@@ -57,7 +58,7 @@ export default async function OrderPage(props: Props) {
   const pending = order.status === "pending_payment";
   return (
     <SiteShell ctx={ctx}>
-      <OrderClient slug={site.tenant.slug} clearCart={sp.placed === "1"} poll={pending && order.payment_method === "pchomepay"} />
+      <OrderClient slug={site.tenant.slug} clearCart={sp.placed === "1"} poll={pending && isOnlineMethod(order.payment_method)} />
       <section className="gb-section">
         <div className="gb-container max-w-2xl">
           <h1 className="gb-h2">訂單 {order.order_no}</h1>
@@ -72,7 +73,7 @@ export default async function OrderPage(props: Props) {
               {order.expires_at && <p className="gb-muted m-0 mt-2">請於 {new Date(order.expires_at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })} 前完成付款。</p>}
             </div>
           )}
-          {pending && order.payment_method === "pchomepay" && <p className="gb-muted mt-4 text-sm">等待金流確認付款中，頁面會自動更新。若尚未付款，請重新下單。</p>}
+          {pending && isOnlineMethod(order.payment_method) && <p className="gb-muted mt-4 text-sm">等待金流確認付款中，頁面會自動更新。若尚未付款，請重新下單。</p>}
           <ul className="gb-card m-0 mt-4 flex list-none flex-col gap-2 p-4 text-sm" data-gb="order-items">
             {items.map((i) => (
               <li key={i.id} className="flex justify-between gap-3">

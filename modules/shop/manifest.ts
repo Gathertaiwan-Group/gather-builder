@@ -24,6 +24,8 @@ export const shopSettings = z
     offlineTransfer: z.object({ enabled: z.boolean(), instructions: optText(1000) }).strict().optional(),
     /** false = 即使憑證已驗證也不提供 PChomePay */
     pchomepay: z.boolean().optional(),
+    /** 第七批：不提供的線上金流（憑證已驗證也不顯示），例如 ["linepay"] */
+    disabledProviders: z.array(z.enum(["pchomepay", "newebpay", "ecpay", "linepay", "blackcat", "payuni"])).max(6).optional(),
     /** 線上刷卡訂單的保留時間（分鐘），逾期未付自動取消並回補庫存；預設 60 */
     onlinePaymentHoldMinutes: z.number().int().min(15).max(1440).optional(),
     /** true = 另外提供「ATM 轉帳」（保留 orderExpireHours，需 ≥ 48 小時；ATM 繳費期限一定短於保留時間） */
@@ -54,7 +56,7 @@ export const manifest: ModuleManifest = {
   id: "shop",
   name: "電商核心",
   description:
-    "商品（含規格與庫存）、購物車、結帳（訪客或會員）、訂單管理、PChomePay 線上付款（每個網站用自己的商家帳號）與線下匯款。頁面固定在 /shop、/shop/<商品>、/checkout、/orders/<訂單編號>。需先在平台後台輸入並驗證 PChomePay 憑證，否則為 pending_setup（仍可只開線下匯款）。",
+    "商品（含規格與庫存）、購物車、結帳（訪客或會員）、訂單管理、線上付款（PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi，每個網站用自己的商家帳號、可同時設定多家，結帳只顯示已驗證的）與線下匯款。頁面固定在 /shop、/shop/<商品>、/checkout、/orders/<訂單編號>。需先在平台後台「金流設定」輸入並驗證至少一家的憑證，否則為 pending_setup（仍可只開線下匯款）。",
   category: "commerce",
   priceSetup: 30000,
   priceMonthly: 1500,

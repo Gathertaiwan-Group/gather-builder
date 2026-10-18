@@ -57,7 +57,7 @@ export function CheckoutClient(props: {
   shopHref: string;
   loginHref: string;
   member: { name: string; email: string; phone: string } | null;
-  methods: { pchomepay: boolean; atm: boolean; offline: boolean; offlineInstructions: string | null; sandbox: boolean };
+  methods: { pchomepay: boolean; atm: boolean; offline: boolean; offlineInstructions: string | null; sandbox: boolean; online?: { provider: string; label: string; sandbox: boolean }[] };
   minOnline: number;
   /** 預覽模式（網站主自己測試）才有：sandbox 金流只接受帶簽章的結帳 */
   previewToken?: string | null;
@@ -76,7 +76,9 @@ export function CheckoutClient(props: {
   const [cart, setCart] = useState<CartLine[] | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [error, setError] = useState("");
-  const [method, setMethod] = useState<"pchomepay" | "offline">(props.methods.pchomepay ? "pchomepay" : "offline");
+  // 第七批：其他線上金流（PChomePay 仍用原本的選項與 ATM 子選項）
+  const others = (props.methods.online ?? []).filter((o) => o.provider !== "pchomepay");
+  const [method, setMethod] = useState<string>(props.methods.pchomepay ? "pchomepay" : others[0]?.provider ?? "offline");
   const [payType, setPayType] = useState<"card" | "atm">("card");
   const methods = props.shippingMethods ?? null;
   const [shipId, setShipId] = useState<string>(props.cvsSelection?.methodId ?? (methods && methods.length === 1 ? methods[0]!.id : ""));
@@ -188,10 +190,11 @@ export function CheckoutClient(props: {
       </p>
     );
   }
-  const noMethod = !props.methods.pchomepay && !props.methods.offline;
+  const noMethod = !props.methods.pchomepay && !props.methods.offline && others.length === 0;
+  const isOnline = method !== "offline";
   const usedCredits = !!quote && ((quote.pointsRedeemed ?? 0) > 0 || (quote.walletPaid ?? 0) > 0);
   const fullyCovered = usedCredits && quote!.total === 0;
-  const belowMin = !fullyCovered && method === "pchomepay" && !!quote && quote.total < props.minOnline;
+  const belowMin = !fullyCovered && isOnline && !!quote && quote.total < props.minOnline;
   const m = props.member;
 
   return (
@@ -407,6 +410,12 @@ export function CheckoutClient(props: {
                 </label>
               </div>
             )}
+            {others.map((o) => (
+              <label key={o.provider} className="flex items-center gap-2 text-sm" data-gb={`pay-${o.provider}`}>
+                <input type="radio" name="paymentMethod" value={o.provider} checked={method === o.provider} onChange={() => setMethod(o.provider)} />
+                線上付款（{o.label}）{o.sandbox && <span className="gb-muted">［測試環境］</span>}
+              </label>
+            ))}
             {props.methods.offline && (
               <label className="flex items-center gap-2 text-sm">
                 <input type="radio" name="paymentMethod" value="offline" checked={method === "offline"} onChange={() => setMethod("offline")} />
@@ -421,7 +430,7 @@ export function CheckoutClient(props: {
             )}
           </fieldset>
           <button type="submit" className="gb-btn self-start" disabled={submitting || !quote || quote.problems.length > 0 || belowMin || (!!methods && (!shipId || !cvsReady)) || (!!coupon && !quote.discount)}>
-            {submitting ? "處理中…" : fullyCovered ? "送出訂單（全額折抵）" : method === "pchomepay" ? "前往付款" : "送出訂單"}
+            {submitting ? "處理中…" : fullyCovered ? "送出訂單（全額折抵）" : isOnline ? "前往付款" : "送出訂單"}
           </button>
         </form>
       )}

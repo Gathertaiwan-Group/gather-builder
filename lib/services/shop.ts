@@ -4,6 +4,7 @@ import { shopSettings, type ShopSettings } from "@/modules/shop/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
 import type { InvoiceRequest, MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, Store, TenantRow, VariantRow } from "../store/types";
 import { PCHOMEPAY_MIN_AMOUNT, atmExpireDays } from "../pay/pchomepay";
+import { PROVIDER_IDS, PROVIDER_LABEL, isOnlineMethod, type ProviderId } from "../pay/types";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { publishedModuleSettings, sha256 } from "./members";
@@ -319,7 +320,7 @@ export const checkoutInput = z
     contact: z.object({ name: text(80), email: z.string().trim().toLowerCase().max(200).pipe(z.email({ message: "Email 格式不正確" })), phone: z.string().trim().min(6, { message: "請填寫電話" }).max(40) }).strict(),
     shipping: z.object({ name: text(80), phone: z.string().trim().min(6, { message: "請填寫收件人電話" }).max(40), address: text(300) }).strict(),
     note: optText(500),
-    paymentMethod: z.enum(["pchomepay", "offline"]),
+    paymentMethod: z.enum([...PROVIDER_IDS, "offline"]),
     /** 線上付款的方式：card（預設，保留時間短）／atm（需店家開啟 pchomepayAtm） */
     pchomepayType: z.enum(["card", "atm"]).optional(),
     /** invoice 模組：發票方式（未啟用時忽略） */
@@ -339,6 +340,8 @@ export const checkoutInput = z
   .strict();
 
 export interface PaymentAvailability {
+  /** 第七批：可用的線上金流（已驗證、店家沒停用；sandbox 只在預覽結帳） */
+  online: { provider: ProviderId; label: string; sandbox: boolean }[];
   pchomepay: boolean;
   /** 線上付款可另選 ATM（保留 orderExpireHours） */
   pchomepayAtm: boolean;
@@ -352,9 +355,18 @@ export interface PaymentAvailability {
  * 已發布網站的一般訪客永遠拿不到 sandbox 付款——否則任何人都能用公開測試卡把訂單「付款成功」。
  */
 export async function paymentAvailability(store: Store, tenant: TenantRow, settings: ShopSettings, opts: { allowSandbox?: boolean } = {}): Promise<PaymentAvailability> {
-  const acct = await store.getPaymentAccount(tenant.id, "pchomepay");
+  const accounts = await store.listPaymentAccounts(tenant.id);
+  const acct = accounts.find((a) => a.provider === "pchomepay") ?? null;
   const usable = settings.pchomepay !== false && acct?.status === "verified" && (!acct.sandbox || opts.allowSandbox === true);
+  const disabled = new Set(settings.disabledProviders ?? []);
+  const online = PROVIDER_IDS.flatMap((id): PaymentAvailability["online"] => {
+    if (id === "pchomepay") return usable ? [{ provider: id, label: PROVIDER_LABEL[id], sandbox: !!acct?.sandbox }] : [];
+    const a = accounts.find((x) => x.provider === id);
+    if (!a || a.status !== "verified" || disabled.has(id) || (a.sandbox && opts.allowSandbox !== true)) return [];
+    return [{ provider: id, label: PROVIDER_LABEL[id], sandbox: a.sandbox }];
+  });
   return {
+    online,
     pchomepay: usable,
     pchomepayAtm: usable && settings.pchomepayAtm === true && atmExpireDays(settings.orderExpireHours ?? 72) !== null,
     pchomepaySandbox: !!acct?.sandbox,
@@ -433,7 +445,7 @@ async function placeOrderPriced(
 
   const accessKey = randomBytes(24).toString("base64url");
   // M1：線上刷卡只保留短時間；ATM 與線下匯款保留 orderExpireHours（ATM 繳費期限由 atmExpireDays 保證更短）
-  const hours = method === "pchomepay" && !atm ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
+  const hours = isOnlineMethod(method) && !atm ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
   const { id } = await deps.store.placeOrder(
     tenant.id,
     {
@@ -481,8 +493,8 @@ export function assertPaymentMethod(method: PaymentMethod, total: number, avail:
     if (total !== 0) throw new ServiceError("invalid", "付款方式不正確");
     return;
   }
-  if (method === "pchomepay") {
-    if (!avail.pchomepay) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
+  if (isOnlineMethod(method)) {
+    if (method === "pchomepay" ? !avail.pchomepay : !avail.online.some((o) => o.provider === method)) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
     if (atm && !avail.pchomepayAtm) throw new ServiceError("invalid", "此商店未開放 ATM 轉帳，請改用信用卡");
     if (total < PCHOMEPAY_MIN_AMOUNT) {
       throw new ServiceError(
@@ -526,7 +538,7 @@ export async function sendOrderPlacedMails(deps: CheckoutDeps, tenant: TenantRow
   const payText =
     method === "offline"
       ? `付款方式：線下匯款\n${offlineInstructions ?? "店家將與你聯繫付款方式。"}\n請於 ${hours} 小時內完成付款，逾期訂單會自動取消。`
-      : "付款方式：線上付款（PChomePay 支付連）。請在付款頁完成付款；未完成付款的訂單會在期限後自動取消。";
+      : `付款方式：線上付款（${isOnlineMethod(method) ? PROVIDER_LABEL[method] : "線上"}）。請在付款頁完成付款；未完成付款的訂單會在期限後自動取消。`;
   await mailSafe(deps, order.contact.email, `【${tenant.name}】訂單成立 ${order.order_no}`, `${order.contact.name} 你好，\n\n已收到你的訂單 ${order.order_no}：\n${sum}\n\n${payText}\n\n訂單狀態：${orderUrl}`);
   if (settings.ownerEmail) {
     await mailSafe(deps, settings.ownerEmail, `【${tenant.name}】新訂單 ${order.order_no}（${twd(order.total)}，${method === "offline" ? "線下匯款" : "線上付款"}）`, `${sum}\n\n訂購人：${order.contact.name} ${order.contact.email} ${order.contact.phone}\n收件：${order.shipping.name} ${order.shipping.phone} ${order.shipping.address}\n備註：${order.note ?? "-"}`);

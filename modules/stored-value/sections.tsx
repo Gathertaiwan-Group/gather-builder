@@ -39,8 +39,13 @@ export async function TopupPlanCards({ ctx }: { ctx: RenderCtx }) {
                 <select name="paymentMethod" className="gb-input" aria-label="付款方式">
                   {avail.offline && <option value="offline">線下匯款</option>}
                   {avail.pchomepay && <option value="pchomepay">線上付款{avail.pchomepaySandbox ? "（測試環境）" : ""}</option>}
+                  {avail.online.filter((o) => o.provider !== "pchomepay").map((o) => (
+                    <option key={o.provider} value={o.provider}>
+                      線上付款（{o.label}）{o.sandbox ? "（測試環境）" : ""}
+                    </option>
+                  ))}
                 </select>
-                <button className="gb-btn self-start" type="submit" disabled={!avail.offline && !avail.pchomepay}>
+                <button className="gb-btn self-start" type="submit" disabled={!avail.offline && avail.online.length === 0}>
                   購買
                 </button>
               </form>

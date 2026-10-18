@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_IDS } from "../pay/types";
 import type { BookingRow, BookingStatus, MemberRow, OrderRow, ProviderRow, ServiceRow, Store, TenantRow } from "../store/types";
 import type { BookingSettings } from "@/modules/booking/manifest";
 import { optText, postSlug, text } from "../validators";
@@ -264,7 +265,7 @@ export const bookInput = z
     providerId: z.string().trim().max(64).optional(),
     startsAt: z.iso.datetime({ offset: true }),
     contact: classContactInput,
-    paymentMethod: z.enum(["offline", "pchomepay"]).optional(),
+    paymentMethod: z.enum(["offline", ...PROVIDER_IDS]).optional(),
     couponCode: z.string().trim().max(32).optional(),
     referralCode: z.string().trim().max(16).optional(),
     note: optText(500),

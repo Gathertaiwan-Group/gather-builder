@@ -10,7 +10,9 @@ import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
 import { orderPageUrl, sendOrderPlacedMails, publishedShopSettings } from "./services/shop";
-import { cancelOrderWithHooks, pchomepayClientFor, startPchomepayPayment } from "./services/orders";
+import { cancelOrderWithHooks, pchomepayClientFor, startOnlinePayment, type ProviderFactory } from "./services/orders";
+import { formPaymentMethod, onlinePaymentResponse } from "./pay-response";
+import { isOnlineMethod } from "./pay/types";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { verifyPreviewToken } from "./preview";
 import { cookieValue, referralCookieName } from "./shop-routes";
@@ -55,13 +57,14 @@ export async function afterClassOrder(
   tenant: TenantRow,
   r: { order: OrderRow; accessKey: string },
   clientFactory = pchomepayClientFor,
+  providerFactory?: ProviderFactory,
 ): Promise<Response> {
   const baseUrl = baseUrlFrom(req);
-  if (r.order.payment_method === "pchomepay") {
+  if (isOnlineMethod(r.order.payment_method)) {
     try {
-      const pay = await startPchomepayPayment({ store, baseUrl, clientFactory }, { tenant, order: r.order, accessKey: r.accessKey });
+      const pay = await startOnlinePayment({ store, baseUrl, clientFactory, providerFactory }, { tenant, order: r.order, accessKey: r.accessKey });
       await sendOrderPlacedMails({ store, sendMail: getMailer(), baseUrl }, tenant, r.order, await publishedShopSettings(store, tenant), orderPageUrl(baseUrl, tenant, r.order.order_no, r.accessKey));
-      return NextResponse.redirect(pay.paymentUrl, 303);
+      return onlinePaymentResponse(pay);
     } catch (e) {
       // L2：金流建單失敗 → 取消（同交易釋放名額）並跑取消 hooks
       await cancelOrderWithHooks({ store, sendMail: getMailer(), baseUrl }, tenant, r.order.id, ["pending_payment"], "payment_init_failed");
@@ -92,7 +95,7 @@ export async function handleEventRegister(req: Request, rawSlug: string, store: 
           ticketTypeId: form.ticketTypeId,
           qty: form.qty || "1",
           contact: contactFromForm(form),
-          paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined,
+          paymentMethod: formPaymentMethod(form.paymentMethod),
           couponCode: form.couponCode?.trim() || undefined,
           // 推薦碼只從 cookie 讀（同結帳）
           referralCode: cookieValue(req, referralCookieName(site.tenant.id)) || undefined,
@@ -165,7 +168,7 @@ export async function handleBook(req: Request, rawSlug: string, store: Store = g
           providerId: form.providerId || undefined,
           startsAt: form.startsAt,
           contact: contactFromForm(form),
-          paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined,
+          paymentMethod: formPaymentMethod(form.paymentMethod),
           couponCode: form.couponCode?.trim() || undefined,
           referralCode: cookieValue(req, referralCookieName(site.tenant.id)) || undefined,
           note: form.note?.trim() || undefined,
@@ -224,7 +227,7 @@ export async function handleCourseBuy(req: Request, rawSlug: string, store: Stor
         data: {
           courseId: form.courseId,
           contact: { name: form.name ?? "", phone: form.phone ?? "" },
-          paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined,
+          paymentMethod: formPaymentMethod(form.paymentMethod),
           couponCode: form.couponCode?.trim() || undefined,
           referralCode: cookieValue(req, referralCookieName(site.tenant.id)) || undefined,
         },
@@ -245,7 +248,7 @@ export async function handleTopupBuy(req: Request, rawSlug: string, store: Store
     const { site, form, member, allowSandbox } = g;
     const r = await buyTopup(
       { store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) },
-      { tenant: site.tenant, member, allowSandbox, data: { planId: form.planId, contact: { name: form.name ?? "", phone: form.phone ?? "" }, paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined } },
+      { tenant: site.tenant, member, allowSandbox, data: { planId: form.planId, contact: { name: form.name ?? "", phone: form.phone ?? "" }, paymentMethod: formPaymentMethod(form.paymentMethod) } },
     );
     return afterClassOrder(req, store, site.tenant, r, clientFactory);
   } catch (e) {

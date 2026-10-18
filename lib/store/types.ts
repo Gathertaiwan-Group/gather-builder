@@ -1,10 +1,13 @@
 import type { SiteContent } from "../content";
 import type { ExtStore } from "./types-ext";
+import type { ProviderId } from "../pay/types";
+import type { PayStore } from "./types-pay";
 import type { ClassesStore } from "./types-classes";
 import type { ContentStore } from "./types-content";
 export type * from "./types-ext";
 export type * from "./types-classes";
 export type * from "./types-content";
+export type * from "./types-pay";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -196,7 +199,8 @@ export interface VariantWrite {
 
 export type OrderStatus = "pending_payment" | "paid" | "fulfilled" | "cancelled";
 /** credit＝全額由點數折抵／儲值金支付（不經金流，下單即付款成功） */
-export type PaymentMethod = "pchomepay" | "offline" | "credit";
+/** 線上付款＝provider id（第七批：多家金流）；offline 線下匯款；credit 點數／儲值金全額 */
+export type PaymentMethod = ProviderId | "offline" | "credit";
 
 export interface OrderItemInput {
   /** 課程類品項（活動票／預約／課程）沒有商品，為 null */
@@ -360,7 +364,7 @@ export interface OrderCreditsInput {
 export interface PaymentAccountRow {
   id: string;
   tenant_id: string;
-  provider: "pchomepay";
+  provider: ProviderId;
   sandbox: boolean;
   app_id: string;
   secret_enc: string;
@@ -375,8 +379,13 @@ export interface PaymentRow {
   id: string;
   tenant_id: string;
   order_id: string;
-  provider: "pchomepay";
+  provider: ProviderId;
   gateway_order_no: string;
+  /** provider 的交易序號（LINE Pay transactionId 等；字串） */
+  gateway_trade_no?: string | null;
+  /** LINE Pay confirm 的條件式宣告時間（同一 transactionId 只 confirm 一次） */
+  confirm_claimed_at?: string | null;
+  confirm_attempts?: number;
   amount: number;
   sandbox: boolean;
   status: "pending" | "paid" | "failed" | "paid_after_cancel";
@@ -392,7 +401,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore, ClassesStore, ContentStore {
+export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;
@@ -500,13 +509,16 @@ export interface Store extends ExtStore, ClassesStore, ContentStore {
   listExpiredPendingOrdersForProducts(tenantId: string, productIds: string[], nowIso: string, limit: number): Promise<OrderRow[]>;
 
   // payment accounts & payments
-  getPaymentAccount(tenantId: string, provider: "pchomepay"): Promise<PaymentAccountRow | null>;
+  getPaymentAccount(tenantId: string, provider: ProviderId): Promise<PaymentAccountRow | null>;
+  listPaymentAccounts(tenantId: string): Promise<PaymentAccountRow[]>;
   upsertPaymentAccount(row: Pick<PaymentAccountRow, "tenant_id" | "provider" | "sandbox" | "app_id" | "secret_enc">): Promise<PaymentAccountRow>;
-  markPaymentAccount(tenantId: string, provider: "pchomepay", patch: Pick<PaymentAccountRow, "status" | "verified_at" | "last_error">): Promise<void>;
+  markPaymentAccount(tenantId: string, provider: ProviderId, patch: Pick<PaymentAccountRow, "status" | "verified_at" | "last_error">): Promise<void>;
   insertPayment(row: Pick<PaymentRow, "tenant_id" | "order_id" | "provider" | "gateway_order_no" | "amount" | "sandbox">): Promise<PaymentRow>;
   getPaymentByGatewayNo(gatewayOrderNo: string): Promise<PaymentRow | null>;
   listPaymentsForOrder(tenantId: string, orderId: string): Promise<PaymentRow[]>;
-  updatePayment(tenantId: string, id: string, patch: Partial<Pick<PaymentRow, "payment_url" | "raw" | "status" | "paid_at" | "query_failures" | "last_query_error">>): Promise<void>;
+  updatePayment(tenantId: string, id: string, patch: Partial<Pick<PaymentRow, "payment_url" | "raw" | "status" | "paid_at" | "query_failures" | "last_query_error" | "gateway_trade_no" | "confirm_claimed_at">>): Promise<void>;
+  /** LINE Pay：條件式宣告 confirm（confirm_claimed_at 為 null 或早於 staleBeforeIso、且付款仍 pending 才成功；attempts＋1） */
+  claimPaymentConfirm(tenantId: string, id: string, staleBeforeIso: string): Promise<boolean>;
   /** 回查失敗次數 +1（原子），回傳新的次數 */
   bumpPaymentQueryFailure(tenantId: string, id: string, error: string): Promise<number>;
   /** 條件式標記已警示（alerted_at 由 null 改成 now 的那一次回 true） */
@@ -575,6 +587,8 @@ export type CommerceStore = Pick<Store, OrderLinkedExt> & Pick<
   | "bumpPaymentQueryFailure"
   | "markPaymentAlerted"
   | "getPaymentAccount"
+  | "listPaymentAccounts"
+  | "claimPaymentConfirm"
   | "upsertPaymentAccount"
   | "markPaymentAccount"
   | "insertPayment"

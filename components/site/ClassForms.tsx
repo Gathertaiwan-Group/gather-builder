@@ -47,6 +47,8 @@ export interface PayOptions {
   pchomepay: boolean;
   sandbox: boolean;
   coupons: boolean;
+  /** 第七批：其他已驗證的線上金流 */
+  others?: { provider: string; label: string; sandbox: boolean }[];
 }
 
 /** 付款方式可用性：讀「目前顯示的快照」的 shop 設定；sandbox 只在預覽模式（同結帳頁 H1 規則） */
@@ -55,11 +57,11 @@ export async function payOptionsFor(site: LoadedSite): Promise<PayOptions | null
   const parsed = shopSettingsSchema.safeParse(moduleConfig(site, "shop"));
   const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
   const a = await paymentAvailability(getStore(), site.tenant, settings, { allowSandbox: site.mode === "preview" });
-  return { offline: a.offline, offlineInstructions: a.offlineInstructions, pchomepay: a.pchomepay, sandbox: a.pchomepaySandbox && a.pchomepay, coupons: moduleActive(site, "coupons") };
+  return { offline: a.offline, offlineInstructions: a.offlineInstructions, pchomepay: a.pchomepay, sandbox: a.pchomepaySandbox && a.pchomepay, coupons: moduleActive(site, "coupons"), others: a.online.filter((o) => o.provider !== "pchomepay") };
 }
 
 export function PaymentFields({ pay }: { pay: PayOptions }) {
-  const first = pay.offline ? "offline" : "pchomepay";
+  const first = pay.offline ? "offline" : pay.pchomepay ? "pchomepay" : (pay.others?.[0]?.provider ?? "pchomepay");
   return (
     <fieldset className="m-0 flex flex-col gap-2 border-0 p-0 text-sm">
       <legend className="mb-1 font-medium">付款方式</legend>
@@ -77,6 +79,12 @@ export function PaymentFields({ pay }: { pay: PayOptions }) {
           線上刷卡（PChomePay）{pay.sandbox && <span className="text-xs text-amber-700">［測試環境］</span>}
         </label>
       )}
+      {(pay.others ?? []).map((o) => (
+        <label key={o.provider} className="flex items-center gap-2">
+          <input type="radio" name="paymentMethod" value={o.provider} defaultChecked={first === o.provider} />
+          線上付款（{o.label}）{o.sandbox && <span className="text-xs text-amber-700">［測試環境］</span>}
+        </label>
+      ))}
       {pay.coupons && (
         <label className="flex flex-col gap-1 font-medium">
           折扣碼（選填）
@@ -87,4 +95,4 @@ export function PaymentFields({ pay }: { pay: PayOptions }) {
   );
 }
 
-export const canPay = (p: PayOptions | null) => !!p && (p.offline || p.pchomepay);
+export const canPay = (p: PayOptions | null) => !!p && (p.offline || p.pchomepay || (p.others?.length ?? 0) > 0);

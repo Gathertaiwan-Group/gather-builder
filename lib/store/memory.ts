@@ -4,6 +4,7 @@ import { createMemoryCommerceStore } from "./memory-commerce";
 import { createMemoryExtStore } from "./memory-ext";
 import { createMemoryClassesStore } from "./memory-classes";
 import { createMemoryContentStore } from "./memory-content";
+import { createMemoryPayStore } from "./memory-pay";
 import type {
   AuditRow,
   DraftRow,
@@ -41,6 +42,7 @@ export function createMemoryStore(): Store {
     ...createMemoryExtStore(),
     ...classes.store,
     ...content.store,
+    ...createMemoryPayStore(),
     async getTenantBySlug(slug) {
       return clone([...tenants.values()].find((t) => t.slug === slug) ?? null);
     },

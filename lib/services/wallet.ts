@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_IDS } from "../pay/types";
 import type { MemberRow, OrderRow, PaymentMethod, Store, TenantRow, TopupPlanRow } from "../store/types";
 import type { StoredValueSettings } from "@/modules/stored-value/manifest";
 import { optText, text } from "../validators";
@@ -106,7 +107,7 @@ export const buyTopupInput = z
   .object({
     planId: z.string().trim().min(1).max(64),
     contact: z.object({ name: text(80), phone: z.string().trim().min(6, { message: "請填寫電話" }).max(40) }).strict(),
-    paymentMethod: z.enum(["offline", "pchomepay"]).optional(),
+    paymentMethod: z.enum(["offline", ...PROVIDER_IDS]).optional(),
   })
   .strict();
 

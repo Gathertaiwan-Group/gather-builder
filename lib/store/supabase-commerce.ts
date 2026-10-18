@@ -293,6 +293,26 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
     async getPaymentAccount(tenantId, provider) {
       return must(await db.from("builder_payment_accounts").select("*").eq("tenant_id", tenantId).eq("provider", provider).maybeSingle(), "getPaymentAccount") as PaymentAccountRow | null;
     },
+    async listPaymentAccounts(tenantId) {
+      return (must(await db.from("builder_payment_accounts").select("*").eq("tenant_id", tenantId), "listPaymentAccounts") ?? []) as PaymentAccountRow[];
+    },
+    async claimPaymentConfirm(tenantId, id, staleBeforeIso) {
+      const cur = must(await db.from("builder_payments").select("confirm_attempts").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "claimPaymentConfirm.read") as { confirm_attempts: number } | null;
+      if (!cur) return false;
+      // 條件式宣告：pending 且（沒宣告過或宣告已過期）才成功；併發只有一個拿到
+      const rows = must(
+        await db
+          .from("builder_payments")
+          .update({ confirm_claimed_at: new Date().toISOString(), confirm_attempts: (cur.confirm_attempts ?? 0) + 1, updated_at: new Date().toISOString() })
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .eq("status", "pending")
+          .or(`confirm_claimed_at.is.null,confirm_claimed_at.lt.${staleBeforeIso}`)
+          .select("id"),
+        "claimPaymentConfirm",
+      ) as { id: string }[];
+      return rows.length > 0;
+    },
     async upsertPaymentAccount(row) {
       return must(
         await db

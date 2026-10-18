@@ -4,6 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { ClassOrderItem, ClassReservation, MemberRow, OrderRow, PaymentMethod, Store, TenantRow } from "../store/types";
 import { PCHOMEPAY_MIN_AMOUNT } from "../pay/pchomepay";
+import { isOnlineMethod } from "../pay/types";
 import { ServiceError, activeModuleIds, moduleStates } from "./context";
 import { emailSchema, sha256 } from "./members";
 import { parse } from "./sites";
@@ -54,15 +55,15 @@ export async function placeClassOrder(deps: CheckoutDeps, input: ClassCheckoutIn
   const promo = await applyPromotions(deps.store, tenant, { subtotal: item.line_total, couponCode: input.couponCode, referralCode: input.referralCode, member, email: input.contact.email });
   const total = item.line_total - promo.discount;
   const avail = await paymentAvailability(deps.store, tenant, settings, { allowSandbox: input.allowSandbox });
-  if (input.paymentMethod === "pchomepay") {
-    if (!avail.pchomepay) throw new ServiceError("invalid", "此網站目前無法使用線上付款，請選擇其他付款方式");
+  if (isOnlineMethod(input.paymentMethod)) {
+    if (input.paymentMethod === "pchomepay" ? !avail.pchomepay : !avail.online.some((o) => o.provider === input.paymentMethod)) throw new ServiceError("invalid", "此網站目前無法使用線上付款，請選擇其他付款方式");
     if (total < PCHOMEPAY_MIN_AMOUNT) throw new ServiceError("invalid", `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式`);
   } else if (!avail.offline) {
     throw new ServiceError("invalid", "此網站未開放線下匯款");
   }
   const invoiceRequest = await resolveInvoiceRequest(deps.store, tenant, input.invoice);
   // 保留時間：線上刷卡 onlinePaymentHoldMinutes；線下匯款 orderExpireHours（與商店相同）——但不晚於開始時間
-  const hours = input.paymentMethod === "pchomepay" ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
+  const hours = isOnlineMethod(input.paymentMethod) ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
   let expires = Date.now() + hours * 3600_000;
   if (input.holdUntilMax) expires = Math.min(expires, input.holdUntilMax.getTime());
   if (expires - Date.now() < MIN_HOLD_MS) throw new ServiceError("invalid", "距離開始時間太近，已無法線上付款報名，請直接聯絡店家");

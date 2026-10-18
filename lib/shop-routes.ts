@@ -10,7 +10,9 @@ import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
 import { flatShippingFee, orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettingsSchema, type ShopSettings } from "./services/shop";
-import { cancelOrderWithHooks, pchomepayClientFor, startPchomepayPayment } from "./services/orders";
+import { cancelOrderWithHooks, pchomepayClientFor, startOnlinePayment, type ProviderFactory } from "./services/orders";
+import { formPaymentMethod, onlinePaymentResponse } from "./pay-response";
+import { isOnlineMethod } from "./pay/types";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
 import { guardJsonPost } from "./public-post";
@@ -123,7 +125,7 @@ export function checkoutFromForm(f: Record<string, string>) {
       address: f.shipAddress ?? "",
     },
     note: f.note?.trim() ? f.note : undefined,
-    paymentMethod: f.paymentMethod,
+    paymentMethod: formPaymentMethod(f.paymentMethod) ?? f.paymentMethod,
     pchomepayType: f.paymentMethod === "pchomepay" && f.pchomepayType === "atm" ? ("atm" as const) : undefined,
     invoice: f.invoiceType ? invoiceRequestFromForm(f) : undefined,
     shippingMethodId: f.shippingMethodId || undefined,
@@ -141,7 +143,7 @@ function intField(v: string | undefined): number | undefined {
   return /^\d+$/.test(v.trim()) ? Number(v.trim()) : Number.NaN;
 }
 
-export async function handleCheckout(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor): Promise<Response> {
+export async function handleCheckout(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor, providerFactory?: ProviderFactory): Promise<Response> {
   const slug = rawSlug.toLowerCase();
   if (!originOk(req)) return new NextResponse("forbidden origin", { status: 403 });
   const s = await shopSite(slug, store);
@@ -160,11 +162,11 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
     data.referralCode = cookieValue(req, referralCookieName(tenant.id)) || undefined;
     const cvsBinding = cookieValue(req, cvsCookieName(tenant.id)) ?? null;
     const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data, settings: s.settings, allowSandbox, cvsBinding });
-    if (order.payment_method === "pchomepay") {
+    if (isOnlineMethod(order.payment_method)) {
       try {
-        const pay = await startPchomepayPayment({ store, baseUrl, clientFactory }, { tenant, order, accessKey });
+        const pay = await startOnlinePayment({ store, baseUrl, clientFactory, providerFactory }, { tenant, order, accessKey });
         await sendOrderPlacedMails({ store, sendMail: getMailer(), baseUrl }, tenant, order, s.settings, orderPageUrl(baseUrl, tenant, order.order_no, accessKey));
-        return NextResponse.redirect(pay.paymentUrl, 303);
+        return onlinePaymentResponse(pay);
       } catch (e) {
         // 金流建單失敗：取消訂單並回補庫存，讓客人重新結帳
         await cancelOrderWithHooks({ store, sendMail: getMailer(), baseUrl }, tenant, order.id, ["pending_payment"], "payment_init_failed");

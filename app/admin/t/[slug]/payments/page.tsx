@@ -3,7 +3,8 @@ import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
 import { adminContext, requireAdminPage } from "@/lib/adminServer";
 import { getTenantBySlugAdmin } from "@/lib/services/admin";
-import { getPaymentSetupStatus } from "@/lib/services/orders";
+import { PROVIDER_FIELDS, getPaymentSetupStatus } from "@/lib/services/orders";
+import type { ProviderId } from "@/lib/pay/types";
 import { ServiceError } from "@/lib/services/context";
 
 export const dynamic = "force-dynamic";
@@ -67,6 +68,56 @@ export default async function PaymentsAdmin({ params, searchParams }: { params: 
               </div>
             </form>
           </Card>
+          {st.providers
+            .filter((p) => p.provider !== "pchomepay")
+            .map((p) => {
+              const spec = PROVIDER_FIELDS[p.provider as Exclude<ProviderId, "pchomepay">];
+              const pbase = `/api/admin/tenants/${slug}/payment-provider`;
+              return (
+                <Card key={p.provider} title={p.label}>
+                  <div className="text-sm" data-admin={`provider-${p.provider}`}>
+                    <p className="mt-0">
+                      {p.configured && "merchantId" in p ? (
+                        <>
+                          憑證 <strong>{p.status === "verified" ? "已驗證" : "未驗證"}</strong>
+                          {p.sandbox ? "（測試環境）" : "（正式環境）"} · 商店代號 {p.merchantId}
+                          {p.verifiedAt && <> · 驗證於 {fmt(p.verifiedAt)}</>}
+                        </>
+                      ) : (
+                        "尚未設定憑證"
+                      )}
+                      {" · "}
+                      {p.autoRefund ? "支援後台退款" : "退款需到商家後台"}
+                    </p>
+                    {"lastError" in p && p.lastError && <p className="text-red-700">上次驗證失敗：{p.lastError}</p>}
+                  </div>
+                  {p.configured && (
+                    <form action={`${pbase}/verify`} method="post" className="mb-4">
+                      <input type="hidden" name="provider" value={p.provider} />
+                      <button className="rounded bg-neutral-900 px-3 py-1 text-sm text-white" type="submit">
+                        驗證憑證
+                      </button>
+                    </form>
+                  )}
+                  <form action={pbase} method="post" className="flex flex-col gap-2 text-sm" autoComplete="off">
+                    <input type="hidden" name="provider" value={p.provider} />
+                    <p className="m-0 font-semibold">{p.configured ? "更換憑證" : "輸入憑證"}</p>
+                    <input name="appId" required placeholder={spec.idLabel} className="rounded border px-3 py-1" autoComplete="off" />
+                    {spec.secrets.map((f) => (
+                      <input key={f.key} name={f.key} required={f.required} type={f.key === "acquirerType" ? "text" : "password"} placeholder={f.label} className="rounded border px-3 py-1" autoComplete="new-password" />
+                    ))}
+                    <label className="flex items-center gap-1">
+                      <input type="checkbox" name="sandbox" /> 測試環境——只在預覽模式的結帳可用，測試付款的訂單不能出貨
+                    </label>
+                    <div>
+                      <button className="rounded bg-neutral-900 px-3 py-1 text-white" type="submit">
+                        儲存（加密）
+                      </button>
+                    </div>
+                  </form>
+                </Card>
+              );
+            })}
         </>
       )}
     </AdminShell>
