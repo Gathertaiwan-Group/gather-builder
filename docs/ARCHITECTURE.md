@@ -127,6 +127,11 @@
 - **簽章連結不存原文**：簽到碼、候補保留連結、預約自助管理連結都是 `HMAC(PREVIEW_SECRET, 用途:id)`，伺服器可重算；簽到碼 DB 只存 sha256。換 `PREVIEW_SECRET` 會讓舊連結與簽到碼失效。
 - **個資**：名單／預約／學員列表一律遮罩（`maskContact`）；查看完整資料、匯出 CSV 寫 `builder_pii_access_log`（只增不改：service_role 只有 select／insert）＋稽核。CSV 每格經 `csvCell()`：`= + - @`、Tab、CR 開頭前置單引號、全部加雙引號（防 CSV injection）、加 BOM。
 - 時間一律 Asia/Taipei（固定 UTC+8，無夏令時間）。
+- **sandbox 付款不佔名額（M3）**：sandbox 付款成功走 `builder_mark_paid_sandbox`（同一交易轉 paid＋`payment_sandbox`＋把報名／預約保留標 cancelled `sandbox_payment`），之後跑取消側 hooks（候補遞補）；課程本來就不開通。
+- **防假資料灌爆（M5）**：每個正規化 email 每場次只能一筆有效報名（SQL 鎖場次後檢查 `email_norm`）；免費報名與候補預設要 email 確認（events 設定 `requireEmailConfirm`，預設 true；已登入且 email 已驗證的會員免確認）：免費報名先 held＋`hold_expires_at`（30 分鐘，逾期在下次報名／遞補時由 SQL 標 expired），候補先 `unconfirmed`（30 分鐘）；確認連結 `/s/<slug>/events/confirm?r|w=<id>&t=HMAC`，GET 只顯示按鈕、POST 才確認。免費預約每個 email 每天上限 `freeBookingsPerEmailPerDay`（預設 2，`builder_rate_hit`）。每 IP 每小時 12 次的表單限流照舊。
+- **遞補連結不可轉讓（M4）**：認領時聯絡 email（正規化）必須等於候補者的 `email_norm`，候補時有登入會員就必須同一會員；SQL 認領條件另比對 email_norm。
+- 報名成功的轉址不帶 email／簽到碼（L6）；未付款預約改期會把訂單付款期限縮到不晚於新時段（L8）；確認信「已付」顯示訂單實付（L7）；遞補略過停用或不在販售期間的票種（L3）；取消場次先標 cancelled 再列報名（L4）；首單判斷 `countPaidOrdersFor` 用 SQL `builder_norm_email`（與 `lib/email-normalize.ts` 同規則，真 DB 比對測試，L5）；CSV 也跳脫全形 ＝＋－＠（L1）。
+- `builder_pii_access_log` 只增不改：service_role 的 update／delete／truncate 已收回（M1，真 DB 42501 測試）。
 
 ### events（活動報名）
 
@@ -166,7 +171,9 @@
 
 ## 訂單事件 hook
 
-`lib/services/order-hooks.ts`：模組在載入時註冊「付款成功」「訂單取消」副作用（目前 referral），`onOrderPaid`／`cancelOrder`／逾期取消呼叫；每個 hook 自己冪等、失敗只記 log。發票自動開立直接在 `onOrderPaid` 呼叫。
+`lib/services/order-hooks.ts`：模組在載入時以名稱註冊「付款成功」「訂單取消」副作用（referral、events、booking、courses…），`onOrderPaid`／`cancelOrder`／逾期取消呼叫；每個 hook 自己冪等。發票自動開立直接在 `onOrderPaid` 呼叫。
+- **失敗補做（2026-10 第四批審查 M2）**：hook 丟錯 → 寫 `builder_hook_failures`（訂單 × hook × 事件 一列，attempts 累加）。每日 cron 與讀取訂單（`get_order`、前台訂單頁）時 `retryOrderHooks` 補做：訂單狀態仍適用才重跑（paid hook 要求已付款／已出貨且非 sandbox；cancel hook 要求已取消），否則標為不再適用；成功標 resolved；連續失敗 3 次寄店主警示一次（`alerted_at` 條件更新），20 次後停止自動補做。hook 內部不可再吞錯（例如報名已失效無法確認要丟出，讓店主收到警示）。
+- **系統取消一律跑 hooks（L2）**：金流建單失敗、取消場次、取消預約都走 `cancelOrderWithHooks()`，不再直接 `store.cancelOrder`。
 
 ## 已知風險（第一版刻意不處理）
 

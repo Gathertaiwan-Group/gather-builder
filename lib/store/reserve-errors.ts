@@ -15,6 +15,7 @@ export const RESERVE_ERRORS: Record<string, { code: ServiceErrorCode; message: s
   "slot taken": { code: "conflict", message: "這個時段剛被預約走了，請選擇其他時段" },
   "provider unavailable": { code: "invalid", message: "這位服務人員目前不開放預約" },
   "service unavailable": { code: "invalid", message: "這個服務目前不開放預約" },
+  "already registered": { code: "conflict", message: "這個 Email 已報名過這個場次（每個 Email 每場限一筆；要多人參加請在同一筆選張數）" },
   "booking not found": { code: "not_found", message: "找不到這筆預約" },
 };
 

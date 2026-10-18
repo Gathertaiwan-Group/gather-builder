@@ -144,7 +144,7 @@ export async function onReferralOrderCancelled(store: Store, tenant: TenantRow, 
   }
 }
 
-registerOrderHooks({ paid: onReferralOrderPaid, cancelled: onReferralOrderCancelled });
+registerOrderHooks({ name: "referral", paid: onReferralOrderPaid, cancelled: onReferralOrderCancelled });
 
 /* ================================================================== 後台＋MCP */
 

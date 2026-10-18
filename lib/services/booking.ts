@@ -7,7 +7,9 @@ import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
 import { mailSafe, publishedShopSettings, twd, type CheckoutDeps } from "./shop";
 import { registerOrderHooks, type HookDeps } from "./order-hooks";
-import { expireIfDue } from "./orders";
+import { cancelOrderWithHooks, expireIfDue } from "./orders";
+import { emailKey } from "./members";
+import { normalizeEmail } from "../email-normalize";
 import { classContactInput, fmtTaipei, fmtTaipeiTime, maskContact, placeClassOrder, shopActive, signFor, verifySigned } from "./class-orders";
 import { addDays, canSelfCancel, computeAvailability, fmtHm, isBookable, parseHm, taipeiDateOf, type DaySlots } from "../booking/availability";
 import { buildIcs } from "../booking/ics";
@@ -277,6 +279,9 @@ export async function releaseExpiredBookingHolds(deps: CheckoutDeps, tenant: Ten
   }
 }
 
+/** 每個 Email 每天最多幾筆免費預約（設定 freeBookingsPerEmailPerDay 可改） */
+export const DEFAULT_FREE_BOOKINGS_PER_EMAIL_PER_DAY = 2;
+
 export type BookResult = { kind: "confirmed"; booking: BookingRow; manageUrl: string } | { kind: "order"; order: OrderRow; accessKey: string; orderUrl: string; bookingId: string | null };
 
 /**
@@ -301,6 +306,10 @@ export async function bookSlot(deps: CheckoutDeps, input: { tenant: TenantRow; m
   const res = { provider_id: provider.id, service_id: s.id, starts_at: slot.start, ends_at: slot.end, block_until: block, price: s.price, amount_due: amountDue(s), contact: d.contact, member_id: member?.id ?? null, note: d.note ?? null };
   const due = amountDue(s);
   if (due <= 0) {
+    // M5：每個 Email（正規化）每天的免費預約上限（原子計數；跨 IP 有效）
+    const secret = process.env.PREVIEW_SECRET ?? "dev-secret";
+    const hit = await deps.store.rateHit(`booking-free-email:${tenant.id}`, emailKey(normalizeEmail(d.contact.email), secret), 86400, settings.freeBookingsPerEmailPerDay ?? DEFAULT_FREE_BOOKINGS_PER_EMAIL_PER_DAY);
+    if (!hit.allowed) throw new ServiceError("rate_limited", "這個 Email 今天的預約次數已達上限，請明天再試或直接聯絡店家");
     const id = await deps.store.reserveBookingFree(tenant.id, res);
     const b = (await deps.store.getBooking(tenant.id, id))!;
     await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "booking.create", payload: { bookingId: id, paid: false } });
@@ -352,7 +361,7 @@ export async function bookingIcs(store: Store, tenant: TenantRow, b: BookingRow,
   });
 }
 
-async function sendBookingConfirmed(deps: { store: Store; sendMail?: CheckoutDeps["sendMail"]; baseUrl: string }, tenant: TenantRow, b: BookingRow, s: ServiceRow, subjectPrefix = "預約成功") {
+async function sendBookingConfirmed(deps: { store: Store; sendMail?: CheckoutDeps["sendMail"]; baseUrl: string }, tenant: TenantRow, b: BookingRow, s: ServiceRow, subjectPrefix = "預約成功", paidAmount?: number) {
   const settings = await bookingSettingsFor(deps.store, tenant);
   const ics: MailAttachment = { filename: "booking.ics", content: await bookingIcs(deps.store, tenant, b, s, deps.baseUrl), contentType: "text/calendar; charset=utf-8; method=PUBLISH" };
   const deadline = settings.cancelDeadlineHours;
@@ -360,7 +369,7 @@ async function sendBookingConfirmed(deps: { store: Store; sendMail?: CheckoutDep
     deps,
     b.contact.email,
     `【${tenant.name}】${subjectPrefix}：${s.name} ${fmtTaipei(b.starts_at)}`,
-    `${b.contact.name} 你好，\n\n${subjectPrefix}：\n${s.name}\n時間：${fmtTaipei(b.starts_at)}–${fmtTaipeiTime(b.ends_at)}${settings.location ? `\n地點：${settings.location}` : ""}${b.amount_due ? `\n已付：${twd(b.amount_due)}${b.amount_due < b.price ? `（訂金，總價 ${twd(b.price)}）` : ""}` : b.price ? `\n費用：${twd(b.price)}（現場付款）` : ""}\n\n附件是行事曆檔（.ics），可加入你的行事曆。\n${deadline ? `開始前 ${deadline} 小時以前` : "開始前"}可以自助取消或改期：\n${manageUrl(deps.baseUrl, tenant, b)}`,
+    `${b.contact.name} 你好，\n\n${subjectPrefix}：\n${s.name}\n時間：${fmtTaipei(b.starts_at)}–${fmtTaipeiTime(b.ends_at)}${settings.location ? `\n地點：${settings.location}` : ""}${b.amount_due ? `\n${paidAmount !== undefined ? `已付：${twd(paidAmount)}` : `應付：${twd(b.amount_due)}`}${b.amount_due < b.price ? `（訂金，總價 ${twd(b.price)}）` : ""}` : b.price ? `\n費用：${twd(b.price)}（現場付款）` : ""}\n\n附件是行事曆檔（.ics），可加入你的行事曆。\n${deadline ? `開始前 ${deadline} 小時以前` : "開始前"}可以自助取消或改期：\n${manageUrl(deps.baseUrl, tenant, b)}`,
     [ics],
   );
   const owner = settings.ownerEmail ?? (await publishedShopSettings(deps.store, tenant)).ownerEmail;
@@ -381,7 +390,8 @@ async function cancelBookingCore(deps: CheckoutDeps, tenant: TenantRow, b: Booki
   const o = b.order_id ? await deps.store.getOrderById(tenant.id, b.order_id) : null;
   let refund = false;
   if (o && o.status === "pending_payment") {
-    await deps.store.cancelOrder(tenant.id, o.id, ["pending_payment"], "booking_cancelled");
+    // L2：走會跑取消 hooks 的服務函式（優惠券／名額同交易回補，hooks 處理其他模組的副作用）
+    await cancelOrderWithHooks(deps, tenant, o.id, ["pending_payment"], "booking_cancelled");
   } else {
     refund = !!o && (o.status === "paid" || o.status === "fulfilled") && !o.payment_sandbox;
     const moved = await deps.store.updateBooking(tenant.id, b.id, ["held", "confirmed"], { status: "cancelled", cancelled_at: new Date().toISOString(), cancel_reason: reason.slice(0, 200), cancelled_by: by, refund_required: refund });
@@ -429,8 +439,13 @@ export async function selfRescheduleBooking(deps: CheckoutDeps, input: { tenant:
   const ok = await deps.store.rescheduleBooking(input.tenant.id, b.id, slot.start, slot.end, new Date(new Date(slot.end).getTime() + s.buffer_min * 60_000).toISOString());
   if (!ok) throw new ServiceError("conflict", "這筆預約已經取消了");
   const after = (await deps.store.getBooking(input.tenant.id, b.id))!;
+  const order = after.order_id ? await deps.store.getOrderById(input.tenant.id, after.order_id) : null;
+  // L8：未付款的保留改期 → 訂單付款期限不得晚於新時段開始時間
+  if (order && order.status === "pending_payment" && order.expires_at && new Date(order.expires_at).getTime() > new Date(after.starts_at).getTime()) {
+    await deps.store.setOrderFields(input.tenant.id, order.id, { expires_at: after.starts_at });
+  }
   await deps.store.insertAudit({ tenant_id: input.tenant.id, actor: "customer", action: "booking.reschedule", payload: { bookingId: b.id, from: b.starts_at, to: after.starts_at } });
-  await sendBookingConfirmed(deps, input.tenant, after, s, "預約已改期");
+  await sendBookingConfirmed(deps, input.tenant, after, s, "預約已改期", order && (order.status === "paid" || order.status === "fulfilled") ? order.total : undefined);
   return { bookingId: b.id, startsAt: after.starts_at };
 }
 
@@ -484,12 +499,18 @@ async function onBookingOrderPaid(deps: HookDeps, tenant: TenantRow, order: Orde
   const held = (await deps.store.listBookings(tenant.id, { orderId: order.id, status: ["held"], limit: 5, offset: 0 })).rows;
   for (const b of held) {
     const moved = await deps.store.updateBooking(tenant.id, b.id, ["held"], { status: "confirmed" });
-    if (!moved) continue;
+    if (!moved) {
+      // M2：已被確認＝冪等略過；其他狀態要丟出，由 hook 失敗紀錄補做／警示
+      const cur = await deps.store.getBooking(tenant.id, b.id);
+      if (cur?.status === "confirmed") continue;
+      throw new Error(`預約 ${b.id} 已付款但狀態為 ${cur?.status ?? "不存在"}，無法確認（需人工處理）`);
+    }
     const s = await deps.store.getServiceById(tenant.id, b.service_id);
-    if (s) await sendBookingConfirmed(deps, tenant, moved, s);
+    // L7：「已付」顯示訂單實付金額
+    if (s) await sendBookingConfirmed(deps, tenant, moved, s, "預約成功", order.total);
   }
 }
-registerOrderHooks({ paid: onBookingOrderPaid });
+registerOrderHooks({ name: "booking", paid: onBookingOrderPaid });
 
 /** 每日 cron：寄「現在到明天結束」之間開始的已確認預約提醒（reminder_sent_at 條件式，只寄一次） */
 export async function runBookingCron(deps: { store: Store; sendMail?: CheckoutDeps["sendMail"]; baseUrl: string }, now = new Date()) {

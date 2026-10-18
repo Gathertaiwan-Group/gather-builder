@@ -21,6 +21,8 @@ export const bookingSettings = z
     allowGuest: z.boolean().optional(),
     /** false = 不寄前一天的提醒信 */
     reminders: z.boolean().optional(),
+    /** 每個 Email（正規化）每天最多幾筆免費／現場付預約（防假資料灌爆，預設 2） */
+    freeBookingsPerEmailPerDay: z.number().int().min(1).max(50).optional(),
   })
   .strict();
 export type BookingSettings = z.output<typeof bookingSettings>;

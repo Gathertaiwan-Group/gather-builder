@@ -64,6 +64,21 @@ export interface TicketTypeRow {
 
 export type RegistrationStatus = "held" | "confirmed" | "cancelled" | "expired";
 
+/** 付款／取消 hook 失敗紀錄（M2：cron 與讀取時補做） */
+export interface HookFailureRow {
+  id: string;
+  tenant_id: string;
+  order_id: string;
+  hook: string;
+  event: "paid" | "cancelled";
+  attempts: number;
+  last_error: string | null;
+  first_failed_at: string;
+  last_attempt_at: string;
+  resolved_at: string | null;
+  alerted_at: string | null;
+}
+
 export interface RegistrationRow {
   id: string;
   tenant_id: string;
@@ -84,11 +99,16 @@ export interface RegistrationRow {
   refund_required: boolean;
   cancelled_at: string | null;
   cancel_reason: string | null;
+  /** 正規化 email（每 email 每場次一筆有效報名） */
+  email_norm?: string | null;
+  /** 免費報名待 email 確認：held＋這個期限（逾期視為失效）；付費保留為 null（由訂單逾期控制） */
+  hold_expires_at?: string | null;
+  email_confirmed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export type WaitlistStatus = "waiting" | "offered" | "claimed" | "lapsed" | "cancelled";
+export type WaitlistStatus = "unconfirmed" | "waiting" | "offered" | "claimed" | "lapsed" | "cancelled";
 
 export interface WaitlistRow {
   id: string;
@@ -103,6 +123,8 @@ export interface WaitlistRow {
   offered_at: string | null;
   offer_expires_at: string | null;
   claimed_registration_id: string | null;
+  /** status=unconfirmed 時：email 確認期限 */
+  confirm_expires_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -128,6 +150,11 @@ export interface EventReservation {
   member_id: string | null;
   offer_id?: string | null;
   checkin_code_hash?: string | null;
+  /** 正規化 email：每 email 每場次一筆、候補認領比對 */
+  email_norm?: string | null;
+  /** 免費報名待 email 確認（held＋pending_minutes 分鐘） */
+  pending_email?: boolean;
+  pending_minutes?: number;
 }
 
 export type ClassReservation = { kind: "event"; data: EventReservation } | { kind: "booking"; data: BookingReservation } | null;
@@ -347,18 +374,27 @@ export interface ClassesStore {
   getRegistrationByCheckinHash(tenantId: string, hash: string): Promise<RegistrationRow | null>;
   listRegistrations(tenantId: string, opts: { sessionId?: string; eventId?: string; orderId?: string; memberId?: string; status?: RegistrationStatus[]; limit: number; offset: number }): Promise<{ rows: RegistrationRow[]; total: number }>;
   /** 條件式更新（目前狀態 ∈ from 才寫；patch 可帶 checked_in_at 時要求原本為 null） */
-  updateRegistration(tenantId: string, id: string, from: RegistrationStatus[], patch: Partial<Pick<RegistrationRow, "status" | "checkin_code_hash" | "checked_in_at" | "checked_in_by" | "reminder_sent_at" | "refund_required" | "cancelled_at" | "cancel_reason">>, opts?: { requireNull?: ("checked_in_at" | "reminder_sent_at")[] }): Promise<RegistrationRow | null>;
+  updateRegistration(tenantId: string, id: string, from: RegistrationStatus[], patch: Partial<Pick<RegistrationRow, "status" | "checkin_code_hash" | "checked_in_at" | "checked_in_by" | "reminder_sent_at" | "refund_required" | "cancelled_at" | "cancel_reason" | "hold_expires_at" | "email_confirmed_at">>, opts?: { requireNull?: ("checked_in_at" | "reminder_sent_at")[] }): Promise<RegistrationRow | null>;
   sessionUsage(tenantId: string, sessionId: string): Promise<SessionUsage>;
   /** 某場次：報名仍是 held、訂單 pending 且已逾期（下單前先釋放逾期保留用） */
   listExpiredHeldOrderIdsForSession(tenantId: string, sessionId: string, nowIso: string): Promise<string[]>;
   /** 同場次同 email 已在候補中回 null */
-  insertWaitlist(row: Pick<WaitlistRow, "tenant_id" | "session_id" | "ticket_type_id" | "member_id" | "contact" | "email_norm" | "qty">): Promise<WaitlistRow | null>;
+  insertWaitlist(row: Pick<WaitlistRow, "tenant_id" | "session_id" | "ticket_type_id" | "member_id" | "contact" | "email_norm" | "qty"> & { status?: "unconfirmed" | "waiting"; confirm_expires_at?: string | null }): Promise<WaitlistRow | null>;
   getWaitlist(tenantId: string, id: string): Promise<WaitlistRow | null>;
   listWaitlist(tenantId: string, sessionId: string): Promise<WaitlistRow[]>;
   updateWaitlist(tenantId: string, id: string, from: WaitlistStatus[], patch: Partial<Pick<WaitlistRow, "status">>): Promise<WaitlistRow | null>;
   /** builder_offer_waitlist：過期保留 lapsed、依序給出新保留，回傳新給出的 */
   offerWaitlist(tenantId: string, sessionId: string, hours: number): Promise<WaitlistRow[]>;
   insertPiiLog(row: Omit<PiiAccessRow, "id" | "at">): Promise<void>;
+  // hook 失敗紀錄（M2）
+  /** 同一 (order, hook, event) 已有未解決紀錄 → attempts+1；已解決 → 重新開啟 */
+  recordHookFailure(row: { tenant_id: string; order_id: string; hook: string; event: "paid" | "cancelled"; error: string }): Promise<void>;
+  listOpenHookFailures(opts: { orderId?: string; tenantId?: string; limit: number; maxAttempts: number }): Promise<HookFailureRow[]>;
+  resolveHookFailure(id: string, how: "retried" | "obsolete"): Promise<void>;
+  /** attempts+1，回傳新次數 */
+  bumpHookFailure(id: string, error: string): Promise<number>;
+  /** alerted_at 由 null 改成 now 的那一次回 true */
+  markHookFailureAlerted(id: string): Promise<boolean>;
   listPiiLog(tenantId: string, limit: number): Promise<PiiAccessRow[]>;
 
   // booking

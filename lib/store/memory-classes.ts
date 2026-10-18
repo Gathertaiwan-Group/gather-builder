@@ -18,6 +18,7 @@ import type {
   EventSessionRow,
   PiiAccessRow,
   RegistrationRow,
+  HookFailureRow,
   Store,
   TicketTypeRow,
   WaitlistRow,
@@ -100,16 +101,28 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
   };
   const activeOffer = (w: WaitlistRow, t = Date.now()) => w.status === "offered" && !!w.offer_expires_at && new Date(w.offer_expires_at).getTime() > t;
   const usedSeats = (s: EventSessionRow) =>
-    [...regs.values()].filter((r) => r.session_id === s.id && (r.status === "held" || r.status === "confirmed")).reduce((n, r) => n + r.qty, 0) +
+    [...regs.values()].filter((r) => r.session_id === s.id && liveReg(r)).reduce((n, r) => n + r.qty, 0) +
     s.offline_seats +
     [...waitlist.values()].filter((w) => w.session_id === s.id && activeOffer(w)).reduce((n, w) => n + w.qty, 0);
   const usedTicket = (t: TicketTypeRow) =>
-    [...regs.values()].filter((r) => r.ticket_type_id === t.id && (r.status === "held" || r.status === "confirmed")).reduce((n, r) => n + r.qty, 0) +
+    [...regs.values()].filter((r) => r.ticket_type_id === t.id && liveReg(r)).reduce((n, r) => n + r.qty, 0) +
     [...waitlist.values()].filter((w) => w.ticket_type_id === t.id && activeOffer(w)).reduce((n, w) => n + w.qty, 0);
+
+  /** 同 SQL：鎖場次後先把逾期未確認 email 的免費保留標 expired */
+  const expireEmailHolds = (sessionId: string) => {
+    const t = Date.now();
+    for (const r of regs.values()) {
+      if (r.session_id === sessionId && r.status === "held" && !r.order_id && r.hold_expires_at && new Date(r.hold_expires_at).getTime() <= t) {
+        regs.set(r.id, { ...r, status: "expired", cancelled_at: now(), cancel_reason: "email_unconfirmed", updated_at: now() });
+      }
+    }
+  };
+  const liveReg = (r: RegistrationRow, t = Date.now()) => r.status === "confirmed" || (r.status === "held" && (!!r.order_id || !r.hold_expires_at || new Date(r.hold_expires_at).getTime() > t));
 
   function reserveEventSync(tenantId: string, orderId: string | null, res: EventReservation): string {
     const s = sessions.get(res.session_id);
     if (!s || s.tenant_id !== tenantId) fail("session not found");
+    expireEmailHolds(s!.id);
     const ev = events.get(s!.event_id);
     if (s!.status !== "scheduled" || ev?.status !== "published") fail("session closed");
     if (new Date(s!.starts_at).getTime() <= Date.now()) fail("session started");
@@ -119,10 +132,13 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
     if ((t!.sales_start && new Date(t!.sales_start).getTime() > nowMs) || (t!.sales_end && new Date(t!.sales_end).getTime() <= nowMs)) fail("ticket not on sale");
     if (!Number.isInteger(res.qty) || res.qty < 1 || res.qty > t!.max_per_order) fail("qty limit");
     if (res.unit_price !== t!.price) fail("price changed");
+    const emailNorm = res.email_norm || null;
+    if (emailNorm && [...regs.values()].some((r) => r.session_id === s!.id && r.email_norm === emailNorm && (r.status === "held" || r.status === "confirmed"))) fail("already registered");
+    const pending = !!res.pending_email && !orderId;
     let offer: WaitlistRow | undefined;
     if (res.offer_id) {
       offer = waitlist.get(res.offer_id);
-      if (!offer || offer.tenant_id !== tenantId || offer.session_id !== s!.id || offer.ticket_type_id !== t!.id || !activeOffer(offer)) fail("offer invalid");
+      if (!offer || offer.tenant_id !== tenantId || offer.session_id !== s!.id || offer.ticket_type_id !== t!.id || !activeOffer(offer) || (emailNorm && offer.email_norm !== emailNorm)) fail("offer invalid");
       if (res.qty > offer!.qty) fail("qty limit");
     }
     // 認領的保留不再佔名額（SQL 先把它改成 claimed 再加總）
@@ -141,9 +157,12 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       qty: res.qty,
       unit_price: t!.price,
       contact: clone(res.contact),
-      status: orderId ? "held" : "confirmed",
+      status: orderId || pending ? "held" : "confirmed",
       source: offer ? "waitlist" : "online",
       checkin_code_hash: res.checkin_code_hash || null,
+      email_norm: emailNorm,
+      hold_expires_at: pending ? new Date(Date.now() + Math.max(5, Math.min(res.pending_minutes ?? 30, 120)) * 60_000).toISOString() : null,
+      email_confirmed_at: null,
       checked_in_at: null,
       checked_in_by: null,
       reminder_sent_at: null,
@@ -195,7 +214,40 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
     return r && r.tenant_id === tenantId ? r : undefined;
   };
 
+  const hookFailures = new Map<string, HookFailureRow>();
   const store: MemoryClasses = {
+    async recordHookFailure(row) {
+      const cur = [...hookFailures.values()].find((f) => f.order_id === row.order_id && f.hook === row.hook && f.event === row.event);
+      if (!cur) {
+        const f: HookFailureRow = { id: randomUUID(), tenant_id: row.tenant_id, order_id: row.order_id, hook: row.hook, event: row.event, attempts: 1, last_error: row.error, first_failed_at: now(), last_attempt_at: now(), resolved_at: null, alerted_at: null };
+        hookFailures.set(f.id, f);
+        return;
+      }
+      hookFailures.set(cur.id, { ...cur, attempts: cur.resolved_at ? 1 : cur.attempts + 1, last_error: row.error, last_attempt_at: now(), resolved_at: null, alerted_at: cur.resolved_at ? null : cur.alerted_at });
+    },
+    async listOpenHookFailures(opts) {
+      return clone(
+        [...hookFailures.values()]
+          .filter((f) => !f.resolved_at && f.attempts < opts.maxAttempts && (!opts.orderId || f.order_id === opts.orderId) && (!opts.tenantId || f.tenant_id === opts.tenantId))
+          .sort((a, b) => a.last_attempt_at.localeCompare(b.last_attempt_at))
+          .slice(0, opts.limit),
+      );
+    },
+    async resolveHookFailure(id, how) {
+      const f = hookFailures.get(id);
+      if (f && !f.resolved_at) hookFailures.set(id, { ...f, resolved_at: now(), last_error: how === "obsolete" ? "obsolete" : f.last_error });
+    },
+    async bumpHookFailure(id, error) {
+      const f = hookFailures.get(id)!;
+      hookFailures.set(id, { ...f, attempts: f.attempts + 1, last_error: error, last_attempt_at: now() });
+      return f.attempts + 1;
+    },
+    async markHookFailureAlerted(id) {
+      const f = hookFailures.get(id);
+      if (!f || f.alerted_at) return false;
+      hookFailures.set(id, { ...f, alerted_at: now() });
+      return true;
+    },
     async insertEvent(row) {
       if ([...events.values()].some((e) => e.tenant_id === row.tenant_id && e.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
       const r: EventRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
@@ -296,7 +348,7 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       return clone(next);
     },
     async sessionUsage(tenantId, sessionId) {
-      const live = [...regs.values()].filter((r) => r.tenant_id === tenantId && r.session_id === sessionId && (r.status === "held" || r.status === "confirmed"));
+      const live = [...regs.values()].filter((r) => r.tenant_id === tenantId && r.session_id === sessionId && liveReg(r));
       const offers = [...waitlist.values()].filter((w) => w.tenant_id === tenantId && w.session_id === sessionId && activeOffer(w));
       const byTicket: Record<string, number> = {};
       for (const r of live) byTicket[r.ticket_type_id] = (byTicket[r.ticket_type_id] ?? 0) + r.qty;
@@ -318,8 +370,8 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       return out;
     },
     async insertWaitlist(row) {
-      if ([...waitlist.values()].some((w) => w.session_id === row.session_id && w.email_norm === row.email_norm && (w.status === "waiting" || w.status === "offered"))) return null;
-      const r: WaitlistRow = { ...clone(row), id: randomUUID(), status: "waiting", offered_at: null, offer_expires_at: null, claimed_registration_id: null, created_at: now(), updated_at: now() };
+      if ([...waitlist.values()].some((w) => w.session_id === row.session_id && w.email_norm === row.email_norm && (w.status === "unconfirmed" || w.status === "waiting" || w.status === "offered"))) return null;
+      const r: WaitlistRow = { ...clone(row), id: randomUUID(), status: row.status ?? "waiting", confirm_expires_at: row.confirm_expires_at ?? null, offered_at: null, offer_expires_at: null, claimed_registration_id: null, created_at: now(), updated_at: now() };
       waitlist.set(r.id, r);
       waitSeq.set(r.id, waitSeq.size + 1);
       return clone(r);
@@ -340,6 +392,7 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
     async offerWaitlist(tenantId, sessionId, hours) {
       const s = own(sessions, tenantId, sessionId);
       if (!s) return [];
+      expireEmailHolds(s.id);
       const t = Date.now();
       for (const w of waitlist.values()) {
         if (w.session_id === s.id && w.status === "offered" && (!w.offer_expires_at || new Date(w.offer_expires_at).getTime() <= t)) waitlist.set(w.id, { ...w, status: "lapsed", updated_at: now() });
@@ -348,12 +401,12 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       if (s.status !== "scheduled" || ev?.status !== "published" || new Date(s.starts_at).getTime() <= t) return [];
       const until = new Date(Math.min(t + Math.max(1, Math.min(hours, 168)) * 3600_000, new Date(s.starts_at).getTime())).toISOString();
       const out: WaitlistRow[] = [];
-      for (;;) {
-        const w = [...waitlist.values()].filter((x) => x.session_id === s.id && x.status === "waiting").sort(fifo)[0];
-        if (!w) break;
-        if (usedSeats(s) + w.qty > s.capacity) break;
+      // 同 SQL（L3）：票種停用或不在販售期間的候補者略過；其餘嚴格 FIFO，放不下就停
+      for (const w of [...waitlist.values()].filter((x) => x.session_id === s.id && x.status === "waiting").sort(fifo)) {
         const tt = tickets.get(w.ticket_type_id);
-        if (tt && tt.quota !== null && usedTicket(tt) + w.qty > tt.quota) break;
+        if (!tt || !tt.active || (tt.sales_start && new Date(tt.sales_start).getTime() > t) || (tt.sales_end && new Date(tt.sales_end).getTime() <= t)) continue;
+        if (usedSeats(s) + w.qty > s.capacity) break;
+        if (tt.quota !== null && usedTicket(tt) + w.qty > tt.quota) break;
         const next: WaitlistRow = { ...w, status: "offered", offered_at: now(), offer_expires_at: until, updated_at: now() };
         waitlist.set(w.id, next);
         out.push(clone(next));

@@ -10,7 +10,7 @@ import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
 import { flatShippingFee, orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettingsSchema, type ShopSettings } from "./services/shop";
-import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
+import { cancelOrderWithHooks, pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
 import { guardJsonPost } from "./public-post";
@@ -146,7 +146,7 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
         return NextResponse.redirect(pay.paymentUrl, 303);
       } catch (e) {
         // 金流建單失敗：取消訂單並回補庫存，讓客人重新結帳
-        await store.cancelOrder(tenant.id, order.id, ["pending_payment"], "payment_init_failed");
+        await cancelOrderWithHooks({ store, sendMail: getMailer(), baseUrl }, tenant, order.id, ["pending_payment"], "payment_init_failed");
         throw e;
       }
     }

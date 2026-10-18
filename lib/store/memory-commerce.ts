@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { optionsKey } from "./supabase-commerce";
+import { normalizeEmail } from "../email-normalize";
 import { COUPON_PER_USER, COUPON_UNAVAILABLE } from "./supabase-commerce";
 import type {
   CouponRedemptionRow,
@@ -118,7 +119,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
     },
     async countPaidOrdersFor(tenantId, who, excludeOrderId) {
       return [...orders.values()].filter(
-        (o) => o.tenant_id === tenantId && o.id !== excludeOrderId && (o.status === "paid" || o.status === "fulfilled") && ((who.memberId && o.member_id === who.memberId) || o.contact.email.toLowerCase() === who.email.toLowerCase()),
+        (o) => o.tenant_id === tenantId && o.id !== excludeOrderId && (o.status === "paid" || o.status === "fulfilled") && ((who.memberId && o.member_id === who.memberId) || normalizeEmail(o.contact.email) === normalizeEmail(who.email)),
       ).length;
     },
     async insertMember(row) {
@@ -449,6 +450,14 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge): CommerceS
       if (!o || o.tenant_id !== tenantId || o.status !== from) return null;
       const next = { ...o, ...patch, status: to, updated_at: now() };
       orders.set(id, next);
+      return clone(next);
+    },
+    async markPaidSandbox(tenantId, id, paidAt) {
+      const o = orders.get(id);
+      if (!o || o.tenant_id !== tenantId || o.status !== "pending_payment") return null;
+      const next = { ...o, status: "paid" as const, paid_at: paidAt, payment_sandbox: true, updated_at: now() };
+      orders.set(id, next);
+      bridge?.releaseSync(tenantId, id, "sandbox_payment");
       return clone(next);
     },
     async cancelOrder(tenantId, id, from, reason) {

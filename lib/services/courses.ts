@@ -329,7 +329,7 @@ export async function onCourseOrderCancelled(store: Store, tenant: TenantRow, or
   for (const e of revoked) await store.insertAudit({ tenant_id: tenant.id, actor: "system:courses", action: "course.revoke_cancelled", payload: { orderNo: order.order_no, courseId: e.course_id } });
 }
 
-registerOrderHooks({ paid: onCourseOrderPaid, cancelled: onCourseOrderCancelled });
+registerOrderHooks({ name: "courses", paid: onCourseOrderPaid, cancelled: onCourseOrderCancelled });
 
 /* ================================================================== 前台列表、會員中心 */
 

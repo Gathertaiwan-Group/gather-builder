@@ -5,7 +5,10 @@ import { currentMember } from "@/lib/site-request";
 import { moduleConfig } from "@/lib/site-loader";
 import { getStore } from "@/lib/store";
 import { canViewOrder, shopSettingsSchema, type ShopSettings } from "@/lib/services/shop";
-import { expireIfDue } from "@/lib/services/orders";
+import { expireIfDue, retryOrderHooks } from "@/lib/services/orders";
+import { getMailer } from "@/lib/mail";
+import { baseUrlFrom } from "@/lib/runtime";
+import { headers } from "next/headers";
 import { ORDER_STATUS_LABEL } from "@/lib/shop/machine";
 import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 import { SiteShell, makeRenderCtx } from "@/components/site/SiteShell";
@@ -38,6 +41,8 @@ export default async function OrderPage(props: Props) {
   const found = await store.getOrderByNo(site.tenant.id, no);
   const member = await currentMember(site.tenant);
   if (!found || !canViewOrder(found, sp.k, member)) notFound();
+  // M2：讀取時補做這張訂單失敗過的付款後處理（冪等）
+  await retryOrderHooks({ store, sendMail: getMailer(), baseUrl: baseUrlFrom({ headers: await headers() }) }, { orderId: found.id }).catch((e) => console.error("[hooks] lazy", e));
   const order = await expireIfDue(store, found);
   const [items, invoice, shipment] = await Promise.all([
     store.listOrderItems(site.tenant.id, order.id),

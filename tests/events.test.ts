@@ -44,10 +44,12 @@ function mailbox() {
   return { sent, sendMail: async (to: string, subject: string, text: string) => void sent.push({ to, subject, text }) };
 }
 
-async function eventSite(store: Store, slug: string, opts: { capacity?: number; price?: number; quota?: number; startsInH?: number } = {}) {
+async function eventSite(store: Store, slug: string, opts: { capacity?: number; price?: number; quota?: number; startsInH?: number; requireEmailConfirm?: boolean } = {}) {
   const ctx = ctxFor(store);
   await createSite(ctx, { slug, name: `工作室 ${slug}`, modules: ["events", "shop"] });
   await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "匯款 000-123" }, ownerEmail: "owner@example.com", orderExpireHours: 48 } });
+  // 既有測試聚焦名額／候補；email 確認（M5）另有專門測試
+  await configureModule(ctx, { site: slug, moduleId: "events", config: { requireEmailConfirm: opts.requireEmailConfirm ?? false } });
   await publishSite(ctx, { site: slug, confirm: true });
   const ev = await createEvent(ctx, { site: slug, slug: "clay", title: "陶藝工作坊", location: "台中市", status: "published", confirm: true });
   const start = new Date(Date.now() + (opts.startsInH ?? 72) * H);

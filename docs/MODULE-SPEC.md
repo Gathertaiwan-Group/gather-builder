@@ -71,8 +71,8 @@ modules/<id>/
 
 設定（`configure_module`，進草稿、發布後生效）：
 - `courses`：`ownerEmail`。區塊 `courses_list`、`course_detail`。
-- `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`。區塊 `booking_widget`。
-- `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）。區塊 `events_list`、`event_detail`。
+- `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`、`freeBookingsPerEmailPerDay`（每 email 每天免費預約上限，預設 2）。區塊 `booking_widget`。
+- `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）、`requireEmailConfirm`（免費報名／候補需 email 確認，預設 true）。區塊 `events_list`、`event_detail`。固定頁面另有 `/events/confirm`（email 確認）。
 - `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。
 - `shipping`：`methods[]`（`id`、`type` cvs／home／pickup／manual、`provider` ecpay／manual、`subType`、`label`、`fee`、`freeThreshold`、`instructions`）、`sender`（使用綠界時必填）、`goodsName`。`methods` 至少一種，否則 `pending_setup`。
 - `coupons`：無設定（折扣碼用 MCP／後台建立）。

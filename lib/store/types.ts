@@ -472,6 +472,8 @@ export interface Store extends ExtStore, ClassesStore {
   listOrderItems(tenantId: string, orderId: string): Promise<OrderItemRow[]>;
   /** 條件式轉換：只有目前狀態 = from 才更新；回傳更新後的列，沒轉換成功回 null */
   transitionOrder(tenantId: string, id: string, from: OrderStatus, to: OrderStatus, patch: Partial<Pick<OrderRow, "paid_at" | "fulfilled_at" | "shipping_tracking" | "shipping_method" | "payment_sandbox">>): Promise<OrderRow | null>;
+  /** M3：sandbox 付款成功 → 同一交易轉 paid（payment_sandbox）＋釋放報名／預約保留（builder_mark_paid_sandbox）；沒轉換回 null */
+  markPaidSandbox(tenantId: string, id: string, paidAt: string): Promise<OrderRow | null>;
   /** 原子取消＋回補庫存（builder_cancel_order） */
   cancelOrder(tenantId: string, id: string, from: OrderStatus[], reason: string): Promise<{ transitioned: boolean; stockReleased: boolean }>;
   /** 冪等回補（builder_release_order_stock） */
@@ -550,6 +552,7 @@ export type CommerceStore = Pick<Store, OrderLinkedExt> & Pick<
   | "listOrderItems"
   | "transitionOrder"
   | "cancelOrder"
+  | "markPaidSandbox"
   | "releaseOrderStock"
   | "listExpiredPendingOrders"
   | "listExpiredPendingOrdersForProducts"

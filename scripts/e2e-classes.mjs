@@ -67,7 +67,8 @@ check(["create_event", "create_session", "create_ticket_type", "list_registratio
 
 await site.call("enable_module", { moduleId: "members" });
 await site.call("enable_module", { moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "請匯款至 測試銀行 000-123456" }, orderPrefix: "CLS" } });
-const en = await site.call("enable_module", { moduleId: "events" });
+// 候補 email 確認（2026-10 審查 M5，預設開）在單元／整合測試驗；這支 e2e 聚焦付費保留與遞補，關掉確認
+const en = await site.call("enable_module", { moduleId: "events", config: { requireEmailConfirm: false } });
 check(en.changed?.some((c) => c.id === "events" && c.status === "enabled"), "enable_module events", en.__error ?? JSON.stringify(en.changed));
 
 /* ---------------------------------------------------------------- events */

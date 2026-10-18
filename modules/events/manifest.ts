@@ -13,6 +13,8 @@ export const eventsSettings = z
     ownerEmail: z.email({ message: "通知信箱格式不正確" }).optional(),
     /** false = 只有會員能報名（預設可訪客報名） */
     allowGuest: z.boolean().optional(),
+    /** 免費報名與候補需要先點 email 確認連結（預設 true；確認前名額只保留 30 分鐘）。已登入且 email 已驗證的會員免確認 */
+    requireEmailConfirm: z.boolean().optional(),
   })
   .strict();
 export type EventsSettings = z.output<typeof eventsSettings>;

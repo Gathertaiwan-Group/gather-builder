@@ -237,7 +237,7 @@ export interface ExtStore {
   /** 所有租戶待重試的發票（cron 用） */
   listInvoicesToRetry(limit: number, maxAttempts: number): Promise<Pick<InvoiceRow, "id" | "tenant_id" | "order_id">[]>;
   /** 訂單同步欄位（發票狀態、物流方式、追蹤號） */
-  setOrderFields(tenantId: string, orderId: string, patch: { invoice_status?: string | null; shipping_method?: string | null; shipping_tracking?: string | null }): Promise<void>;
+  setOrderFields(tenantId: string, orderId: string, patch: { invoice_status?: string | null; shipping_method?: string | null; shipping_tracking?: string | null; expires_at?: string | null }): Promise<void>;
 
   // shipping
   getShippingAccount(tenantId: string): Promise<ShippingAccountRow | null>;

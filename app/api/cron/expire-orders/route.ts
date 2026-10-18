@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { getStore } from "@/lib/store";
-import { expireDueOrders } from "@/lib/services/orders";
+import { expireDueOrders, retryOrderHooks } from "@/lib/services/orders";
 import { retryDueInvoices } from "@/lib/services/invoices";
 import { json } from "@/lib/http";
 import { runEventsCron } from "@/lib/services/events";
@@ -29,6 +29,8 @@ export async function GET(req: Request) {
   const deps = { store: getStore(), sendMail: getMailer(), baseUrl: baseUrlFrom(req) };
   const ev = await runEventsCron(deps).catch((e) => (console.error("[cron] events", e), { offered: -1, reminded: -1 }));
   const bk = await runBookingCron(deps).catch((e) => (console.error("[cron] booking", e), { reminded: -1 }));
-  console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk });
+  // M2：補做失敗的付款／取消副作用（冪等；連續失敗警示店主）
+  const hooks = await retryOrderHooks(deps, { limit: 200 }).catch((e) => (console.error("[cron] hooks", e), { scanned: -1, resolved: 0, failed: 0 }));
+  console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks });
 }

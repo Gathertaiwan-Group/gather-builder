@@ -5,6 +5,7 @@ import { createSupabaseBookingStore } from "./supabase-booking";
 import { createSupabaseCoursesStore } from "./supabase-courses";
 import type {
   ClassesStore,
+  HookFailureRow,
   EventRow,
   EventSessionRow,
   PiiAccessRow,
@@ -142,7 +143,7 @@ export function createSupabaseClassesStore(db: SupabaseClient): ClassesStore {
     },
     async sessionUsage(tenantId, sessionId) {
       const [regs, wl] = await Promise.all([
-        db.from("builder_event_registrations").select("ticket_type_id, qty").eq("tenant_id", tenantId).eq("session_id", sessionId).in("status", ["held", "confirmed"]),
+        db.from("builder_event_registrations").select("ticket_type_id, qty, order_id, hold_expires_at").eq("tenant_id", tenantId).eq("session_id", sessionId).in("status", ["held", "confirmed"]),
         db.from("builder_event_waitlist").select("ticket_type_id, qty, status, offer_expires_at").eq("tenant_id", tenantId).eq("session_id", sessionId).in("status", ["waiting", "offered"]),
       ]);
       if (regs.error || wl.error) throw new Error(`sessionUsage: ${(regs.error ?? wl.error)!.message}`);
@@ -150,7 +151,10 @@ export function createSupabaseClassesStore(db: SupabaseClient): ClassesStore {
       let taken = 0;
       let offered = 0;
       let waiting = 0;
-      for (const r of (regs.data ?? []) as { ticket_type_id: string; qty: number }[]) {
+      const t0 = Date.now();
+      for (const r of (regs.data ?? []) as { ticket_type_id: string; qty: number; order_id: string | null; hold_expires_at: string | null }[]) {
+        // 逾期未確認 email 的免費保留不算（下次報名／遞補時 SQL 會標 expired）
+        if (!r.order_id && r.hold_expires_at && new Date(r.hold_expires_at).getTime() <= t0) continue;
         taken += r.qty;
         byTicket[r.ticket_type_id] = (byTicket[r.ticket_type_id] ?? 0) + r.qty;
       }
@@ -192,6 +196,40 @@ export function createSupabaseClassesStore(db: SupabaseClient): ClassesStore {
     },
     async insertPiiLog(row) {
       must(await db.from("builder_pii_access_log").insert(row), "insertPiiLog");
+    },
+    async recordHookFailure(row) {
+      const cur = must(await db.from("builder_hook_failures").select("id, attempts, resolved_at").eq("order_id", row.order_id).eq("hook", row.hook).eq("event", row.event).maybeSingle(), "recordHookFailure.get") as { id: string; attempts: number; resolved_at: string | null } | null;
+      if (!cur) {
+        const r = await db.from("builder_hook_failures").insert({ tenant_id: row.tenant_id, order_id: row.order_id, hook: row.hook, event: row.event, last_error: row.error });
+        if (!r.error) return;
+        if (r.error.code !== "23505") throw new Error(`recordHookFailure: ${r.error.message}`);
+        // 併發另一個失敗剛寫入：改成累加
+        must(await db.from("builder_hook_failures").update({ last_error: row.error, last_attempt_at: nowIso() }).eq("order_id", row.order_id).eq("hook", row.hook).eq("event", row.event), "recordHookFailure.race");
+        return;
+      }
+      must(await db.from("builder_hook_failures").update({ attempts: cur.resolved_at ? 1 : cur.attempts + 1, last_error: row.error, last_attempt_at: nowIso(), resolved_at: null, alerted_at: cur.resolved_at ? null : undefined }).eq("id", cur.id), "recordHookFailure.update");
+    },
+    async listOpenHookFailures(opts) {
+      let q = db.from("builder_hook_failures").select("*").is("resolved_at", null).lt("attempts", opts.maxAttempts);
+      if (opts.orderId) {
+        if (!isUuid(opts.orderId)) return [];
+        q = q.eq("order_id", opts.orderId);
+      }
+      if (opts.tenantId) q = q.eq("tenant_id", opts.tenantId);
+      return (must(await q.order("last_attempt_at").limit(opts.limit), "listOpenHookFailures") ?? []) as HookFailureRow[];
+    },
+    async resolveHookFailure(id, how) {
+      must(await db.from("builder_hook_failures").update({ resolved_at: nowIso(), last_error: how === "obsolete" ? "obsolete" : undefined }).eq("id", id).is("resolved_at", null), "resolveHookFailure");
+    },
+    async bumpHookFailure(id, error) {
+      const cur = must(await db.from("builder_hook_failures").select("attempts").eq("id", id).single(), "bumpHookFailure.get") as { attempts: number };
+      const next = cur.attempts + 1;
+      must(await db.from("builder_hook_failures").update({ attempts: next, last_error: error, last_attempt_at: nowIso() }).eq("id", id), "bumpHookFailure");
+      return next;
+    },
+    async markHookFailureAlerted(id) {
+      const rows = must(await db.from("builder_hook_failures").update({ alerted_at: nowIso() }).eq("id", id).is("alerted_at", null).select("id"), "markHookFailureAlerted") as { id: string }[];
+      return rows.length > 0;
     },
     async listPiiLog(tenantId, limit) {
       return (must(await db.from("builder_pii_access_log").select("*").eq("tenant_id", tenantId).order("id", { ascending: false }).limit(limit), "listPiiLog") ?? []) as PiiAccessRow[];

@@ -39,6 +39,8 @@ describe.skipIf(!enabled)("第四批 Supabase 實作（整合）", () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
     await createSite(ctx, { slug, name: slug, modules: ["events", "shop", "booking", "courses"], test: true });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "IC" } });
+    // 這支聚焦名額／候補的原子性；email 確認（M5）在 review-batch4.test.ts
+    await configureModule(ctx, { site: slug, moduleId: "events", config: { requireEmailConfirm: false } });
     await publishSite(ctx, { site: slug, confirm: true });
     await createEvent(ctx, { site: slug, slug: "race", title: "搶位", status: "published", confirm: true });
   });

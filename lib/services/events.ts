@@ -7,7 +7,7 @@ import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
 import { mailSafe, publishedShopSettings, twd, type CheckoutDeps } from "./shop";
 import { registerOrderHooks, type CancelDeps, type HookDeps } from "./order-hooks";
-import { expireIfDue } from "./orders";
+import { cancelOrderWithHooks, expireIfDue } from "./orders";
 import { getMailer } from "../mail";
 import {
   checkinCode,
@@ -51,7 +51,7 @@ const isoInput = z.iso.datetime({ offset: true, message: "時間請用 ISO 8601 
 
 export const eventInput = z
   .object({
-    slug: postSlug,
+    slug: postSlug.refine((v) => v !== "confirm", { message: "slug「confirm」保留給報名確認頁" }),
     title: text(160),
     summary: optText(300),
     bodyMd: z.string().max(50_000).default(""),
@@ -352,16 +352,18 @@ export async function cancelSession(ctx: ServiceContext, input: { site?: string 
   if (!s) throw new ServiceError("not_found", "找不到場次");
   if (s.status === "cancelled") throw new ServiceError("conflict", "這個場次已經取消了");
   const e = (await ctx.store.getEventById(tenant.id, s.event_id))!;
-  const regs = (await ctx.store.listRegistrations(tenant.id, { sessionId: s.id, status: ["held", "confirmed"], limit: 5000, offset: 0 })).rows;
-  const paid = regs.filter((r) => r.status === "confirmed" && r.order_id).length;
-  requireConfirm(input.confirm, `取消「${e.title}」${fmtTaipei(s.starts_at)} 場次會通知 ${regs.length} 筆報名${paid ? `，其中 ${paid} 筆已付款需人工退款` : ""}，無法復原`);
+  const before = (await ctx.store.listRegistrations(tenant.id, { sessionId: s.id, status: ["held", "confirmed"], limit: 5000, offset: 0 })).rows;
+  const paidBefore = before.filter((r) => r.status === "confirmed" && r.order_id).length;
+  requireConfirm(input.confirm, `取消「${e.title}」${fmtTaipei(s.starts_at)} 場次會通知 ${before.length} 筆報名${paidBefore ? `，其中 ${paidBefore} 筆已付款需人工退款` : ""}，無法復原`);
   const reason = input.reason?.trim().slice(0, 200) || "主辦單位取消場次";
+  // L4：先把場次標 cancelled（SQL 報名函式鎖場次後會擋 status<>'scheduled'），再列報名——之後不會再有新報名漏掉
   await ctx.store.updateSession(tenant.id, s.id, { status: "cancelled", cancelled_at: new Date().toISOString(), cancel_reason: reason });
+  const regs = (await ctx.store.listRegistrations(tenant.id, { sessionId: s.id, status: ["held", "confirmed"], limit: 5000, offset: 0 })).rows;
   let refunds = 0;
   for (const r of regs) {
     const o = r.order_id ? await ctx.store.getOrderById(tenant.id, r.order_id) : null;
     if (o && o.status === "pending_payment") {
-      await ctx.store.cancelOrder(tenant.id, o.id, ["pending_payment"], "session_cancelled");
+      await cancelOrderWithHooks({ store: ctx.store, sendMail: ctx.sendMail, baseUrl: ctx.baseUrl }, tenant, o.id, ["pending_payment"], "session_cancelled");
     } else {
       const needsRefund = !!o && (o.status === "paid" || o.status === "fulfilled") && !o.payment_sandbox;
       if (needsRefund) refunds++;
@@ -437,8 +439,49 @@ export async function releaseExpiredSessionHolds(deps: CheckoutDeps, tenant: Ten
   return due.length;
 }
 
+/** 免費報名／候補 email 確認期限（分鐘） */
+export const EMAIL_CONFIRM_MINUTES = 30;
+
+/** email 確認連結：kind r＝報名、w＝候補；簽章 HMAC(PREVIEW_SECRET, event-confirm-<kind>:id)，不存原文 */
+export function confirmUrl(baseUrl: string, tenant: TenantRow, kind: "r" | "w", id: string) {
+  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/events/confirm?${kind}=${encodeURIComponent(id)}&t=${encodeURIComponent(signFor(`event-confirm-${kind}`, id))}`;
+}
+
+/**
+ * 點 email 確認連結（POST，確認頁按鈕送出）：
+ * - 報名：仍是 held、沒有訂單、未逾期 → confirmed（寫簽到碼）→ 寄報名成功信。
+ * - 候補：仍是 unconfirmed、未逾期 → waiting → 立即嘗試遞補。
+ * 逾期或簽章不符一律回同一句。
+ */
+export async function confirmEventEmail(deps: CheckoutDeps, input: { tenant: TenantRow; kind: unknown; id: unknown; token: unknown }) {
+  const { tenant } = input;
+  const kind = input.kind === "w" ? "w" : input.kind === "r" ? "r" : null;
+  const id = typeof input.id === "string" ? input.id : "";
+  const bad = new ServiceError("invalid", "確認連結無效或已過期，請重新報名／登記候補");
+  if (!kind || !id || !verifySigned(`event-confirm-${kind}`, id, input.token)) throw bad;
+  if (kind === "r") {
+    const r = await deps.store.getRegistration(tenant.id, id);
+    if (r?.status === "confirmed") return { kind: "registration" as const, already: true, registration: r };
+    if (!r || r.status !== "held" || r.order_id || !r.hold_expires_at || new Date(r.hold_expires_at).getTime() <= Date.now()) throw bad;
+    const moved = await deps.store.updateRegistration(tenant.id, r.id, ["held"], { status: "confirmed", checkin_code_hash: checkinHash(checkinCode(r.id)), hold_expires_at: null, email_confirmed_at: new Date().toISOString() });
+    if (!moved) throw bad;
+    const [s, t, e] = await Promise.all([deps.store.getSession(tenant.id, r.session_id), deps.store.getTicketType(tenant.id, r.ticket_type_id), deps.store.getEventById(tenant.id, r.event_id)]);
+    if (s && t && e) await sendConfirmedMail(deps, tenant, e, s, t, moved);
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "guest", action: "event.register_confirm", payload: { registrationId: r.id } });
+    return { kind: "registration" as const, already: false, registration: moved };
+  }
+  const w = await deps.store.getWaitlist(tenant.id, id);
+  if (w && w.status !== "unconfirmed" && w.status !== "cancelled" && w.status !== "lapsed") return { kind: "waitlist" as const, already: true };
+  if (!w || w.status !== "unconfirmed" || !w.confirm_expires_at || new Date(w.confirm_expires_at).getTime() <= Date.now()) throw bad;
+  if (!(await deps.store.updateWaitlist(tenant.id, w.id, ["unconfirmed"], { status: "waiting" }))) throw bad;
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: "guest", action: "event.waitlist_confirm", payload: { waitlistId: w.id } });
+  await promoteWaitlist(deps, tenant, w.session_id);
+  return { kind: "waitlist" as const, already: false };
+}
+
 export type RegisterResult =
   | { kind: "free"; registration: RegistrationRow; checkinCode: string }
+  | { kind: "pending"; registration: RegistrationRow }
   | { kind: "order"; order: OrderRow; accessKey: string; orderUrl: string; registrationId: string | null };
 
 /**
@@ -456,18 +499,37 @@ export async function registerEvent(deps: CheckoutDeps, input: { tenant: TenantR
   const e = await deps.store.getEventById(tenant.id, s.event_id);
   const t = await deps.store.getTicketType(tenant.id, d.ticketTypeId);
   if (!e || e.status !== "published" || !t || t.session_id !== s.id) throw new ServiceError("not_found", "找不到這個場次或票種");
+  const contact = d.contact;
+  const emailNorm = normalizeEmail(contact.email);
   let offerId: string | null = null;
   if (d.offerId) {
     if (!verifySigned("offer", d.offerId, d.offerToken)) throw new ServiceError("invalid", "候補保留連結無效");
+    // M4：遞補連結不可轉讓——聯絡 email（正規化）必須是候補者本人；候補時是會員就必須是同一個會員登入
+    const w = await deps.store.getWaitlist(tenant.id, d.offerId);
+    if (!w || w.email_norm !== emailNorm || (w.member_id && w.member_id !== member?.id)) {
+      throw new ServiceError("forbidden", "這個候補保留只限登記候補的本人使用（請用登記候補時的 Email；當時有登入會員的話請先登入同一個帳號）");
+    }
     offerId = d.offerId;
   }
   await releaseExpiredSessionHolds(deps, tenant, s.id);
-  const contact = d.contact;
-  const res = { session_id: s.id, ticket_type_id: t.id, qty: d.qty, unit_price: t.price, contact, member_id: member?.id ?? null, offer_id: offerId };
+  const res = { session_id: s.id, ticket_type_id: t.id, qty: d.qty, unit_price: t.price, contact, member_id: member?.id ?? null, offer_id: offerId, email_norm: emailNorm };
   if (t.price === 0) {
-    const id = await deps.store.reserveEventFree(tenant.id, res);
+    // M5：免費報名預設要 email 確認（已登入且 email 已驗證、且用的是帳號 email 的會員免確認；遞補連結本身已寄到候補者信箱，也免確認）
+    const verifiedMember = !!member?.email_verified_at && normalizeEmail(member.email) === emailNorm;
+    const needConfirm = settings.requireEmailConfirm !== false && !verifiedMember && !offerId;
+    const id = await deps.store.reserveEventFree(tenant.id, { ...res, pending_email: needConfirm, pending_minutes: EMAIL_CONFIRM_MINUTES });
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.register", payload: { registrationId: id, free: true, pendingEmail: needConfirm } });
+    if (needConfirm) {
+      const pending = (await deps.store.getRegistration(tenant.id, id))!;
+      await mailSafe(
+        deps,
+        contact.email,
+        `【${tenant.name}】請確認報名：${e.title}`,
+        `${contact.name} 你好，\n\n請在 ${EMAIL_CONFIRM_MINUTES} 分鐘內點下面的連結確認報名「${e.title}」${fmtTaipei(s.starts_at)}（逾時名額會釋出）：\n${confirmUrl(deps.baseUrl, tenant, "r", id)}\n\n如果不是你本人報名，忽略這封信即可。`,
+      );
+      return { kind: "pending", registration: pending };
+    }
     const reg = await confirmRegistration(deps.store, tenant, id);
-    await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.register", payload: { registrationId: id, free: true } });
     await sendConfirmedMail(deps, tenant, e, s, t, reg);
     return { kind: "free", registration: reg, checkinCode: checkinCode(id) };
   }
@@ -538,13 +600,34 @@ export async function joinWaitlist(deps: CheckoutDeps, input: { tenant: TenantRo
   const a = await sessionAvailability(deps.store, s);
   const ticketLeft = t.quota === null ? Infinity : t.quota - (a.byTicket[t.id] ?? 0);
   if (a.remaining >= d.qty && ticketLeft >= d.qty && a.waiting === 0) throw new ServiceError("conflict", "目前還有名額，請直接報名");
-  const w = await deps.store.insertWaitlist({ tenant_id: tenant.id, session_id: s.id, ticket_type_id: t.id, member_id: member?.id ?? null, contact: d.contact, email_norm: normalizeEmail(d.contact.email), qty: d.qty });
+  const emailNorm = normalizeEmail(d.contact.email);
+  // M5：每個 email 每場次只能一筆有效報名（已報名就不必候補）
+  const existing = (await deps.store.listRegistrations(tenant.id, { sessionId: s.id, status: ["held", "confirmed"], limit: 5000, offset: 0 })).rows;
+  if (existing.some((r) => r.email_norm === emailNorm && (r.status === "confirmed" || !!r.order_id || !r.hold_expires_at || new Date(r.hold_expires_at).getTime() > Date.now()))) {
+    throw new ServiceError("conflict", "這個 Email 已報名過這個場次");
+  }
+  // 逾期未確認的候補登記作廢，讓本人可以重新登記
+  for (const x of await deps.store.listWaitlist(tenant.id, s.id)) {
+    if (x.email_norm === emailNorm && x.status === "unconfirmed" && (!x.confirm_expires_at || new Date(x.confirm_expires_at).getTime() <= Date.now())) await deps.store.updateWaitlist(tenant.id, x.id, ["unconfirmed"], { status: "cancelled" });
+  }
+  const settings = await eventsSettingsFor(deps.store, tenant);
+  const verifiedMember = !!member?.email_verified_at && normalizeEmail(member.email) === emailNorm;
+  const needConfirm = settings.requireEmailConfirm !== false && !verifiedMember;
+  const w = await deps.store.insertWaitlist({
+    tenant_id: tenant.id, session_id: s.id, ticket_type_id: t.id, member_id: member?.id ?? null, contact: d.contact, email_norm: emailNorm, qty: d.qty,
+    status: needConfirm ? "unconfirmed" : "waiting",
+    confirm_expires_at: needConfirm ? new Date(Date.now() + EMAIL_CONFIRM_MINUTES * 60_000).toISOString() : null,
+  });
   if (!w) throw new ServiceError("conflict", "你已經在這個場次的候補名單中了");
-  await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.waitlist", payload: { sessionId: s.id, waitlistId: w.id } });
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.waitlist", payload: { sessionId: s.id, waitlistId: w.id, pendingEmail: needConfirm } });
+  if (needConfirm) {
+    await mailSafe(deps, w.contact.email, `【${tenant.name}】請確認候補登記：${e.title}`, `${w.contact.name} 你好，\n\n請在 ${EMAIL_CONFIRM_MINUTES} 分鐘內點下面的連結確認候補登記「${e.title}」${fmtTaipei(s.starts_at)}（${t.name} × ${w.qty}）：\n${confirmUrl(deps.baseUrl, tenant, "w", w.id)}\n\n確認後才會排入候補順序。如果不是你本人登記，忽略這封信即可。`);
+    return { waitlistId: w.id, position: 0, pendingEmail: true };
+  }
   await mailSafe(deps, w.contact.email, `【${tenant.name}】已登記候補：${e.title}`, `${w.contact.name} 你好，\n\n你已登記「${e.title}」${fmtTaipei(s.starts_at)} 的候補（${t.name} × ${w.qty}）。有名額釋出時會依登記順序寄信通知你，並為你保留一段時間。`);
   // 剛好有空位（例如前面有人放棄）→ 立刻嘗試遞補
   await promoteWaitlist(deps, tenant, s.id);
-  return { waitlistId: w.id, position: (await deps.store.listWaitlist(tenant.id, s.id)).filter((x) => x.status === "waiting").findIndex((x) => x.id === w.id) + 1 };
+  return { waitlistId: w.id, position: (await deps.store.listWaitlist(tenant.id, s.id)).filter((x) => x.status === "waiting").findIndex((x) => x.id === w.id) + 1, pendingEmail: false };
 }
 
 export function offerUrl(baseUrl: string, tenant: TenantRow, e: EventRow, w: WaitlistRow) {
@@ -587,8 +670,13 @@ export async function offerFor(store: Store, tenant: TenantRow, offerId: string 
 async function onEventOrderPaid(deps: HookDeps, tenant: TenantRow, order: OrderRow) {
   const regs = (await deps.store.listRegistrations(tenant.id, { orderId: order.id, status: ["held"], limit: 20, offset: 0 })).rows;
   for (const r of regs) {
-    const reg = await confirmRegistration(deps.store, tenant, r.id).catch(() => null);
-    if (!reg) continue;
+    // M2：失敗要丟出（由 runPaidHooks 記錄、cron／讀取時補做）；已被別的流程確認＝冪等略過
+    const reg = await deps.store.updateRegistration(tenant.id, r.id, ["held"], { status: "confirmed", checkin_code_hash: checkinHash(checkinCode(r.id)), hold_expires_at: null });
+    if (!reg) {
+      const cur = await deps.store.getRegistration(tenant.id, r.id);
+      if (cur?.status === "confirmed") continue;
+      throw new Error(`報名 ${r.id} 已付款但狀態為 ${cur?.status ?? "不存在"}，無法確認（需人工處理）`);
+    }
     const [s, t, e] = await Promise.all([deps.store.getSession(tenant.id, r.session_id), deps.store.getTicketType(tenant.id, r.ticket_type_id), deps.store.getEventById(tenant.id, r.event_id)]);
     if (s && t && e) await sendConfirmedMail(deps, tenant, e, s, t, reg);
   }
@@ -602,7 +690,7 @@ async function onEventOrderCancelled(store: Store, tenant: TenantRow, order: Ord
   for (const sid of new Set(regs.map((r) => r.session_id))) await promoteWaitlist(deps, tenant, sid);
 }
 
-registerOrderHooks({ paid: onEventOrderPaid, cancelled: onEventOrderCancelled });
+registerOrderHooks({ name: "events", paid: onEventOrderPaid, cancelled: onEventOrderCancelled });
 
 /* ================================================================== cron：候補遞補、提醒 */
 

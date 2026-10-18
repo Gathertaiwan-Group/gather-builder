@@ -3,7 +3,7 @@ import { ORDER_STATUS_LABEL, assertTransition, canTransition, sourcesFor } from 
 import { classifyPchomepayQuery, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
 import { getMailer } from "../mail";
 import { autoIssueOnPaid } from "./invoices";
-import { runCancelHooks, runPaidHooks } from "./order-hooks";
+import { retryHookFailures, runCancelHooks, runPaidHooks } from "./order-hooks";
 // 模組副作用註冊（side-effect import：referral 在載入時註冊付款／取消 hook）
 import "./referral";
 // 第四批：活動報名（付款確認報名、取消後候補遞補）
@@ -173,7 +173,46 @@ function orderSummary(o: OrderRow) {
 async function findOrder(ctx: ServiceContext, tenant: TenantRow, ref: { orderId?: string; orderNo?: string }) {
   const o = ref.orderId ? await ctx.store.getOrderById(tenant.id, ref.orderId) : ref.orderNo ? await ctx.store.getOrderByNo(tenant.id, ref.orderNo) : null;
   if (!o) throw new ServiceError("not_found", "找不到訂單（請給 orderId 或 orderNo）");
+  // M2：讀取時補做這張訂單失敗過的付款／取消副作用（冪等）
+  await retryOrderHooks(ctxPayDeps(ctx), { orderId: o.id }).catch((e) => console.error("[hooks] lazy retry", e));
   return expireIfDue(ctx.store, o, Date.now(), ctxPayDeps(ctx));
+}
+
+/**
+ * M2：補做失敗的 hook（cron 跑全部、讀訂單時只跑該訂單）；連續失敗 HOOK_ALERT_AT 次寄店主警示一次。
+ */
+export async function retryOrderHooks(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, opts: { orderId?: string; limit?: number } = {}) {
+  return retryHookFailures(
+    {
+      ...deps,
+      alert: async (tenant, order, hook, event, attempts, error) => {
+        const settings = await publishedShopSettings(deps.store, tenant);
+        if (!settings.ownerEmail) return;
+        await mailSafe(
+          deps,
+          settings.ownerEmail,
+          `⚠️【${tenant.name}】訂單 ${order.order_no} 的${event === "paid" ? "付款後" : "取消後"}處理失敗（${hook}）`,
+          `訂單 ${order.order_no} 的「${hook}」${event === "paid" ? "付款成功後的處理（例如確認報名／預約、開通課程）" : "取消後的處理"}已連續失敗 ${attempts} 次，系統會持續每日重試。\n最後錯誤：${error}\n請到後台確認這張訂單的報名／預約／課程狀態，必要時手動處理。`,
+        );
+      },
+    },
+    opts,
+  );
+}
+
+/**
+ * L2：系統取消（金流建單失敗、取消場次、取消預約…）一律走這裡：條件式取消（同交易回補庫存／優惠券／名額）＋取消 hooks。
+ * 回傳是否真的轉換。
+ */
+export async function cancelOrderWithHooks(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, orderId: string, from: OrderStatus[], reason: string) {
+  const r = await deps.store.cancelOrder(tenant.id, orderId, from, reason);
+  if (!r.transitioned) return r;
+  const after = await deps.store.getOrderById(tenant.id, orderId);
+  if (after) {
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system", action: "order.cancel", payload: { orderNo: after.order_no, reason, stockReleased: r.stockReleased } });
+    await runCancelHooks(deps.store, tenant, after, { sendMail: deps.sendMail, baseUrl: deps.baseUrl });
+  }
+  return r;
 }
 
 export async function listOrders(ctx: ServiceContext, input: { site?: string | null; status?: OrderStatus; limit?: number; offset?: number }) {
@@ -473,11 +512,14 @@ async function settlePaid(deps: PayDeps, tenant: TenantRow, payment: PaymentRow,
   }
   const paidAt = new Date().toISOString();
   if (order.status === "pending_payment") {
-    const moved = await deps.store.transitionOrder(tenant.id, order.id, "pending_payment", "paid", { paid_at: paidAt, ...(payment.sandbox ? { payment_sandbox: true } : {}) });
+    // M3：sandbox 付款在同一交易釋放報名／預約保留（測試付款不佔名額）
+    const moved = payment.sandbox ? await deps.store.markPaidSandbox(tenant.id, order.id, paidAt) : await deps.store.transitionOrder(tenant.id, order.id, "pending_payment", "paid", { paid_at: paidAt });
     if (moved) {
       await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
       await deps.store.insertAudit({ tenant_id: tenant.id, actor: "pchomepay", action: "order.paid", payload: { orderNo: moved.order_no, gatewayOrderNo: gw, sandbox: payment.sandbox } });
       await onOrderPaid(deps, tenant, moved, `PChomePay${payment.sandbox ? "（測試環境）" : ""}`, { sandbox: payment.sandbox });
+      // sandbox：保留已釋放 → 跑取消側的 hook（候補遞補等；各 hook 冪等，未開通的東西不會被動到）
+      if (payment.sandbox) await runCancelHooks(deps.store, tenant, moved, { sendMail: deps.sendMail, baseUrl: deps.baseUrl });
       return "paid";
     }
     order = (await deps.store.getOrderById(tenant.id, order.id)) ?? order;

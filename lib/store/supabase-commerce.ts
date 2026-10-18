@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
+import { normalizeEmail } from "../email-normalize";
 import type { CommerceStore, CouponRedemptionRow, CouponRow, MemberRow, OrderRow, PaymentAccountRow, PaymentRow, ProductRow, VariantRow } from "./types";
 
 
@@ -207,6 +208,11 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
         "transitionOrder",
       ) as OrderRow | null;
     },
+    async markPaidSandbox(tenantId, id, paidAt) {
+      if (!isUuid(id)) return null;
+      const rows = must(await db.rpc("builder_mark_paid_sandbox", { p_tenant: tenantId, p_order: id, p_paid_at: paidAt }), "markPaidSandbox") as OrderRow[] | null;
+      return rows?.[0] ?? null;
+    },
     async cancelOrder(tenantId, id, from, reason) {
       const rows = must(await db.rpc("builder_cancel_order", { p_tenant: tenantId, p_order: id, p_from: from, p_reason: reason }), "cancelOrder") as {
         transitioned: boolean;
@@ -271,16 +277,10 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       must(await db.from("builder_orders").update({ ...patch, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", orderId), "setOrderFields");
     },
     async countPaidOrdersFor(tenantId, who, excludeOrderId) {
-      const base = () => db.from("builder_orders").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).in("status", ["paid", "fulfilled"]).neq("id", excludeOrderId);
-      const byEmail = await base().eq("contact->>email", who.email.toLowerCase());
-      if (byEmail.error) throw new Error(`countPaidOrdersFor: ${byEmail.error.message}`);
-      let n = byEmail.count ?? 0;
-      if (who.memberId && isUuid(who.memberId)) {
-        const byMember = await base().eq("member_id", who.memberId).neq("contact->>email", who.email.toLowerCase());
-        if (byMember.error) throw new Error(`countPaidOrdersFor: ${byMember.error.message}`);
-        n += byMember.count ?? 0;
-      }
-      return n;
+      // L5：用正規化 email 比對（a+x@、gmail 加點視為同一人），SQL 端 builder_norm_email 與 lib/email-normalize.ts 同規則
+      const r = await db.rpc("builder_count_paid_orders_for", { p_tenant: tenantId, p_email_norm: normalizeEmail(who.email), p_member: who.memberId && isUuid(who.memberId) ? who.memberId : null, p_exclude: excludeOrderId });
+      if (r.error) throw new Error(`countPaidOrdersFor: ${r.error.message}`);
+      return Number(r.data ?? 0);
     },
     async releaseCoupon(tenantId, orderId) {
       return !!must(await db.rpc("builder_release_coupon", { p_tenant: tenantId, p_order: orderId }), "releaseCoupon");

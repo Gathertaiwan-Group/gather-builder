@@ -159,7 +159,8 @@ export const maskContact = (c: { name: string; email: string; phone: string }) =
  */
 export function csvCell(v: unknown): string {
   let s = v === null || v === undefined ? "" : String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // L1：全形 ＝＋－＠（U+FF1D／FF0B／FF0D／FF20）也會被部分試算表當成公式
+  if (/^[=+\-@\t\r\uFF1D\uFF0B\uFF0D\uFF20]/.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 }
 export function toCsv(header: string[], rows: unknown[][]): string {

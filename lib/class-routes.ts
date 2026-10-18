@@ -10,11 +10,11 @@ import { ServiceError } from "./errors";
 import { hashIp } from "./services/inquiries";
 import { getSessionMember } from "./services/members";
 import { orderPageUrl, sendOrderPlacedMails, publishedShopSettings } from "./services/shop";
-import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
+import { cancelOrderWithHooks, pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { verifyPreviewToken } from "./preview";
 import { cookieValue, referralCookieName } from "./shop-routes";
-import { joinWaitlist, registerEvent } from "./services/events";
+import { confirmEventEmail, joinWaitlist, registerEvent } from "./services/events";
 import { bookSlot, selfCancelBooking, selfRescheduleBooking } from "./services/booking";
 import { buyCourse, markLessonComplete } from "./services/courses";
 import type { OrderRow } from "./store/types";
@@ -62,7 +62,8 @@ export async function afterClassOrder(
       await sendOrderPlacedMails({ store, sendMail: getMailer(), baseUrl }, tenant, r.order, await publishedShopSettings(store, tenant), orderPageUrl(baseUrl, tenant, r.order.order_no, r.accessKey));
       return NextResponse.redirect(pay.paymentUrl, 303);
     } catch (e) {
-      await store.cancelOrder(tenant.id, r.order.id, ["pending_payment"], "payment_init_failed");
+      // L2：金流建單失敗 → 取消（同交易釋放名額）並跑取消 hooks
+      await cancelOrderWithHooks({ store, sendMail: getMailer(), baseUrl }, tenant, r.order.id, ["pending_payment"], "payment_init_failed");
       throw e;
     }
   }
@@ -99,7 +100,9 @@ export async function handleEventRegister(req: Request, rawSlug: string, store: 
         },
       },
     );
-    if (r.kind === "free") return siteRedirect(req, slug, back, { ok: `報名成功！確認信已寄到 ${r.registration.contact.email}（簽到碼 ${r.checkinCode}）` });
+    // L6：網址不放 email 與簽到碼（會留在瀏覽紀錄／Referer）；簽到碼在確認信與會員中心
+    if (r.kind === "free") return siteRedirect(req, slug, back, { ok: "報名成功！確認信（含簽到碼）已寄到你的信箱。" });
+    if (r.kind === "pending") return siteRedirect(req, slug, back, { ok: "還差一步：請到信箱點確認連結完成報名（30 分鐘內有效，逾時名額會釋出）。" });
     return afterClassOrder(req, store, site.tenant, r, clientFactory);
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });
@@ -117,9 +120,26 @@ export async function handleEventWaitlist(req: Request, rawSlug: string, store: 
     const ev = s ? await store.getEventById(site.tenant.id, s.event_id) : null;
     if (ev) back = `/events/${ev.slug}`;
     const r = await joinWaitlist({ store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) }, { tenant: site.tenant, member, data: { sessionId: form.sessionId, ticketTypeId: form.ticketTypeId, qty: form.qty || "1", contact: contactFromForm(form) } });
+    if (r.pendingEmail) return siteRedirect(req, slug, back, { ok: "還差一步：請到信箱點確認連結完成候補登記（30 分鐘內有效）。" });
     return siteRedirect(req, slug, back, { ok: r.position > 0 ? `已登記候補（目前第 ${r.position} 位）。有名額時會寄信通知你。` : "剛好有名額釋出，已寄出遞補通知信，請到信箱點連結完成報名。" });
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+/** M5：免費報名／候補的 email 確認（確認頁按鈕 POST；GET 只顯示按鈕，避免信箱掃描器預先點開就確認） */
+export async function handleEventConfirm(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  try {
+    const g = await guard(req, slug, "events", store, "event-confirm");
+    if ("res" in g) return g.res!;
+    const { site, form } = g;
+    const kind = form.w ? "w" : "r";
+    const r = await confirmEventEmail({ store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) }, { tenant: site.tenant, kind, id: form.w || form.r, token: form.t });
+    const msg = r.kind === "registration" ? (r.already ? "這筆報名已確認過了。" : "報名完成！確認信（含簽到碼）已寄到你的信箱。") : r.already ? "這筆候補已確認過了。" : "候補登記完成！有名額時會依順序寄信通知你。";
+    return siteRedirect(req, slug, "/events/confirm", { ok: msg }, { done: "1" });
+  } catch (e) {
+    return siteRedirect(req, slug, "/events/confirm", { err: messageOf(e) }, { done: "1" });
   }
 }
 
