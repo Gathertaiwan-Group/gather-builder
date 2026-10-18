@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,26 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async insertPerson(row) {
+      return must(await db.from("builder_people").insert(row).select("*").single(), "insertPerson") as PersonRow;
+    },
+    async updatePerson(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_people").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updatePerson") as PersonRow | null;
+    },
+    async getPersonById(tenantId, id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_people").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getPersonById") as PersonRow | null;
+    },
+    async getPersonBySlug(tenantId, slug) {
+      return must(await db.from("builder_people").select("*").eq("tenant_id", tenantId).eq("slug", slug).maybeSingle(), "getPersonBySlug") as PersonRow | null;
+    },
+    async listPeople(tenantId, opts) {
+      let q = db.from("builder_people").select("*").eq("tenant_id", tenantId);
+      if (opts.status) q = q.eq("status", opts.status);
+      if (opts.category) q = q.eq("category", opts.category);
+      return (must(await q.order("sort").order("name").limit(1000), "listPeople") ?? []) as PersonRow[];
+    },
     async searchContent(tenantId, q, lang, limit) {
       return (must(await db.rpc("builder_search_content", { p_tenant: tenantId, p_q: q, p_lang: lang, p_limit: limit }), "searchContent") ?? []) as SearchHit[];
     },

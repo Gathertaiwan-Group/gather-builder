@@ -162,6 +162,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `set_translation` | content:write | 手動翻譯或修改（key：title、seoTitle、seoDescription、s.<區塊id>.<欄位>、nav.<i>、或模組資料欄位；null＝刪除） |
 | `list_translations` | site:read | 翻譯進度（每語言 × 每頁、模組資料草稿／已發布） |
 | `publish_translations` | publish | 模組資料翻譯上線（**必須** `confirm: true`）；頁面翻譯跟著 `publish_site` |
+| `create_person` / `update_person` | content:write | 人員名錄（姓名、職稱、分類、照片、簡介、聯絡方式預設不公開）；上架或改已上架需 publish ＋ confirm |
+| `list_people` | site:read | 人員與分類 |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

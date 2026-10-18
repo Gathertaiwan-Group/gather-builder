@@ -4,6 +4,7 @@ import type { ServiceContext } from "../services/context";
 import * as loyalty from "../services/loyalty";
 import * as wallet from "../services/wallet";
 import * as i18n from "../services/i18n";
+import * as directory from "../services/directory";
 
 /**
  * 第五、六批 MCP 工具（會員經營、內容與在地）：只做參數宣告與轉送，邏輯全在 lib/services。
@@ -184,6 +185,53 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: WRITE,
     },
     wrap(async (a) => i18n.publishTranslations(ctx, { ...a, target: a.target ? cleanTarget(a.target) : undefined })),
+  );
+
+  /* ------------------------------------------------------------ 人員名錄（directory） */
+
+  const personFields = {
+    slug: z.string().describe("網址代稱（小寫英數與連字號），個人頁 /people/<slug>"),
+    name: z.string(),
+    title: z.string().optional().describe("職稱，例如「理事長」「主治醫師」"),
+    category: z.string().optional().describe("分類（篩選用），例如「理監事」「講師」"),
+    photoUrl: z.string().optional().describe("照片 https:// 網址"),
+    bioMd: z.string().optional().describe("簡介 Markdown"),
+    email: z.string().optional(),
+    phone: z.string().optional(),
+    website: z.string().optional(),
+    showContact: z.boolean().optional().describe("true 才在前台顯示 email／電話／網站（預設不公開）"),
+    status: z.enum(["draft", "published"]).optional().describe("預設 draft；published 需要 publish scope＋confirm"),
+    sort: z.number().int().optional(),
+  };
+
+  server.registerTool(
+    "create_person",
+    {
+      description: "新增人員名錄（成員／師資／理監事）。預設草稿；直接上架需 publish＋confirm。聯絡方式預設不公開。需要 content:write。",
+      inputSchema: { site, ...personFields, confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => directory.createPerson(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_person",
+    {
+      description: "修改人員（patch）。已上架或要上架／下架需 publish＋confirm。需要 content:write。",
+      inputSchema: { site, personId: z.string().optional(), slug: z.string().optional().describe("用 slug 找人"), patch: z.object(personFields).partial(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => directory.updatePerson(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_people",
+    {
+      description: "人員名錄（含草稿）、分類清單。需要 site:read。",
+      inputSchema: { site, status: z.enum(["draft", "published"]).optional(), category: z.string().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => directory.listPeople(ctx, a)),
   );
 }
 

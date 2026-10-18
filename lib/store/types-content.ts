@@ -102,7 +102,35 @@ export interface SearchHit {
   rank: number;
 }
 
+/** directory：人員名錄 */
+export interface PersonRow {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  title: string | null;
+  category: string | null;
+  photo_url: string | null;
+  bio_md: string;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  /** true 才在前台顯示 email／電話／網站 */
+  show_contact: boolean;
+  status: "draft" | "published";
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContentStore {
+  // directory
+  insertPerson(row: Omit<PersonRow, "id" | "created_at" | "updated_at">): Promise<PersonRow>;
+  updatePerson(tenantId: string, id: string, patch: Partial<Omit<PersonRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<PersonRow | null>;
+  getPersonById(tenantId: string, id: string): Promise<PersonRow | null>;
+  getPersonBySlug(tenantId: string, slug: string): Promise<PersonRow | null>;
+  listPeople(tenantId: string, opts: { status?: PersonRow["status"]; category?: string }): Promise<PersonRow[]>;
+
   // search（只搜該租戶、已發布；課程不搜單元內文）
   searchContent(tenantId: string, q: string, lang: string | null, limit: number): Promise<SearchHit[]>;
 

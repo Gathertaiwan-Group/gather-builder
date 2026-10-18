@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -29,6 +29,12 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const translations = new Map<string, TranslationRow>();
   /** directory／downloads 的記憶體搜尋來源（各模組的記憶體實作接上） */
   const extraSearch: ((tenantId: string, q: string) => Promise<SearchHit[]>)[] = [];
+  const people = new Map<string, PersonRow>();
+  extraSearch.push(async (tenantId, q) =>
+    [...people.values()]
+      .filter((p) => p.tenant_id === tenantId && p.status === "published" && [p.name, p.title, p.category, p.bio_md].some((x) => (x ?? "").toLowerCase().includes(q)))
+      .map((p) => ({ kind: "person", id: p.id, slug: p.slug, title: p.name, body: `${p.title ?? ""}\n${p.category ?? ""}\n${p.bio_md}`, rank: p.name.toLowerCase().includes(q) ? 2 : 1 })),
+  );
   const trKey = (r: Pick<TranslationRow, "tenant_id" | "entity_type" | "entity_id" | "lang" | "field">) => `${r.tenant_id}|${r.entity_type}|${r.entity_id}|${r.lang}|${r.field}`;
 
   const entries = (l: CreditLedger, tenantId: string, memberId: string) => ledgers[l].filter((e) => e.tenant_id === tenantId && e.member_id === memberId);
@@ -99,6 +105,30 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async insertPerson(row) {
+      if ([...people.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      const r: PersonRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      people.set(r.id, r);
+      return clone(r);
+    },
+    async updatePerson(tenantId, id, patch) {
+      const p = people.get(id);
+      if (!p || p.tenant_id !== tenantId) return null;
+      if (patch.slug && patch.slug !== p.slug && [...people.values()].some((x) => x.tenant_id === tenantId && x.slug === patch.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      const next = { ...p, ...clone(patch), updated_at: now() };
+      people.set(id, next);
+      return clone(next);
+    },
+    async getPersonById(tenantId, id) {
+      const p = people.get(id);
+      return p && p.tenant_id === tenantId ? clone(p) : null;
+    },
+    async getPersonBySlug(tenantId, slug) {
+      return clone([...people.values()].find((p) => p.tenant_id === tenantId && p.slug === slug) ?? null);
+    },
+    async listPeople(tenantId, opts) {
+      return clone([...people.values()].filter((p) => p.tenant_id === tenantId && (!opts.status || p.status === opts.status) && (!opts.category || p.category === opts.category)).sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name)));
+    },
     async searchContent(tenantId, qRaw, lang, limit) {
       // 同 SQL builder_search_content：lower 片語比對、只搜已發布、課程只比對介紹與單元標題
       if (!root) return [];

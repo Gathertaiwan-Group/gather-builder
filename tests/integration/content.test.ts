@@ -12,6 +12,7 @@ import { localizeRow, publishTranslations, translateContent } from "@/lib/servic
 import { loadSite } from "@/lib/site-loader";
 import { searchSite } from "@/lib/services/search";
 import { addLesson, createCourse } from "@/lib/services/courses";
+import { createPerson } from "@/lib/services/directory";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -34,7 +35,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
     await publishSite(ctx, { site: slug, confirm: true });
   });
@@ -68,5 +69,12 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     // 其他租戶看不到
     const other = await store.searchContent("00000000-0000-0000-0000-000000000000", "凍頂", null, 10);
     expect(other).toEqual([]);
+  });
+
+  it("directory：SQL 搜尋只找已公開的人員", async () => {
+    await createPerson(ctx, { site: slug, slug: "chen", name: "陳醫師", title: "主治醫師", status: "published", confirm: true });
+    await createPerson(ctx, { site: slug, slug: "draft-person", name: "陳草稿", title: "主治醫師" });
+    const site = (await loadSite(slug, null, store, { lang: null }))!;
+    expect((await searchSite(store, site, "主治醫師")).results.map((r) => r.href)).toEqual(["/people/chen"]);
   });
 });
