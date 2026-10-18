@@ -155,6 +155,8 @@ export interface EventReservation {
   /** 免費報名待 email 確認（held＋pending_minutes 分鐘） */
   pending_email?: boolean;
   pending_minutes?: number;
+  /** 審查 M6：這個場次「未確認保留」最多幾筆（超過 → builder: pending cap） */
+  pending_cap?: number;
 }
 
 export type ClassReservation = { kind: "event"; data: EventReservation } | { kind: "booking"; data: BookingReservation } | null;
@@ -186,6 +188,8 @@ export interface ClassOrderItem {
   unit_price: number;
   qty: number;
   line_total: number;
+  /** 下單時的方案快照（例如儲值方案的金額／贈送／贈送到期天數；存在訂單 items jsonb，入帳讀快照不讀現行方案） */
+  snapshot?: Record<string, unknown>;
 }
 
 /** 場次用量（即時由報名列加總，不是計數欄位） */

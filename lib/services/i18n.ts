@@ -168,10 +168,11 @@ export async function translateContent(
   const toSend = Object.fromEntries(Object.entries(source).filter(([k]) => input.overwrite || !existing[k] || existing[k]!.ai));
   if (!Object.keys(toSend).length) return { lang, target, translated: 0, skippedManual: Object.keys(source).length, draft: true, note: "沒有需要翻譯的欄位（店主手動翻譯過的欄位預設不覆蓋，要重翻請帶 overwrite: true）。" };
 
-  const day = await ctx.store.rateHit(`i18n-ai-day:${tenant.id}`, taipeiDay(), 86400, limit);
-  if (!day.allowed) throw new ServiceError("rate_limited", `今天的 AI 翻譯次數已達上限（${limit} 次），明天再試或用 set_translation 手動翻譯`);
+  // 第五六批審查 L5：先檢查每分鐘上限再扣每日額度（被每分鐘擋下的請求不吃掉當天的次數）
   const minute = await ctx.store.rateHit(`i18n-ai-min:${tenant.id}`, "all", 60, AI_PER_MINUTE);
   if (!minute.allowed) throw new ServiceError("rate_limited", "AI 翻譯太頻繁，請一分鐘後再試");
+  const day = await ctx.store.rateHit(`i18n-ai-day:${tenant.id}`, taipeiDay(), 86400, limit);
+  if (!day.allowed) throw new ServiceError("rate_limited", `今天的 AI 翻譯次數已達上限（${limit} 次），明天再試或用 set_translation 手動翻譯`);
 
   let result: Record<string, string>;
   try {

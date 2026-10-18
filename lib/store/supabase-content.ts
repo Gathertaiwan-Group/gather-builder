@@ -254,11 +254,11 @@ export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
     },
     async listCreditLedger(ledger, tenantId, memberId, limit) {
       if (!isUuid(memberId)) return [];
-      return (must(await db.from(LEDGER_TABLE[ledger]).select("*").eq("tenant_id", tenantId).eq("member_id", memberId).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(limit), "listCreditLedger") ?? []) as CreditLedgerRow[];
+      return (must(await db.from(LEDGER_TABLE[ledger]).select("*").eq("tenant_id", tenantId).eq("member_id", memberId).order("seq", { ascending: false }).limit(limit), "listCreditLedger") ?? []) as CreditLedgerRow[];
     },
     async allCreditEntries(ledger, tenantId, memberId) {
       if (!isUuid(memberId)) return [];
-      return (must(await db.from(LEDGER_TABLE[ledger]).select("*").eq("tenant_id", tenantId).eq("member_id", memberId).order("created_at").order("id").limit(5000), "allCreditEntries") ?? []) as CreditLedgerRow[];
+      return (must(await db.from(LEDGER_TABLE[ledger]).select("*").eq("tenant_id", tenantId).eq("member_id", memberId).order("seq").limit(5000), "allCreditEntries") ?? []) as CreditLedgerRow[];
     },
     async getCreditByRef(ledger, tenantId, ref) {
       return must(await db.from(LEDGER_TABLE[ledger]).select("*").eq("tenant_id", tenantId).eq("ref", ref).maybeSingle(), "getCreditByRef") as CreditLedgerRow | null;
@@ -267,6 +267,10 @@ export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
       const rows = (must(await db.from(LEDGER_TABLE[ledger]).select("tenant_id, member_id").gt("amount", 0).gte("expires_at", fromIso).lt("expires_at", toIso).limit(limit * 4), "listCreditMembersWithExpiry") ?? []) as { tenant_id: string; member_id: string }[];
       const seen = new Set<string>();
       return rows.filter((r) => (seen.has(`${r.tenant_id}|${r.member_id}`) ? false : (seen.add(`${r.tenant_id}|${r.member_id}`), true))).slice(0, limit);
+    },
+    async sumCreditKindSince(ledger, tenantId, kind, sinceIso) {
+      const rows = (must(await db.from(LEDGER_TABLE[ledger]).select("amount").eq("tenant_id", tenantId).eq("kind", kind).gte("created_at", sinceIso).limit(10000), "sumCreditKindSince") ?? []) as { amount: number }[];
+      return rows.reduce((n, r) => n + Math.abs(Number(r.amount)), 0);
     },
     async creditExpire(ledger, tenantId, memberId) {
       return Number(must(await db.rpc("builder_ledger_expire", { p_table: LEDGER_TABLE[ledger], p_tenant: tenantId, p_member: memberId }), "creditExpire") ?? 0);

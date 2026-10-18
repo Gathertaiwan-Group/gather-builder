@@ -4,6 +4,7 @@
  * 發票金額含儲值金、MCP confirm。真 DB 併發與 42501 在 tests/integration/loyalty-wallet.test.ts。🔴 假寄信、mock 金流。
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { Actor } from "@/lib/tokens";
 import { ctxFor, newStore } from "./helpers";
 import { makeShop } from "./shop-helpers";
 import { enableModule, configureModule } from "@/lib/services/modules";
@@ -178,5 +179,17 @@ describe("MCP", () => {
     expect((await bal(store, x)).balance).toBe(100);
     await expect(createTopupPlan(x.ctx, { site: "sv-mcp", name: "x", payAmount: 500, status: "published" })).rejects.toMatchObject({ code: "confirm_required" });
     await expect(createTopupPlan(x.ctx, { site: "sv-mcp", name: "x", payAmount: 10 })).rejects.toMatchObject({ code: "invalid" });
+  });
+
+  it("審查 M3：adjust_balance 需要 wallet:adjust（members:write 不夠）；單次 NT$3,000、每日 NT$10,000 上限；被拒寫稽核", async () => {
+    const store = newStore();
+    const x = await walletShop(store, "sv-m3");
+    const mw: Actor = { kind: "token", tokenId: "t", tenantId: x.tenant.id, scopes: ["members:read", "members:write"], label: "mw" };
+    await expect(adjustBalance(ctxFor(store, mw), { memberId: x.member.id, amount: 10, reason: "補償", confirm: true })).rejects.toMatchObject({ code: "forbidden" });
+    const wa: Actor = { ...mw, scopes: ["wallet:adjust"], label: "wa" };
+    await expect(adjustBalance(ctxFor(store, wa), { memberId: x.member.id, amount: 3001, reason: "太多", confirm: true })).rejects.toThrow(/單次調整上限 NT\$3,000/);
+    for (let i = 0; i < 3; i++) await adjustBalance(ctxFor(store, wa), { memberId: x.member.id, amount: 3000, reason: "補償", confirm: true });
+    await expect(adjustBalance(ctxFor(store, wa), { memberId: x.member.id, amount: 1001, reason: "補償", confirm: true })).rejects.toThrow(/每日上限 NT\$10,000/);
+    expect((await store.listAudit(x.tenant.id, 50)).filter((a) => a.action === "wallet.adjust_rejected")).toHaveLength(2);
   });
 });

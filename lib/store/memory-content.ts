@@ -354,6 +354,9 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
       }
       return out.slice(0, limit);
     },
+    async sumCreditKindSince(l, tenantId, kind, sinceIso) {
+      return ledgers[l].filter((e) => e.tenant_id === tenantId && e.kind === kind && e.created_at >= sinceIso).reduce((n, e) => n + Math.abs(e.amount), 0);
+    },
     async creditExpire(l, tenantId, memberId) {
       const s = state(l, tenantId, memberId);
       if (s.expiredDue <= 0) return 0;

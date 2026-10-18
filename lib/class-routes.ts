@@ -103,7 +103,8 @@ export async function handleEventRegister(req: Request, rawSlug: string, store: 
     );
     // L6：網址不放 email 與簽到碼（會留在瀏覽紀錄／Referer）；簽到碼在確認信與會員中心
     if (r.kind === "free") return siteRedirect(req, slug, back, { ok: "報名成功！確認信（含簽到碼）已寄到你的信箱。" });
-    if (r.kind === "pending") return siteRedirect(req, slug, back, { ok: "還差一步：請到信箱點確認連結完成報名（30 分鐘內有效，逾時名額會釋出）。" });
+    if (r.kind === "pending") return siteRedirect(req, slug, back, { ok: "還差一步：請到信箱點確認連結完成報名（15 分鐘內有效，逾時名額會釋出）。" });
+    if (r.kind === "waitlisted") return siteRedirect(req, slug, back, { ok: "目前待確認的報名較多，已改為候補登記：請到信箱點確認連結（30 分鐘內有效），有名額時會依順序通知你。" });
     return afterClassOrder(req, store, site.tenant, r, clientFactory);
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });

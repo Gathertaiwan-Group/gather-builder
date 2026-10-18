@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { merchandiseNet } from "../loyalty/rules";
 import type { MemberRow, OrderRow, ReferralCodeRow, Store, TenantRow } from "../store/types";
 import type { ReferralSettings } from "@/modules/referral/manifest";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
@@ -71,7 +72,8 @@ export async function onReferralOrderPaid(deps: HookDeps, tenant: TenantRow, ord
   const settings = (await publishedModuleSettings(deps.store, tenant, "referral")) as Partial<ReferralSettings>;
 
   if (rc.kol_rate_bp > 0 && settings.kolEnabled !== false) {
-    const base = Math.max(0, order.subtotal - (order.discount_total ?? 0));
+    // 審查 M4：分潤基數＝商品實付淨額（扣優惠券、等級折扣、點數折抵；與賺點、builder_member_spend 一致）
+    const base = merchandiseNet(order);
     const amount = Math.floor((base * rc.kol_rate_bp) / 10000);
     if (amount > 0 && (await deps.store.insertLedger({ tenant_id: tenant.id, referrer_member_id: referrer.id, order_id: order.id, kind: "earn", amount }))) {
       await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:referral", action: "referral.earn", payload: { orderNo: order.order_no, code: rc.code, amount } });

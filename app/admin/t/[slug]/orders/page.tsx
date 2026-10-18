@@ -74,6 +74,11 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
                 );
               })}
             </div>
+            {detail.topupReversal && (
+              <p className={`text-xs ${detail.topupReversal.shortfall > 0 ? "text-red-700" : "text-neutral-600"}`} data-admin="topup-reversal">
+                儲值取消試算：{detail.topupReversal.note}
+              </p>
+            )}
             {detail.status === "paid" && detail.paymentMethod === "pchomepay" && <p className="text-xs text-amber-700">取消已付款的 PChomePay 訂單不會自動退款，需到 PChomePay 商家後台人工退款。</p>}
           </div>
         </Card>

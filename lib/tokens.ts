@@ -36,6 +36,8 @@ export const ADMIN_ACTOR_SCOPES: Scope[] = [
   "certificates:read",
   "certificates:write",
   "reviews:write",
+  "points:adjust",
+  "wallet:adjust",
 ];
 
 export function adminActor(): Actor {

@@ -7,7 +7,8 @@ import { publishedModuleSettings } from "./members";
 import { registerOrderHooks, type CancelDeps, type HookDeps } from "./order-hooks";
 import { configureModule } from "./modules";
 import { computeLedgerState } from "../loyalty/ledger";
-import { DEFAULT_POINTS_EXPIRE_DAYS, DEFAULT_TIER_WINDOW_MONTHS, addDaysIso, earnPoints, sortedTiers, tierForSpend, tierWindowStart } from "../loyalty/rules";
+import { taipeiDayStartIso } from "./loyalty-time";
+import { DEFAULT_POINTS_EXPIRE_DAYS, DEFAULT_TIER_WINDOW_MONTHS, addDaysIso, earnPoints, merchandiseNet, sortedTiers, tierForSpend, tierWindowStart } from "../loyalty/rules";
 
 /* ================================================================== 共用 */
 
@@ -56,7 +57,7 @@ export async function onLoyaltyOrderPaid(deps: HookDeps, tenant: TenantRow, orde
   const member = await deps.store.getMemberById(tenant.id, order.member_id);
   if (!member) return;
   const tier = await currentTier(deps.store, tenant, member, s);
-  const base = Math.max(0, order.subtotal - (order.discount_total ?? 0) - (order.tier_discount ?? 0) - (order.points_discount ?? 0));
+  const base = merchandiseNet(order);
   const pts = earnPoints(base, s, tier?.multiplier ?? 1);
   if (pts > 0) {
     const r = await deps.store.creditPost("points", {
@@ -102,7 +103,7 @@ registerOrderHooks({ name: "loyalty", paid: onLoyaltyOrderPaid, cancelled: onLoy
 export async function memberPointsView(store: Store, tenant: TenantRow, member: MemberRow) {
   const s = await publishedLoyaltySettings(store, tenant);
   const entries = await store.allCreditEntries("points", tenant.id, member.id);
-  const st = computeLedgerState(entries.map((e) => ({ ...e, seq: e.id })));
+  const st = computeLedgerState(entries);
   const tier = await currentTier(store, tenant, member, s);
   const row = await store.getMemberTier(tenant.id, member.id);
   const next = sortedTiers(s.tiers).find((t) => t.minSpend > (row?.spend ?? 0)) ?? null;
@@ -151,15 +152,32 @@ export const adjustInput = z
   })
   .strict();
 
-/** 店主調整點數（members:write＋confirm＋理由）：加點有到期日（同設定天數）；扣點不能超過可用（不會變負） */
+/** 審查 M3：店主手動調整點數的預設上限（可在 loyalty 設定 adjustMaxPerCall／adjustMaxPerDay 調整） */
+export const DEFAULT_POINTS_ADJUST_PER_CALL = 5_000;
+export const DEFAULT_POINTS_ADJUST_PER_DAY = 20_000;
+
+
+/**
+ * 店主調整點數（審查 M3：專用 scope points:adjust＋confirm＋理由；單次與每日上限；全部寫稽核）。
+ * 加點有到期日（同設定天數）；扣點不能超過可用（不會變負）。members:write 不再能調整點數。
+ */
 export async function adjustPoints(ctx: ServiceContext, input: { site?: string | null; memberId?: string; email?: string; amount: number; reason: string; confirm?: boolean }) {
-  requireScope(ctx, "members:write");
+  requireScope(ctx, "points:adjust");
   const tenant = await resolveTenant(ctx, input.site);
   await requireLoyalty(ctx, tenant);
   const d = parse(adjustInput, { amount: input.amount, reason: input.reason });
   const m = await findMember(ctx, tenant, input);
-  if (input.confirm !== true) throw new ServiceError("confirm_required", `${d.amount > 0 ? "加" : "扣"} ${Math.abs(d.amount)} 點給 ${m.email}（理由：${d.reason}）會寫入只增不改的點數帳本。請先讓使用者確認，再以 confirm: true 呼叫。`);
   const s = await publishedLoyaltySettings(ctx.store, tenant);
+  const perCall = s.adjustMaxPerCall ?? DEFAULT_POINTS_ADJUST_PER_CALL;
+  const perDay = s.adjustMaxPerDay ?? DEFAULT_POINTS_ADJUST_PER_DAY;
+  const reject = async (why: string) => {
+    await audit(ctx, tenant.id, "loyalty.adjust_rejected", { memberId: m.id, amount: d.amount, reason: d.reason, why });
+    throw new ServiceError("invalid", why);
+  };
+  if (Math.abs(d.amount) > perCall) await reject(`單次調整上限 ${perCall} 點（loyalty 設定 adjustMaxPerCall）`);
+  const today = await ctx.store.sumCreditKindSince("points", tenant.id, "adjust", taipeiDayStartIso());
+  if (today + Math.abs(d.amount) > perDay) await reject(`今日手動調整已達 ${today} 點，再調 ${Math.abs(d.amount)} 點會超過每日上限 ${perDay} 點（loyalty 設定 adjustMaxPerDay）`);
+  if (input.confirm !== true) throw new ServiceError("confirm_required", `${d.amount > 0 ? "加" : "扣"} ${Math.abs(d.amount)} 點給 ${m.email}（理由：${d.reason}）會寫入只增不改的點數帳本（今日已調整 ${today}／上限 ${perDay} 點）。請先讓使用者確認，再以 confirm: true 呼叫。`);
   const r = await ctx.store.creditPost("points", {
     tenantId: tenant.id,
     memberId: m.id,

@@ -12,7 +12,7 @@ import "./booking";
 import "./courses";
 // 第五批：點數（賺點／沖回）
 import "./loyalty";
-import "./wallet";
+import { topupReversalPreview, topupReversalText } from "./wallet";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -184,7 +184,7 @@ async function findOrder(ctx: ServiceContext, tenant: TenantRow, ref: { orderId?
 /**
  * M2：補做失敗的 hook（cron 跑全部、讀訂單時只跑該訂單）；連續失敗 HOOK_ALERT_AT 次寄店主警示一次。
  */
-export async function retryOrderHooks(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, opts: { orderId?: string; limit?: number } = {}) {
+export async function retryOrderHooks(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, opts: { orderId?: string; limit?: number; countAttempts?: boolean } = {}) {
   return retryHookFailures(
     {
       ...deps,
@@ -239,6 +239,8 @@ export async function getOrder(ctx: ServiceContext, input: { site?: string | nul
   await requireShop(ctx, tenant);
   const o = await findOrder(ctx, tenant, input);
   const [items, payments] = await Promise.all([ctx.store.listOrderItems(tenant.id, o.id), ctx.store.listPaymentsForOrder(tenant.id, o.id)]);
+  // 審查 M2：儲值訂單取消前的試算（已用掉／可收回／不足）
+  const topupReversal = o.status !== "cancelled" ? await topupReversalPreview(ctx.store, tenant, o) : null;
   return {
     ...orderSummary(o),
     contact: o.contact,
@@ -264,6 +266,7 @@ export async function getOrder(ctx: ServiceContext, input: { site?: string | nul
     // 付款紀錄只給狀態，不給閘道原始回應
     payments: payments.map((p) => ({ provider: p.provider, gatewayOrderNo: p.gateway_order_no, amount: p.amount, status: p.status, sandbox: p.sandbox, paidAt: p.paid_at, createdAt: p.created_at })),
     allowedNext: (["paid", "fulfilled", "cancelled"] as OrderStatus[]).filter((s) => canTransition(o.status, s)),
+    topupReversal: topupReversal ? { ...topupReversal, note: topupReversalText(topupReversal) } : null,
   };
 }
 
@@ -370,13 +373,23 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
           ? "此訂單全額以點數／儲值金支付：取消會自動退回點數與儲值金，不需另外退款。"
           : "此訂單已收款（線下匯款）：取消不會自動退款，請自行退款給客人。"
       : null;
-  requireConfirm(input.confirm, `取消訂單 ${o.order_no} 會回補庫存且無法復原${refundNote ? `。注意：${refundNote}` : ""}`);
+  // 審查 M2：已入帳的儲值訂單 → 確認前先說清楚可收回／不足多少
+  const topup = await topupReversalPreview(ctx.store, tenant, o);
+  requireConfirm(input.confirm, `取消訂單 ${o.order_no} 會回補庫存且無法復原${refundNote ? `。注意：${refundNote}` : ""}${topup ? `。${topupReversalText(topup)}` : ""}`);
   const r = await ctx.store.cancelOrder(tenant.id, o.id, sourcesFor("cancelled").filter((s) => s === o.status), input.reason?.trim().slice(0, 200) || "cancelled_by_shop");
   if (!r.transitioned) throw new ServiceError("conflict", `訂單 ${o.order_no} 狀態已被其他操作改變，請重新讀取`);
   await audit(ctx, tenant.id, "order.cancel", { orderNo: o.order_no, from: o.status, stockReleased: r.stockReleased });
   const after = (await ctx.store.getOrderById(tenant.id, o.id))!;
   await runCancelHooks(ctx.store, tenant, after, { sendMail: ctx.sendMail, baseUrl: ctx.baseUrl });
   // 已開立發票的訂單取消：提示作廢（同期）或折讓（跨期）
+  // 實際收回結果（以帳本為準；什麼都收不回時沒有 reverse 分錄）
+  const topupActual = topup
+    ? await (async () => {
+        const rev = await ctx.store.getCreditByRef("wallet", tenant.id, `order:${o.id}:topup_reverse`);
+        const reclaimed = rev ? Math.abs(rev.amount) : 0;
+        return { credited: topup.credited, used: topup.credited - reclaimed, reclaimable: reclaimed, shortfall: topup.credited - reclaimed };
+      })()
+    : null;
   const inv = await ctx.store.getInvoiceByOrder(tenant.id, o.id);
   const invoiceNote = inv?.status === "issued" ? `此訂單已開立發票 ${inv.invoice_no}：請用 void_invoice（confirm: true）處理——同一期會作廢，跨期會改開折讓單。` : null;
   return {
@@ -384,7 +397,9 @@ export async function cancelOrder(ctx: ServiceContext, input: { site?: string | 
     stockReleased: r.stockReleased,
     refundRequired: !!refundNote && o.payment_method !== "credit",
     invoiceActionRequired: !!invoiceNote,
-    note: [refundNote ?? "訂單已取消，庫存已回補。", invoiceNote].filter(Boolean).join(" "),
+    /** 儲值訂單：入帳／收回／不足（不足的部分沒有收回，退款時請扣除） */
+    topupReversal: topupActual,
+    note: [refundNote ?? "訂單已取消，庫存已回補。", topupActual ? `已收回儲值金 ${twd(topupActual.reclaimable)}${topupActual.shortfall ? `，不足 ${twd(topupActual.shortfall)} 無法收回（退款時請扣除）` : ""}。` : null, invoiceNote].filter(Boolean).join(" "),
   };
 }
 

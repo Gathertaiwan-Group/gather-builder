@@ -125,6 +125,18 @@ describe("頁面翻譯：進草稿、發布才上線、缺翻譯 fallback", () =
     expect(calls).toBe(1);
   });
 
+  it("審查 L5：被每分鐘上限擋下的請求不吃掉每日額度", async () => {
+    const store = newStore();
+    const { ctx } = await i18nSite(store, "tea-l5", { aiDailyLimit: 50 });
+    const tenant = (await store.getTenantBySlug("tea-l5"))!;
+    // 先把這一分鐘的額度用完（直接打同一個限流桶）
+    for (let i = 0; i < 6; i++) await store.rateHit(`i18n-ai-min:${tenant.id}`, "all", 60, 6);
+    await expect(translateContent(ctx, { site: "tea-l5", lang: "en", target: { type: "page", path: "/" } }, factory)).rejects.toThrow(/一分鐘後再試/);
+    // 每日桶沒有被扣：第一次 hit 的 count 應為 1
+    const { taipeiDay } = await import("@/lib/services/shop");
+    expect((await store.rateHit(`i18n-ai-day:${tenant.id}`, taipeiDay(), 86400, 50)).count).toBe(1);
+  });
+
   it("沒開啟的語言不能翻；沒有 AI key 時正式網站不能用 AI 翻譯", async () => {
     const store = newStore();
     const { ctx } = await i18nSite(store, "tea-nokey");

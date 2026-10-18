@@ -42,7 +42,9 @@ export default async function OrderPage(props: Props) {
   const member = await currentMember(site.tenant);
   if (!found || !canViewOrder(found, sp.k, member)) notFound();
   // M2：讀取時補做這張訂單失敗過的付款後處理（冪等）
-  await retryOrderHooks({ store, sendMail: getMailer(), baseUrl: baseUrlFrom({ headers: await headers() }) }, { orderId: found.id }).catch((e) => console.error("[hooks] lazy", e));
+  // 第五六批審查 L3：公開頁的補做不計次、且每張訂單每 10 分鐘最多一次（重新整理／輪詢不會灌爆失敗次數）
+  const gate = await store.rateHit(`hook-retry-page:${site.tenant.id}`, found.id, 600, 1).catch(() => ({ allowed: false }));
+  if (gate.allowed) await retryOrderHooks({ store, sendMail: getMailer(), baseUrl: baseUrlFrom({ headers: await headers() }) }, { orderId: found.id, countAttempts: false }).catch((e) => console.error("[hooks] lazy", e));
   const order = await expireIfDue(store, found);
   const [items, invoice, shipment] = await Promise.all([
     store.listOrderItems(site.tenant.id, order.id),

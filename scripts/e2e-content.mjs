@@ -142,7 +142,9 @@ const imp = await site.call("import_certificates", { csv: `證號,姓名,生日,
 check(imp.imported === true && imp.inserted === 1, "import_certificates", imp.__error ?? JSON.stringify(imp.errors));
 const evil = await site.call("import_certificates", { csv: "證號,姓名,生日\nX-1,=HYPERLINK(\"http://x\"),1990-01-01\n", dryRun: true });
 check(evil.imported === false && /疑似公式/.test(evil.errors?.[0] ?? ""), "CSV injection 被拒");
-const v1 = await postJson(`/api/s/${slug}/verify`, { certNo: ` ct ${ts} 01 ` });
+const v1 = await postJson(`/api/s/${slug}/verify`, { certNo: ` ct ${ts} 01 `, name: "王雅琳" });
+const v0 = await postJson(`/api/s/${slug}/verify`, { certNo: ` ct ${ts} 01 ` });
+check(v0.json?.found === false, "審查 M5：只給證號（沒給姓名）查不到", JSON.stringify(v0.json).slice(0, 120));
 check(v1.json?.found === true && v1.json.results[0].name === "王＊琳" && !JSON.stringify(v1.json).includes("1988"), "證照查詢（證號容錯）：姓名遮罩、不回生日", JSON.stringify(v1.json).slice(0, 160));
 const v2 = await postJson(`/api/s/${slug}/verify`, { name: "王雅琳", birth: "1988-03-13" });
 const v3 = await postJson(`/api/s/${slug}/verify`, { certNo: "NOPE-0000" });

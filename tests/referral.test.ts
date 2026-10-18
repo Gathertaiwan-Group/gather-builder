@@ -97,4 +97,18 @@ describe("推薦回饋", () => {
     const rep = await listReferrals(s.ctx, { site: "ref-kol" });
     expect(rep.referrers.find((r) => r.email === "kol@example.com")).toMatchObject({ earned: 35, reversed: -35, commission: 0, kolRatePercent: 10 });
   });
+
+  it("審查 M4：KOL 分潤基數扣掉優惠券、等級折扣、點數折抵（與賺點一致）", async () => {
+    const store = newStore();
+    const s = await refShop(store, "ref-net");
+    await setReferralKol(s.ctx, { site: "ref-net", email: "kol@example.com", ratePercent: 10 });
+    const o = await buy(store, s.tenant, s.mug.id, "fan2@example.com", s.code);
+    const { onReferralOrderPaid } = await import("@/lib/services/referral");
+    const { merchandiseNet } = await import("@/lib/loyalty/rules");
+    // 小計 350、折扣碼 20、等級折扣 30、點數折抵 50 → 淨額 250 → 分潤 25（舊版算 33）
+    const paid = { ...(await store.getOrderById(s.tenant.id, o.order.id))!, status: "paid" as const, discount_total: 20, tier_discount: 30, points_discount: 50 };
+    expect(merchandiseNet(paid)).toBe(250);
+    await onReferralOrderPaid({ store, baseUrl: "http://t" }, s.tenant, paid);
+    expect(await store.listLedger(s.tenant.id, { limit: 10 })).toEqual([expect.objectContaining({ kind: "earn", amount: 25 })]);
+  });
 });

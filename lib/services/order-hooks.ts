@@ -78,8 +78,10 @@ export async function runCancelHooks(store: Store, tenant: TenantRow, order: Ord
  */
 export async function retryHookFailures(
   deps: HookDeps & { alert?: (tenant: TenantRow, order: OrderRow, hook: string, event: string, attempts: number, error: string) => Promise<void> },
-  opts: { orderId?: string; tenantId?: string; limit?: number } = {},
+  opts: { orderId?: string; tenantId?: string; limit?: number; countAttempts?: boolean } = {},
 ): Promise<{ scanned: number; resolved: number; failed: number }> {
+  // 第五六批審查 L3：公開訂單頁的補做不計次（不累加 attempts、不觸發警示）；計次只來自 cron 與後台／MCP
+  const counting = opts.countAttempts !== false;
   const open = await deps.store.listOpenHookFailures({ orderId: opts.orderId, tenantId: opts.tenantId, limit: opts.limit ?? 100, maxAttempts: HOOK_MAX_ATTEMPTS });
   let resolved = 0;
   let failed = 0;
@@ -93,7 +95,9 @@ export async function retryHookFailures(
       resolved++;
       continue;
     }
-    const applicable = f.event === "paid" ? (order.status === "paid" || order.status === "fulfilled") && !order.payment_sandbox : order.status === "cancelled";
+    // 第五六批審查 L2：sandbox 付款成功時保留已在同一交易釋放、並跑過取消側 hooks（候補遞補等）——
+    // 那次失敗的補做仍適用（訂單是 paid＋payment_sandbox，不是 cancelled），不能標成不再適用
+    const applicable = f.event === "paid" ? (order.status === "paid" || order.status === "fulfilled") && !order.payment_sandbox : order.status === "cancelled" || !!order.payment_sandbox;
     if (!applicable) {
       await deps.store.resolveHookFailure(f.id, "obsolete");
       resolved++;
@@ -107,6 +111,10 @@ export async function retryHookFailures(
       resolved++;
     } catch (e) {
       failed++;
+      if (!counting) {
+        console.error(`[hook retry:${f.hook}] 公開頁補做仍失敗（不計次）order=${order.order_no}`, errText(e));
+        continue;
+      }
       const attempts = await deps.store.bumpHookFailure(f.id, errText(e));
       console.error(`[hook retry:${f.hook}] 仍失敗（第 ${attempts} 次）order=${order.order_no}`, errText(e));
       if (attempts >= HOOK_ALERT_AT && (await deps.store.markHookFailureAlerted(f.id)) && deps.alert) {

@@ -7,6 +7,14 @@ export const DEFAULT_MAX_REDEEM_PERCENT = 50;
 export const DEFAULT_POINTS_EXPIRE_DAYS = 365;
 export const DEFAULT_TIER_WINDOW_MONTHS = 12;
 
+/**
+ * 訂單的「商品實付淨額」＝小計 − 折扣碼 − 等級折扣 − 點數折抵（不含運費；儲值金是付款方式不扣）。
+ * 賺點、等級消費（SQL builder_member_spend）、KOL 分潤（審查 M4）一律用這個基數。
+ */
+export function merchandiseNet(o: { subtotal: number; discount_total?: number | null; tier_discount?: number | null; points_discount?: number | null }): number {
+  return Math.max(0, o.subtotal - (o.discount_total ?? 0) - (o.tier_discount ?? 0) - (o.points_discount ?? 0));
+}
+
 export function sortedTiers(tiers: Tier[] | undefined): Tier[] {
   return [...(tiers ?? [])].sort((a, b) => a.minSpend - b.minSpend);
 }

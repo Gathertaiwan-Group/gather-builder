@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { CertificateRow, Store, TenantRow } from "../store/types";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { maskName } from "./class-common";
+import { publishedModuleSettings } from "./members";
 
 /* ================================================================== 正規化 */
 
@@ -180,7 +181,7 @@ export function publicCertificate(c: CertificateRow) {
 }
 
 /**
- * 公開查詢（姓名＋生日，或證號）。安全規則（參考 IFAR /api/verify）：
+ * 公開查詢（姓名＋生日，或證號＋姓名；只用證號需店主開 allowCertNoOnly）。安全規則（參考 IFAR /api/verify）：
  * - 兩種模式都要完整條件（只給姓名或只給生日 → 不查 DB，回查無）；
  * - 🔴 不回傳生日、姓名遮罩；查無與資料不符回**同一句話**（不洩漏證號或姓名是否存在）；
  * - 嚴格限流：每 IP 每 10 分鐘 10 次、每個查詢鍵（證號／姓名）每小時 10 次（builder_rate_hit 原子）；
@@ -202,14 +203,18 @@ export async function lookupCertificate(store: Store, tenant: TenantRow, input: 
     mode = "name_birth";
     key = `name:${nameNorm}`;
   }
+  // 審查 M5：證號模式也要第二個條件（姓名），除非店主設定 allowCertNoOnly（預設關閉）
+  const settings = (await publishedModuleSettings(store, tenant, "certificates")) as { allowCertNoOnly?: boolean };
+  const certNoOnly = settings.allowCertNoOnly === true;
   const kh = keyHash(tenant.id, key);
   const perKey = await store.rateHit(`cert-key:${tenant.id}`, kh, LOOKUP_RATE.perKey.window, LOOKUP_RATE.perKey.limit);
   if (!perKey.allowed) throw new ServiceError("rate_limited", "這筆資料查詢太頻繁，請稍後再試");
   let rows: CertificateRow[] = [];
   if (mode === "cert_no") {
-    if (certNo.length >= 3 && certNo.length <= 40) {
+    if (certNo.length >= 3 && certNo.length <= 40 && (certNoOnly || nameNorm)) {
       const c = await store.getCertificateByNo(tenant.id, certNo);
-      rows = c ? [c] : [];
+      // 姓名不符與查無同一句話（不洩漏證號存在）
+      rows = c && (certNoOnly && !nameNorm ? true : c.name_norm === nameNorm) ? [c] : [];
     }
   } else if (nameNorm && birth) {
     rows = await store.findCertificatesByNameBirth(tenant.id, nameNorm, birth);

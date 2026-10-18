@@ -83,6 +83,18 @@ async function paidOrderShop(store: Store, slug: string, invoiceConfig: Record<s
   return { ...shop, ctx, tenant, order };
 }
 
+describe("審查 L6：0 元訂單（全額點數／折扣折抵）", () => {
+  it("自動開立直接略過（寫稽核、不建發票列）；手動開立回清楚訊息不卡住", async () => {
+    const store = newStore();
+    const s = await paidOrderShop(store, "inv-zero", { issueMode: "auto_on_paid" });
+    const zero = { ...s.order, status: "paid" as const, total: 0, wallet_paid: 0, points_discount: s.order.subtotal };
+    expect(await autoIssueOnPaid(store, s.tenant, zero)).toBeNull();
+    expect(await store.getInvoiceByOrder(s.tenant.id, s.order.id)).toBeNull();
+    expect((await store.listAudit(s.tenant.id, 20)).some((a) => a.action === "invoice.skip_zero")).toBe(true);
+    await expect(issueInvoiceForOrder(store, s.tenant, zero, "t")).rejects.toThrow(/實收金額為 0/);
+  });
+});
+
 describe("發票格式驗證", () => {
   it("統一編號檢查碼（含第 7 碼為 7 的特例）", () => {
     for (const ok of ["53912857", "28080623", "04595257", "22099131", "10458574", "10458575"]) expect(isValidTaxId(ok)).toBe(true);

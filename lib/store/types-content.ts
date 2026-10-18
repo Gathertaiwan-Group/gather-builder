@@ -22,6 +22,8 @@ export interface CreditLedgerRow {
   actor: string;
   meta: Record<string, unknown>;
   created_at: string;
+  /** 寫入順序（0030 起；帳本依此重播，見 lib/loyalty/ledger.ts） */
+  seq?: number;
 }
 
 export interface CreditLedgerState {
@@ -281,6 +283,8 @@ export interface ContentStore {
   listCreditMembersWithExpiry(ledger: CreditLedger, fromIso: string, toIso: string, limit: number): Promise<{ tenant_id: string; member_id: string }[]>;
   /** builder_ledger_expire：只寫到期，回傳到期點數 */
   creditExpire(ledger: CreditLedger, tenantId: string, memberId: string): Promise<number>;
+  /** 審查 M3：某種分錄自 sinceIso 起的絕對值加總（全站；店主手動調整的每日上限用） */
+  sumCreditKindSince(ledger: CreditLedger, tenantId: string, kind: string, sinceIso: string): Promise<number>;
   /** 期間內已付款消費（商品淨額，不含運費、儲值方案、sandbox） */
   memberSpend(tenantId: string, memberId: string, sinceIso: string | null): Promise<number>;
   getMemberTier(tenantId: string, memberId: string): Promise<MemberTierRow | null>;

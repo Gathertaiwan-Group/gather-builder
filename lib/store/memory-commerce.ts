@@ -393,7 +393,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       const n = (counters.get(ck) ?? 0) + 1;
       counters.set(ck, n);
       const orderNo = `${order.order_prefix}-${day}-${String(n).padStart(4, "0")}`;
-      const snapshot = items.map((it) => ({ product_id: null, variant_id: null, name: it.name, variant_label: it.variant_label, sku: it.sku, unit_price: it.unit_price, qty: it.qty, line_total: it.line_total, item_kind: it.item_kind, ref_id: it.ref_id }));
+      const snapshot = items.map((it) => ({ product_id: null, variant_id: null, name: it.name, variant_label: it.variant_label, sku: it.sku, unit_price: it.unit_price, qty: it.qty, line_total: it.line_total, item_kind: it.item_kind, ref_id: it.ref_id, ...(it.snapshot ? { snapshot: clone(it.snapshot) } : {}) }));
       const row: OrderRow = {
         id,
         tenant_id: tenantId,
@@ -472,6 +472,9 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       const next = { ...o, status: "paid" as const, paid_at: paidAt, payment_sandbox: true, updated_at: now() };
       orders.set(id, next);
       bridge?.releaseSync(tenantId, id, "sandbox_payment");
+      // 審查 L1（同 SQL）：退回優惠券次數、點數折抵、儲值金
+      releaseCouponSync(tenantId, id);
+      credits?.releaseSync(tenantId, next);
       return clone(next);
     },
     async cancelOrder(tenantId, id, from, reason) {

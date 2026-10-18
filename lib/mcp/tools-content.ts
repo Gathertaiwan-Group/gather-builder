@@ -44,7 +44,7 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
   server.registerTool(
     "adjust_points",
     {
-      description: "店主手動加／扣會員點數（例如補償、活動贈點）。amount 正數加點（依設定天數到期）、負數扣點（不能扣超過可用點數）；reason 必填。寫入只增不改的帳本。**必須** confirm: true。需要 members:write。",
+      description: "店主手動加／扣會員點數（例如補償、活動贈點）。amount 正數加點（依設定天數到期）、負數扣點（不能扣超過可用點數）；reason 必填。寫入只增不改的帳本；受單次與每日上限（loyalty 設定 adjustMaxPerCall／adjustMaxPerDay，預設 5,000／20,000 點）。**必須** confirm: true。需要 points:adjust（members:write 不能調整）。",
       inputSchema: { site, ...memberRef, amount: z.number().int().describe("點數（正＝加、負＝扣）"), reason: z.string().describe("理由（會記在帳本與稽核）"), confirm },
       annotations: WRITE,
     },
@@ -91,7 +91,7 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
   server.registerTool(
     "adjust_balance",
     {
-      description: "店主手動增減會員儲值金（例如線下退款後扣回、補償）。amount 正數增加、負數扣除（不能超過可用）；reason 必填。寫入只增不改的帳本。**必須** confirm: true。需要 members:write。",
+      description: "店主手動增減會員儲值金（例如線下退款後扣回、補償）。amount 正數增加、負數扣除（不能超過可用）；reason 必填。寫入只增不改的帳本；受單次與每日上限（stored-value 設定 adjustMaxPerCall／adjustMaxPerDay，預設 NT$3,000／NT$10,000）。**必須** confirm: true。需要 wallet:adjust（members:write 不能調整）。",
       inputSchema: { site, ...memberRef, amount: z.number().int().describe("NT$（正＝增加、負＝扣除）"), reason: z.string(), confirm },
       annotations: WRITE,
     },

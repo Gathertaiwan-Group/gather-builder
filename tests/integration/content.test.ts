@@ -123,7 +123,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
   it("certificates：匯入、證號容錯查詢、不回生日、查無同一句話；查詢紀錄只增不改（42501）", async () => {
     const tenant = (await store.getTenantBySlug(slug))!;
     await importCertificates(ctx, { site: slug, csv: "證號,姓名,生日,類別\nTW-2026-0001,吳宗憲,1980-08-08,講師\n", confirm: true });
-    const r = await lookupCertificate(store, tenant, { certNo: "tw 2026 0001", ipHash: `it-${ts}` });
+    const r = await lookupCertificate(store, tenant, { certNo: "tw 2026 0001", name: "吳宗憲", ipHash: `it-${ts}` });
     expect(r).toMatchObject({ found: true, results: [{ certNo: "TW-2026-0001", name: "吳＊憲" }] });
     expect(JSON.stringify(r)).not.toContain("1980");
     expect(await lookupCertificate(store, tenant, { name: "吳宗憲", birth: "1980-08-09", ipHash: `it2-${ts}` })).toEqual({ found: false, message: LOOKUP_NOT_FOUND });

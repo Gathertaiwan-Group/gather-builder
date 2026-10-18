@@ -16,6 +16,8 @@ export const RESERVE_ERRORS: Record<string, { code: ServiceErrorCode; message: s
   "provider unavailable": { code: "invalid", message: "這位服務人員目前不開放預約" },
   "service unavailable": { code: "invalid", message: "這個服務目前不開放預約" },
   "already registered": { code: "conflict", message: "這個 Email 已報名過這個場次（每個 Email 每場限一筆；要多人參加請在同一筆選張數）" },
+  "pending qty": { code: "invalid", message: "尚未確認 Email 的報名每筆限 1 張（登入已驗證的會員帳號可一次報多張）" },
+  "pending cap": { code: "conflict", message: "目前待確認的報名太多，已改為登記候補" },
   "booking not found": { code: "not_found", message: "找不到這筆預約" },
 };
 

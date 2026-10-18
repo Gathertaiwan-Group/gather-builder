@@ -150,8 +150,9 @@ describe("M5：免費報名／候補 email 確認、每 email 上限", () => {
     const mail = mb.sent.find((m) => m.subject.includes("請確認報名"))!;
     expect(mail.text).toContain("/events/confirm?r=");
     expect(mail.text).not.toMatch(/簽到碼/);
-    // 名額被保留：別人報不到
-    await expect(registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("f") } })).rejects.toThrow(/名額已滿/);
+    // 名額被保留：別人報不到（第五六批審查 M6 起：未確認保留已達上限 → 改登記待確認的候補，不佔名額）
+    const other = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("f") } });
+    expect(other.kind).toBe("waitlisted");
     // 錯的簽章
     await expect(confirmEventEmail(deps(store, mb), { tenant: x.tenant, kind: "r", id: r.registration.id, token: "x".repeat(32) })).rejects.toThrow(/無效或已過期/);
     const ok = await confirmEventEmail(deps(store, mb), { tenant: x.tenant, kind: "r", id: r.registration.id, token: signFor("event-confirm-r", r.registration.id) });
@@ -163,13 +164,39 @@ describe("M5：免費報名／候補 email 確認、每 email 上限", () => {
     await expect(registerEvent(deps(store, mb), { tenant: x2.tenant, member: null, data: { sessionId: x2.s.id, ticketTypeId: x2.t.id, qty: 1, contact: { ...who("g"), email: "G@Example.com" } } })).rejects.toThrow(/已報名過/);
   });
 
+  it("審查 M6：未確認保留每筆 1 張、15 分鐘、每場次上限（預設容量 20%）；超過改登記候補不佔名額", async () => {
+    const store = newStore();
+    const x = await eventSite(store, "m6-cap", { capacity: 10 });
+    const mb = mailbox();
+    await expect(registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 2, contact: who("q1") } })).rejects.toThrow(/每筆限 1 張/);
+    const a = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("q2") } });
+    const b = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("q3") } });
+    expect([a.kind, b.kind]).toEqual(["pending", "pending"]);
+    if (a.kind !== "pending") return;
+    const ttl = new Date(a.registration.hold_expires_at!).getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(14 * 60_000);
+    expect(ttl).toBeLessThanOrEqual(15 * 60_000);
+    // 第 3 筆未確認（10 × 20% = 2）→ 改候補，名額只被 2 席佔用
+    const c = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("q4") } });
+    expect(c.kind).toBe("waitlisted");
+    expect(mb.sent.some((m) => m.subject.includes("請確認候補登記"))).toBe(true);
+    const regs = (await store.listRegistrations(x.tenant.id, { sessionId: x.s.id, status: ["held", "confirmed"], limit: 50, offset: 0 })).rows;
+    expect(regs.reduce((n, r) => n + r.qty, 0)).toBe(2);
+    // 同一人重送 → 同一筆候補，不重複
+    const c2 = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("q4") } });
+    expect(c2).toEqual(c);
+    // 確認其中一筆後，未確認數下降 → 新的未確認報名又可以保留
+    await confirmEventEmail(deps(store, mb), { tenant: x.tenant, kind: "r", id: a.registration.id, token: signFor("event-confirm-r", a.registration.id) });
+    expect((await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("q5") } })).kind).toBe("pending");
+  });
+
   it("逾期未確認：名額釋出、確認連結失效、本人可重新報名", async () => {
     const store = newStore();
     const x = await eventSite(store, "m5-exp", { capacity: 1 });
     const mb = mailbox();
     const r = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("h") } });
     if (r.kind !== "pending") throw new Error("expected pending");
-    vi.useFakeTimers({ now: Date.now() + 31 * 60_000 });
+    vi.useFakeTimers({ now: Date.now() + 16 * 60_000 });
     await expect(confirmEventEmail(deps(store, mb), { tenant: x.tenant, kind: "r", id: r.registration.id, token: signFor("event-confirm-r", r.registration.id) })).rejects.toThrow(/已過期/);
     const again = await registerEvent(deps(store, mb), { tenant: x.tenant, member: null, data: { sessionId: x.s.id, ticketTypeId: x.t.id, qty: 1, contact: who("i") } });
     expect(again.kind).toBe("pending");

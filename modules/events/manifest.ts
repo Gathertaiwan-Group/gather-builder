@@ -13,8 +13,10 @@ export const eventsSettings = z
     ownerEmail: z.email({ message: "通知信箱格式不正確" }).optional(),
     /** false = 只有會員能報名（預設可訪客報名） */
     allowGuest: z.boolean().optional(),
-    /** 免費報名與候補需要先點 email 確認連結（預設 true；確認前名額只保留 30 分鐘）。已登入且 email 已驗證的會員免確認 */
+    /** 免費報名與候補需要先點 email 確認連結（預設 true；確認前名額只保留 15 分鐘、每筆 1 張）。已登入且 email 已驗證的會員免確認 */
     requireEmailConfirm: z.boolean().optional(),
+    /** 審查 M6：每場次「尚未確認 email」的免費保留最多佔容量的幾 %（預設 20，至少 1 席）；超過的新報名改登記候補（不佔名額） */
+    unconfirmedHoldPercent: z.number().int().min(1).max(100).optional(),
   })
   .strict();
 export type EventsSettings = z.output<typeof eventsSettings>;

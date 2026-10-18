@@ -56,6 +56,49 @@ describe("帳本 FIFO（純函式，與 SQL builder_ledger_state 同規則）", 
     const e3 = [...e2, { kind: "reverse", amount: 30, expires_at: null, created_at: at(t0 + 12 * D), seq: 5 }];
     expect(computeLedgerState(e3, t0 + 12 * D)).toMatchObject({ balance: 80, available: 50, expiredDue: 30 });
   });
+  it("H1：到期後才退回 → 退回原批次（已到期）不復活；SQL 版同規則（integration 比對）", () => {
+    // A 500 明天到期、B 500 明年到期；單#1 用 500（耗 A）不付款；A 到期後單#2 用 500（耗 B）；單#1 逾期取消 +500
+    const e = [
+      { kind: "earn", amount: 500, expires_at: at(t0 + D), created_at: at(t0), order_id: "oa", seq: 1 },
+      { kind: "earn", amount: 500, expires_at: at(t0 + 365 * D), created_at: at(t0), order_id: "ob", seq: 2 },
+      { kind: "redeem", amount: -500, expires_at: null, created_at: at(t0 + 1000), order_id: "o1", seq: 3 },
+      { kind: "redeem", amount: -500, expires_at: null, created_at: at(t0 + 2 * D), order_id: "o2", seq: 4 },
+      { kind: "reverse", amount: 500, expires_at: null, created_at: at(t0 + 3 * D), order_id: "o1", seq: 5 },
+    ];
+    const s = computeLedgerState(e, t0 + 3 * D);
+    // 舊版會算成 B 剩 500 可用；正確：退回的 500 回到已到期的 A → 可用 0、待到期 500
+    expect(s).toMatchObject({ balance: 500, available: 0, expiredDue: 500 });
+    // 寫入 expire 後歸零
+    const s2 = computeLedgerState([...e, { kind: "expire", amount: -500, expires_at: null, created_at: at(t0 + 3 * D), order_id: null, seq: 6 }], t0 + 3 * D);
+    expect(s2).toMatchObject({ balance: 0, available: 0, expiredDue: 0 });
+    // 對照：A 未到期前就退回 → 回到 A，仍可用
+    const early = computeLedgerState(e.slice(0, 3).concat([{ kind: "reverse", amount: 500, expires_at: null, created_at: at(t0 + 2000), order_id: "o1", seq: 4 }]), t0 + 3000);
+    expect(early).toMatchObject({ balance: 1000, available: 1000, expiredDue: 0 });
+  });
+
+  it("H1／L4：改短有效天數後，舊扣帳不會被事後改分配到新批次", () => {
+    // A：365 天（舊設定）；扣 100（只能扣 A）；之後改成 30 天 → B 先到期；B 到期時應整批到期（100），A 剩 400
+    const e = [
+      { kind: "earn", amount: 500, expires_at: at(t0 + 365 * D), created_at: at(t0), order_id: "oa", seq: 1 },
+      { kind: "redeem", amount: -100, expires_at: null, created_at: at(t0 + D), order_id: "o1", seq: 2 },
+      { kind: "earn", amount: 100, expires_at: at(t0 + 32 * D), created_at: at(t0 + 2 * D), order_id: "ob", seq: 3 },
+    ];
+    expect(computeLedgerState(e, t0 + 40 * D)).toMatchObject({ balance: 500, available: 400, expiredDue: 100 });
+    // 新扣帳在 B 到期前發生 → 依 FIFO 先用 B（最早到期）
+    const e2 = [...e, { kind: "redeem", amount: -50, expires_at: null, created_at: at(t0 + 3 * D), order_id: "o2", seq: 4 }];
+    expect(computeLedgerState(e2, t0 + 40 * D)).toMatchObject({ balance: 450, available: 400, expiredDue: 50 });
+  });
+
+  it("H1：儲值金贈送額度同規則（spend 退回原批次；已到期的贈送不復活）", () => {
+    const e = [
+      { kind: "topup", amount: 1000, expires_at: null, created_at: at(t0), order_id: "t1", seq: 1 },
+      { kind: "topup", amount: 100, expires_at: at(t0 + 10 * D), created_at: at(t0), order_id: "t1", seq: 2 },
+      { kind: "spend", amount: -300, expires_at: null, created_at: at(t0 + D), order_id: "s1", seq: 3 }, // 贈送 100 先用＋本金 200
+      { kind: "refund", amount: 300, expires_at: null, created_at: at(t0 + 11 * D), order_id: "s1", seq: 4 },
+    ];
+    expect(computeLedgerState(e, t0 + 11 * D)).toMatchObject({ balance: 1100, available: 1000, expiredDue: 100 });
+  });
+
   it("規則：賺點 floor(淨額/100)×倍率、折抵上限、等級門檻", () => {
     expect(earnPoints(1299, { earnPerAmount: 100 }, 1.5)).toBe(18);
     expect(earnPoints(99, { earnPerAmount: 100 })).toBe(0);
@@ -186,7 +229,7 @@ describe("等級", () => {
 });
 
 describe("MCP 權限", () => {
-  it("adjust_points 要 confirm、理由、members:write；扣點不能超過可用；get_member_points 要 members:read", async () => {
+  it("adjust_points 要 confirm、理由；扣點不能超過可用；get_member_points 要 members:read", async () => {
     const store = newStore();
     const x = await loyaltyShop(store, "ly-perm");
     await expect(adjustPoints(ctxFor(store), { site: "ly-perm", memberId: x.member.id, amount: 10, reason: "測試" })).rejects.toMatchObject({ code: "confirm_required" });
@@ -197,5 +240,28 @@ describe("MCP 權限", () => {
     await adjustPoints(ctxFor(store), { site: "ly-perm", email: contact.email, amount: 25, reason: "客訴補償", confirm: true });
     const v = await getMemberPoints(ctxFor(store), { site: "ly-perm", memberId: x.member.id });
     expect(v).toMatchObject({ balance: 25, available: 25, ledger: [{ kind: "adjust", amount: 25, reason: "客訴補償" }] });
+  });
+
+  it("審查 M3：adjust_points 需要 points:adjust（members:write 不夠）；單次與每日上限；被拒也寫稽核", async () => {
+    const store = newStore();
+    const x = await loyaltyShop(store, "ly-m3");
+    const mw: Actor = { kind: "token", tokenId: "t", tenantId: x.tenant.id, scopes: ["members:read", "members:write"], label: "mw" };
+    await expect(adjustPoints(ctxFor(store, mw), { memberId: x.member.id, amount: 10, reason: "補償", confirm: true })).rejects.toMatchObject({ code: "forbidden" });
+    const pa: Actor = { ...mw, scopes: ["points:adjust"], label: "pa" };
+    await adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: 10, reason: "補償", confirm: true });
+    // 預設單次上限 5,000
+    await expect(adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: 5001, reason: "太多", confirm: true })).rejects.toThrow(/單次調整上限 5000/);
+    // 預設每日 20,000（已調 10）：4 次 5,000 → 第 4 次超過
+    for (let i = 0; i < 3; i++) await adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: 5000, reason: "活動", confirm: true });
+    await expect(adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: 5000, reason: "活動", confirm: true })).rejects.toThrow(/每日上限 20000/);
+    // 扣點也算進每日額度
+    await expect(adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: -4991, reason: "扣回", confirm: true })).rejects.toThrow(/每日上限/);
+    const audits = await store.listAudit(x.tenant.id, 50);
+    expect(audits.filter((a) => a.action === "loyalty.adjust_rejected")).toHaveLength(3);
+    expect(audits.filter((a) => a.action === "loyalty.adjust")).toHaveLength(4);
+    // 上限可設定（草稿→發布）
+    await configureModule(x.ctx, { site: "ly-m3", moduleId: "loyalty", config: { adjustMaxPerCall: 100, adjustMaxPerDay: 1_000_000 } });
+    await publishSite(x.ctx, { site: "ly-m3", confirm: true });
+    await expect(adjustPoints(ctxFor(store, pa), { memberId: x.member.id, amount: 101, reason: "x2", confirm: true })).rejects.toThrow(/單次調整上限 100/);
   });
 });

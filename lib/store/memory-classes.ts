@@ -135,6 +135,13 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
     const emailNorm = res.email_norm || null;
     if (emailNorm && [...regs.values()].some((r) => r.session_id === s!.id && r.email_norm === emailNorm && (r.status === "held" || r.status === "confirmed"))) fail("already registered");
     const pending = !!res.pending_email && !orderId;
+    // 審查 M6（同 SQL）：未確認保留每筆 1 張、每場次總量上限
+    if (pending) {
+      if (res.qty !== 1) fail("pending qty");
+      const cap = Math.max(1, res.pending_cap ?? 1_000_000);
+      const used = [...regs.values()].filter((r) => r.session_id === s!.id && r.status === "held" && !r.order_id && r.hold_expires_at && new Date(r.hold_expires_at).getTime() > Date.now()).length;
+      if (used + 1 > cap) fail("pending cap");
+    }
     let offer: WaitlistRow | undefined;
     if (res.offer_id) {
       offer = waitlist.get(res.offer_id);
@@ -161,7 +168,7 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       source: offer ? "waitlist" : "online",
       checkin_code_hash: res.checkin_code_hash || null,
       email_norm: emailNorm,
-      hold_expires_at: pending ? new Date(Date.now() + Math.max(5, Math.min(res.pending_minutes ?? 30, 120)) * 60_000).toISOString() : null,
+      hold_expires_at: pending ? new Date(Date.now() + Math.max(5, Math.min(res.pending_minutes ?? 15, 120)) * 60_000).toISOString() : null,
       email_confirmed_at: null,
       checked_in_at: null,
       checked_in_by: null,

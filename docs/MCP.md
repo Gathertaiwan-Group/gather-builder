@@ -39,10 +39,13 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 | `certificates:read` | 證照列表（姓名遮罩、不含生日）與查詢紀錄 |
 | `certificates:write` | 匯入證照 CSV、變更證照狀態（都需 `confirm: true`） |
 | `reviews:write` | 審核（公開／隱藏）與回覆商品評價（都需 `confirm: true`） |
+| `points:adjust` | `adjust_points`：手動加／扣點（`confirm` ＋理由；單次與每日上限；`members:write` 不再能調整） |
+| `wallet:adjust` | `adjust_balance`：手動增減儲值金（`confirm` ＋理由；單次與每日上限；`members:write` 不再能調整） |
 
 > 新 scope 是 2026-10 加的：之前發行的 token 沒有這些 scope，需重新發行（`create_site` 發出的 token 取呼叫者 scope 的交集）。
 > 第三批（invoices／shipping／marketing／newsletter）的 scope 於 2026-10-19 加入，同樣需要重新發行 token 才拿得到。
 > 第四批（classes:write／attendees:read／attendees:write）於 2026-10-19 加入，需要重新發行 token。
+> 第五六批審查（2026-10-19）：`points:adjust`、`wallet:adjust` 新增；原本靠 `members:write` 調整點數／儲值金的 token 需重新發行並明確給這兩個 scope。
 > 第六批（certificates:read／certificates:write／reviews:write）於 2026-10-19 加入，需要重新發行 token（平台 token 也是：`scripts/issue-platform-token.mjs`）。
 
 ## 在 Claude Code 連線
@@ -155,11 +158,11 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_enrollments` | attendees:read | 學員（email 遮罩、來源、完成單元數） |
 | `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
 | `get_member_points` | members:read | 會員點數：餘額、可用、即將到期批次（FIFO）、等級、帳本 |
-| `adjust_points` | members:write | 手動加／扣點（理由必填；扣點不能超過可用；**必須** `confirm: true`） |
+| `adjust_points` | points:adjust | 手動加／扣點（理由必填；扣點不能超過可用；單次上限預設 5,000 點、全站每日 20,000 點（loyalty 設定 `adjustMaxPerCall`／`adjustMaxPerDay`）；被拒也寫稽核；**必須** `confirm: true`） |
 | `list_tiers` | site:read | 會員等級（已發布／草稿）與各等級人數 |
 | `update_tiers` | modules:write | 整份取代等級（進草稿，發布後生效） |
 | `get_member_balance` | members:read | 會員儲值金：餘額、可用、贈送額度到期、帳本 |
-| `adjust_balance` | members:write | 手動增減儲值金（理由必填；扣款不能超過可用；**必須** `confirm: true`） |
+| `adjust_balance` | wallet:adjust | 手動增減儲值金（理由必填；扣款不能超過可用；單次上限預設 NT$3,000、全站每日 NT$10,000（stored-value 設定 `adjustMaxPerCall`／`adjustMaxPerDay`）；被拒也寫稽核；**必須** `confirm: true`） |
 | `create_topup_plan` / `update_topup_plan` | commerce:write | 儲值方案（付 X 得 X＋贈送、贈送到期天數）；上架或改已上架需 publish ＋ confirm |
 | `list_topup_plans` | site:read | 儲值方案列表 |
 | `translate_content` | content:write | AI 翻譯頁面／導覽／文章／商品／活動／課程（只翻文字欄位、進草稿、標記 AI；每日上限） |

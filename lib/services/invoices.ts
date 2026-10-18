@@ -162,6 +162,8 @@ export async function issueInvoiceForOrder(store: Store, tenant: TenantRow, orde
   // 儲值方案是預收款，不是銷售：發票在儲值金實際消費（訂單用儲值金付款）時開
   if (order.items.some((i) => (i as { item_kind?: string }).item_kind === "topup")) throw new ServiceError("invalid", `訂單 ${order.order_no} 是儲值方案（預收款），不開立發票；客人用儲值金消費時的訂單才開立`);
   const amount = invoiceAmount(order);
+  // 第五六批審查 L6：全額以點數／等級折扣折抵（實收 0 元）→ 不開立（點數折抵是折扣，不是銷售額）
+  if (amount <= 0) throw new ServiceError("invalid", `訂單 ${order.order_no} 實收金額為 0（全額以點數／折扣折抵），不需要開立發票`);
   const acct = await store.getInvoiceAccount(tenant.id);
   if (!acct) throw new ServiceError("invalid", "尚未設定發票憑證（請平台擁有者到後台「電子發票」輸入）");
   const provider = await providerFactory(store, tenant.id);
@@ -244,6 +246,10 @@ export async function autoIssueOnPaid(store: Store, tenant: TenantRow, order: Or
     const settings = await publishedInvoiceSettings(store, tenant);
     if (settings.issueMode !== "auto_on_paid" || order.payment_sandbox) return null;
     if (!(await store.getInvoiceAccount(tenant.id))) return null;
+    if (invoiceAmount(order) <= 0) {
+      await store.insertAudit({ tenant_id: tenant.id, actor: "system:auto_invoice", action: "invoice.skip_zero", payload: { orderNo: order.order_no } });
+      return null;
+    }
     return await issueInvoiceForOrder(store, tenant, order, "system:auto_invoice");
   } catch (e) {
     console.error(`[invoice] 自動開立失敗 order=${order.order_no}`, e instanceof Error ? e.message : e);
@@ -260,6 +266,11 @@ export async function retryDueInvoices(store: Store, limit = 50) {
     if (!tenant) continue;
     const order = await store.getOrderById(tenant.id, d.order_id);
     if (!order) continue;
+    if (invoiceAmount(order) <= 0) {
+      // L6：0 元訂單（舊版卡住的列）→ 停止自動重試，留言說明
+      await store.updateInvoice(tenant.id, d.id, ["pending", "failed"], { status: "failed", error: "［不需開立］實收金額為 0（全額以點數／折扣折抵）", attempts: MAX_AUTO_ATTEMPTS });
+      continue;
+    }
     try {
       const r = await issueInvoiceForOrder(store, tenant, order, "system:cron");
       if (r.status === "issued") issued++;

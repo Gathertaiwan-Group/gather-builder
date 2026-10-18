@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { ctxFor, newStore } from "./helpers";
 import { createSite } from "@/lib/services/sites";
 import { publishSite } from "@/lib/services/publish";
+import { configureModule } from "@/lib/services/modules";
 import { LOOKUP_NOT_FOUND, importCertificates, listCertificateLookups, lookupCertificate, normalizeCertNo, parseCsv, setCertificateStatus, validateCertificateCsv } from "@/lib/services/certificates";
 import type { Actor } from "@/lib/tokens";
 import type { Store } from "@/lib/store/types";
@@ -53,13 +54,13 @@ describe("公開查詢", () => {
     const { tenant } = await site(store);
     expect(normalizeCertNo(" ｉｆａｒ－ｄ－２０２４－０１４２ ")).toBe("IFARD20240142");
     for (const q of ["IFAR-D-2024-0142", "ifar d 2024 0142", "IFARD20240142", "ＩＦＡＲ－Ｄ－２０２４－０１４２"]) {
-      const r = await lookupCertificate(store, tenant, { certNo: q, ipHash: `ip-${q}` });
+      const r = await lookupCertificate(store, tenant, { certNo: q, name: "王雅琳", ipHash: `ip-${q}` });
       expect(r).toMatchObject({ found: true, results: [{ certNo: "IFAR-D-2024-0142", name: "王＊琳", category: "花藝設計師", status: "valid" }] });
       expect(JSON.stringify(r)).not.toContain("1988");
     }
     const exp = await lookupCertificate(store, tenant, { name: "陳小明", birth: "1975-01-02", ipHash: "ip-x" });
     expect(exp).toMatchObject({ found: true, results: [{ status: "expired", statusLabel: "已過期" }] });
-    const rev = await lookupCertificate(store, tenant, { certNo: "IFAR-X-2023-0009", ipHash: "ip-y" });
+    const rev = await lookupCertificate(store, tenant, { certNo: "IFAR-X-2023-0009", name: "林美", ipHash: "ip-y" });
     expect(rev).toMatchObject({ results: [{ status: "revoked" }] });
   });
 
@@ -68,6 +69,9 @@ describe("公開查詢", () => {
     const { ctx, tenant } = await site(store);
     const cases = [
       { certNo: "NOPE-0000" },
+      // 審查 M5：證號正確但沒給姓名／姓名錯 → 同一句話
+      { certNo: "IFAR-D-2024-0142" },
+      { certNo: "IFAR-D-2024-0142", name: "王小琳" },
       { name: "王雅琳", birth: "1988-03-13" },
       { name: "王雅琳" },
       { birth: "1988-03-12" },
@@ -79,6 +83,19 @@ describe("公開查詢", () => {
     }
     expect((await listCertificateLookups(ctx, { site: "ifar-like" })).lookups.every((l) => l.found === false)).toBe(true);
     expect(JSON.stringify(await listCertificateLookups(ctx, { site: "ifar-like" }))).not.toContain("王");
+  });
+
+  it("審查 M5：只用證號查詢預設關閉；店主開 allowCertNoOnly（草稿→發布）後才可只填證號", async () => {
+    const store = newStore();
+    const { ctx, tenant } = await site(store);
+    expect((await lookupCertificate(store, tenant, { certNo: "IFAR-D-2024-0142", ipHash: "m5-a" })).found).toBe(false);
+    await configureModule(ctx, { site: "ifar-like", moduleId: "certificates", config: { allowCertNoOnly: true } });
+    expect((await lookupCertificate(store, tenant, { certNo: "IFAR-D-2024-0142", ipHash: "m5-b" })).found).toBe(false); // 草稿未發布
+    await publishSite(ctx, { site: "ifar-like", confirm: true });
+    const t2 = (await store.getTenantBySlug("ifar-like"))!;
+    expect((await lookupCertificate(store, t2, { certNo: "IFAR-D-2024-0142", ipHash: "m5-c" })).found).toBe(true);
+    // 開了以後若有填姓名仍要相符
+    expect((await lookupCertificate(store, t2, { certNo: "IFAR-D-2024-0142", name: "錯的人", ipHash: "m5-d" })).found).toBe(false);
   });
 
   it("限流：同一 IP 10 分鐘 10 次；同一證號（換 IP）每小時 10 次", async () => {
@@ -95,10 +112,10 @@ describe("公開查詢", () => {
     const { ctx, tenant } = await site(store);
     await expect(setCertificateStatus(ctx, { site: "ifar-like", certNo: "ifard20240142", status: "suspended" })).rejects.toMatchObject({ code: "confirm_required" });
     await setCertificateStatus(ctx, { site: "ifar-like", certNo: "ifard20240142", status: "suspended", confirm: true });
-    expect(await lookupCertificate(store, tenant, { certNo: "IFAR-D-2024-0142", ipHash: "a" })).toMatchObject({ results: [{ status: "suspended" }] });
+    expect(await lookupCertificate(store, tenant, { certNo: "IFAR-D-2024-0142", name: "王雅琳", ipHash: "a" })).toMatchObject({ results: [{ status: "suspended" }] });
     const other = await site(store, "other-assoc");
     await store.upsertCertificates([]);
-    expect((await lookupCertificate(store, other.tenant, { certNo: "IFARD20240142", ipHash: "b" })).found).toBe(true); // 同 CSV 匯入到別站：各站獨立
+    expect((await lookupCertificate(store, other.tenant, { certNo: "IFARD20240142", name: " 王 雅琳", ipHash: "b" })).found).toBe(true); // 同 CSV 匯入到別站：各站獨立
     const empty = ctxFor(store);
     await createSite(empty, { slug: "no-certs", name: "y", modules: ["certificates"] });
     await publishSite(empty, { site: "no-certs", confirm: true }).catch(() => undefined);

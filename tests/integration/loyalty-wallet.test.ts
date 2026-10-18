@@ -97,13 +97,70 @@ describe.skipIf(!enabled)("第五批 Supabase 實作（整合）", () => {
     for (const who of [member.id, m2.id]) {
       const sql = await store.creditState("points", tenantCache!.id, who);
       const all = await store.allCreditEntries("points", tenantCache!.id, who);
-      const tsState = computeLedgerState(all.map((e) => ({ ...e, seq: e.id })));
+      const tsState = computeLedgerState(all);
       expect(sql).toMatchObject({ balance: tsState.balance, available: tsState.available, expiredDue: tsState.expiredDue });
     }
     expect(await store.creditState("points", tenantCache!.id, m2.id)).toMatchObject({ balance: 70, available: 20, expiredDue: 50 });
     expect(await store.creditExpire("points", tenantCache!.id, m2.id)).toBe(50);
     expect(await store.creditExpire("points", tenantCache!.id, m2.id)).toBe(0);
     expect(await store.creditState("points", tenantCache!.id, m2.id)).toMatchObject({ balance: 20, available: 20, expiredDue: 0 });
+  });
+
+  it("H1：到期後才退回不復活——SQL builder_ledger_state 與 TS computeLedgerState 逐案一致（含改短有效天數、儲值贈送）", async () => {
+    const { randomUUID } = await import("node:crypto");
+    const now = Date.now();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const cases: { ledger: "points" | "wallet"; rows: { kind: string; amount: number; expires_at: string | null; created_at: string; order_id: string | null }[]; expect: { balance: number; available: number; expiredDue: number } }[] = [];
+    const o1 = randomUUID(), o2 = randomUUID(), oa = randomUUID(), ob = randomUUID();
+    cases.push({
+      ledger: "points",
+      rows: [
+        { kind: "earn", amount: 500, expires_at: iso(now - 2 * D), created_at: iso(now - 5 * D), order_id: oa },
+        { kind: "earn", amount: 500, expires_at: iso(now + 300 * D), created_at: iso(now - 5 * D), order_id: ob },
+        { kind: "redeem", amount: -500, expires_at: null, created_at: iso(now - 4 * D), order_id: o1 },
+        { kind: "redeem", amount: -500, expires_at: null, created_at: iso(now - D), order_id: o2 },
+        { kind: "reverse", amount: 500, expires_at: null, created_at: iso(now - 1000), order_id: o1 },
+      ],
+      expect: { balance: 500, available: 0, expiredDue: 500 },
+    });
+    cases.push({
+      ledger: "points",
+      rows: [
+        { kind: "earn", amount: 500, expires_at: iso(now + 300 * D), created_at: iso(now - 40 * D), order_id: oa },
+        { kind: "redeem", amount: -100, expires_at: null, created_at: iso(now - 39 * D), order_id: o1 },
+        { kind: "earn", amount: 100, expires_at: iso(now - D), created_at: iso(now - 38 * D), order_id: ob },
+        { kind: "redeem", amount: -50, expires_at: null, created_at: iso(now - 37 * D), order_id: o2 },
+      ],
+      expect: { balance: 450, available: 400, expiredDue: 50 },
+    });
+    cases.push({
+      ledger: "wallet",
+      rows: [
+        { kind: "topup", amount: 1000, expires_at: null, created_at: iso(now - 20 * D), order_id: oa },
+        { kind: "topup", amount: 100, expires_at: iso(now - 5 * D), created_at: iso(now - 20 * D), order_id: oa },
+        { kind: "spend", amount: -300, expires_at: null, created_at: iso(now - 19 * D), order_id: o1 },
+        { kind: "refund", amount: 300, expires_at: null, created_at: iso(now - D), order_id: o1 },
+      ],
+      expect: { balance: 1100, available: 1000, expiredDue: 100 },
+    });
+    for (const [i, c] of cases.entries()) {
+      const m = (await store.insertMember({ tenant_id: tenantCache!.id, email: `h1-${i}-${ts}@example.com`, password_hash: "x", name: `H1-${i}`, phone: null }))!;
+      // 逐筆 insert（seq 依寫入順序）
+      for (const r of c.rows) {
+        const ins = await db.from(c.ledger === "points" ? "builder_points_ledger" : "builder_wallet_ledger").insert({ tenant_id: tenantCache!.id, member_id: m.id, actor: "itest", reason: "H1", ...r });
+        expect(ins.error).toBeNull();
+      }
+      const sql = await store.creditState(c.ledger, tenantCache!.id, m.id);
+      const tsState = computeLedgerState(await store.allCreditEntries(c.ledger, tenantCache!.id, m.id));
+      expect(sql).toMatchObject(c.expect);
+      expect({ balance: tsState.balance, available: tsState.available, expiredDue: tsState.expiredDue }).toEqual(c.expect);
+      // 寫 expire 後兩邊仍一致、待到期歸零
+      await store.creditExpire(c.ledger, tenantCache!.id, m.id);
+      const sql2 = await store.creditState(c.ledger, tenantCache!.id, m.id);
+      const ts2 = computeLedgerState(await store.allCreditEntries(c.ledger, tenantCache!.id, m.id));
+      expect(sql2).toMatchObject({ balance: ts2.balance, available: ts2.available, expiredDue: 0 });
+      expect(sql2.available).toBe(c.expect.available);
+    }
   });
 
   it("儲值：付款成功才入帳（hook 冪等）；帳本 update／delete → 42501", async () => {

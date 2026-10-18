@@ -23,6 +23,8 @@ export const SCOPES = {
   "certificates:read": "讀取證照資料與查詢紀錄（姓名遮罩、不含生日）",
   "certificates:write": "匯入證照 CSV、變更證照狀態（都需 confirm）",
   "reviews:write": "審核（公開／隱藏）與回覆商品評價（都需 confirm）",
+  "points:adjust": "手動加／扣會員點數（需 confirm＋理由；受單次與每日上限；members:write 不再能調整）",
+  "wallet:adjust": "手動加／扣會員儲值金（需 confirm＋理由；受單次與每日上限；members:write 不再能調整）",
 } as const;
 
 export type Scope = keyof typeof SCOPES;

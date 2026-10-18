@@ -39,7 +39,7 @@
 
 - MCP：`Authorization: Bearer <token>` → `authenticateBearer()` 比對 `builder_api_tokens.token_hash`（sha256，原文只在建立時顯示一次）、未撤銷 → `Actor { tenantId, scopes }`，更新 `last_used_at`。
 - 刻意不做 OAuth 流程、不提供 `/.well-known/oauth-*`、401 不帶 `resource_metadata`（避免客戶端誤走 OAuth discovery）。
-- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`、`classes:write`、`attendees:read`、`attendees:write`、`certificates:read`、`certificates:write`、`reviews:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
+- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`、`classes:write`、`attendees:read`、`attendees:write`、`certificates:read`、`certificates:write`、`reviews:write`、`points:adjust`、`wallet:adjust`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
 - 預覽連結：HMAC-SHA256 簽 `{ tenantId, exp }`，1 小時有效（`lib/preview.ts`）。
 - 後台：單一密碼 → HMAC cookie（`lib/adminAuth.ts`），middleware 擋 `/admin` 與 `/api/admin`，頁面與 API 再驗一次；後台 POST 檢查 Origin 防 CSRF。
 - token 發行：發出的 scopes 必須是呼叫者 scopes 的子集（`issue_site_token` 超出直接拒絕；`create_site` 取交集，沒有任何網站 scope 就不發）。
@@ -114,7 +114,7 @@
 ## 行銷（coupons／referral／newsletter／ai-chat）
 
 - **折扣碼**：`applyPromotions()` 在 `priceCart()` 之後計折扣（只算商品小計），第一版一單一張。**原子扣用在 `builder_place_order` 同一交易**：`used_count < max_uses` 條件更新＋`builder_coupon_user_counts` upsert（`count < per_user_limit`），任一不足 raise 整筆回滾，併發不超用（真 DB 測 8 搶 3）。取消／逾期由 `builder_cancel_order` 呼叫 `builder_release_coupon`（`released_at is null` 冪等）。每人＝**正規化後的 email**（會員用帳號 email、訪客用結帳 email；小寫、去 +tag、gmail 去點，`lib/email-normalize.ts`），會員與訪客同信箱視為同一人（2026-10 審查 M-3；2026-10 以前以 member id 記的舊次數仍會一併計入）。**免運門檻一律用折扣後的商品金額判斷**（`flatShippingFee`／`resolveShipping` 收 subtotal − discount，試算與下單同一套；M-2）。
-- **推薦**：會員推薦碼；分享連結 `/s/<slug>/api/ref/<碼>` 設 HttpOnly cookie，結帳只從 cookie 讀（表單欄位不採信），自己推薦自己（同會員或同 email）忽略。付款成功 hook：首次付款（該人無其他已付款訂單）→ `builder_referrals` unique(tenant, referee_key) 保證只一次 → 發限推薦人本人、單次、有效期的回饋券。**H-1（2026-10 審查）**：referee_key 與自推比對都用正規化 email（alias 開分身無效）；每位推薦人每月上限 `rewardMonthlyLimit`（預設 10，台北月）；被推薦訂單取消 → `revokeReferralByOrder`（revoked_at 條件更新，冪等）＋停用回饋券（已被使用的無法收回，記稽核 `referral.revoke`）。KOL 分潤 `builder_referral_ledger`：service_role 只有 select／insert（只增不改），取消時另記 reverse，unique(order_id, kind) 保證只各一筆。
+- **推薦**：會員推薦碼；分享連結 `/s/<slug>/api/ref/<碼>` 設 HttpOnly cookie，結帳只從 cookie 讀（表單欄位不採信），自己推薦自己（同會員或同 email）忽略。付款成功 hook：首次付款（該人無其他已付款訂單）→ `builder_referrals` unique(tenant, referee_key) 保證只一次 → 發限推薦人本人、單次、有效期的回饋券。**H-1（2026-10 審查）**：referee_key 與自推比對都用正規化 email（alias 開分身無效）；每位推薦人每月上限 `rewardMonthlyLimit`（預設 10，台北月）；被推薦訂單取消 → `revokeReferralByOrder`（revoked_at 條件更新，冪等）＋停用回饋券（已被使用的無法收回，記稽核 `referral.revoke`）。KOL 分潤基數＝商品實付淨額（小計 − 折扣碼 − 等級折扣 − 點數折抵，與賺點、`builder_member_spend` 一致；2026-10 第五六批審查 M4）；分潤 `builder_referral_ledger`：service_role 只有 select／insert（只增不改），取消時另記 reverse，unique(order_id, kind) 保證只各一筆。
 - **電子報**：雙重確認（確認 token sha256、48h、一次性）；群發 `draft → sending` 條件式只成功一次、`sent` 後拒絕；寄送列 unique(broadcast, subscriber) 只建「已確認」者、寄前再查一次狀態；**每批先原子宣告 queued → sending（`builder_claim_deliveries`，FOR UPDATE SKIP LOCKED），只寄自己宣告到的列，併發接續不重寄；宣告超過 15 分鐘仍未完成＝寄了沒有不知道 → 標 failed、不重寄（M-1）**；每次 50 封、逐封記錄結果、`remaining` 再呼叫接續不重寄。退訂 token＝HMAC(PREVIEW_SECRET, broadcast:subscriber)，DB 存 sha256、一次性；退訂頁與**確認頁**都是 GET 只顯示按鈕、POST 才生效（L-3）。**防轟炸（H-2）**：訂閱端點要同源 Origin＋`Content-Type: application/json`；每個信箱（正規化）同站 24 小時最多 1 封確認信、跨所有租戶 24 小時最多 3 封；未確認期間（連結仍有效）重複訂閱不換 token、不再寄。🔴 `is_test` 租戶群發只寄 `gathertaiwan@gmail.com`；RFC 2606 保留網域（example.com、.test…）一律不實際寄出（`lib/mail.ts`）。
 - **AI 客服**：知識＝該租戶已發布頁面文字＋已上架商品＋運費＋設定 `extraKnowledge`；Gemini REST（`gemini-2.5-flash`、`thinkingBudget: 0`，`GEMINI_MODEL` 可覆寫）。限流：每站每 IP 每日、每站每日（`builder_rate_hit`），被擋不呼叫 AI。回覆中不在商品／運費資料內的金額一律遮成「價格請以商品頁為準」——比對 NT$／NT／NTD／TWD／新台幣／＄、數字或中文數字＋元／塊／圓（含「萬」）；折扣語句（打 8 折、85 折、現折、折抵、減 N 元）一律遮（L-2）。對話以 (tenant, session) 存 `builder_ai_chats`；訪客訊息出現 email／電話就寫一筆詢問（每段對話一次）。
 
@@ -127,8 +127,8 @@
 - **簽章連結不存原文**：簽到碼、候補保留連結、預約自助管理連結都是 `HMAC(PREVIEW_SECRET, 用途:id)`，伺服器可重算；簽到碼 DB 只存 sha256。換 `PREVIEW_SECRET` 會讓舊連結與簽到碼失效。
 - **個資**：名單／預約／學員列表一律遮罩（`maskContact`）；查看完整資料、匯出 CSV 寫 `builder_pii_access_log`（只增不改：service_role 只有 select／insert）＋稽核。CSV 每格經 `csvCell()`：`= + - @`、Tab、CR 開頭前置單引號、全部加雙引號（防 CSV injection）、加 BOM。
 - 時間一律 Asia/Taipei（固定 UTC+8，無夏令時間）。
-- **sandbox 付款不佔名額（M3）**：sandbox 付款成功走 `builder_mark_paid_sandbox`（同一交易轉 paid＋`payment_sandbox`＋把報名／預約保留標 cancelled `sandbox_payment`），之後跑取消側 hooks（候補遞補）；課程本來就不開通。
-- **防假資料灌爆（M5）**：每個正規化 email 每場次只能一筆有效報名（SQL 鎖場次後檢查 `email_norm`）；免費報名與候補預設要 email 確認（events 設定 `requireEmailConfirm`，預設 true；已登入且 email 已驗證的會員免確認）：免費報名先 held＋`hold_expires_at`（30 分鐘，逾期在下次報名／遞補時由 SQL 標 expired），候補先 `unconfirmed`（30 分鐘）；確認連結 `/s/<slug>/events/confirm?r|w=<id>&t=HMAC`，GET 只顯示按鈕、POST 才確認。免費預約每個 email 每天上限 `freeBookingsPerEmailPerDay`（預設 2，`builder_rate_hit`）。每 IP 每小時 12 次的表單限流照舊。
+- **sandbox 付款不佔名額（M3）**：sandbox 付款成功走 `builder_mark_paid_sandbox`（同一交易轉 paid＋`payment_sandbox`＋把報名／預約保留標 cancelled `sandbox_payment`＋**退回點數折抵、儲值金、優惠券次數**（第五六批審查 L1，各自冪等）），之後跑取消側 hooks（候補遞補）；這些取消側 hook 失敗時補做仍適用（L2，不會被標成不再適用）；課程本來就不開通。
+- **防假資料灌爆（M5）**：每個正規化 email 每場次只能一筆有效報名（SQL 鎖場次後檢查 `email_norm`）；免費報名與候補預設要 email 確認（events 設定 `requireEmailConfirm`，預設 true；已登入且 email 已驗證的會員免確認）：免費報名先 held＋`hold_expires_at`（**15 分鐘、每筆只能 1 張**；逾期在下次報名／遞補時由 SQL 標 expired），**每場次未確認保留最多佔容量 `unconfirmedHoldPercent`%（預設 20、至少 1 席），超過的新報名改登記「待確認的候補」、不佔名額**（`builder_reserve_event` 鎖場次後判斷，併發也不超過；第五六批審查 M6），候補先 `unconfirmed`（30 分鐘）；確認連結 `/s/<slug>/events/confirm?r|w=<id>&t=HMAC`，GET 只顯示按鈕、POST 才確認。免費預約每個 email 每天上限 `freeBookingsPerEmailPerDay`（預設 2，`builder_rate_hit`）。每 IP 每小時 12 次的表單限流照舊。
 - **遞補連結不可轉讓（M4）**：認領時聯絡 email（正規化）必須等於候補者的 `email_norm`，候補時有登入會員就必須同一會員；SQL 認領條件另比對 email_norm。
 - 報名成功的轉址不帶 email／簽到碼（L6）；未付款預約改期會把訂單付款期限縮到不晚於新時段（L8）；確認信「已付」顯示訂單實付（L7）；遞補略過停用或不在販售期間的票種（L3）；取消場次先標 cancelled 再列報名（L4）；首單判斷 `countPaidOrdersFor` 用 SQL `builder_norm_email`（與 `lib/email-normalize.ts` 同規則，真 DB 比對測試，L5）；CSV 也跳脫全形 ＝＋－＠（L1）。
 - `builder_pii_access_log` 只增不改：service_role 的 update／delete／truncate 已收回（M1，真 DB 42501 測試）。
@@ -166,26 +166,27 @@
 ## 會員經營（loyalty 點數＋等級／stored-value 儲值金）共用規則
 
 - **帳本只增不改**：`builder_points_ledger`、`builder_wallet_ledger`。service_role 只有 select／insert（update／delete／truncate 收回，真 DB 測 42501）。**餘額＝帳本加總**，沒有可改的餘額欄位。唯一寫入入口是 SQL `builder_ledger_post`：每位會員一把交易鎖（`pg_advisory_xact_lock`）、`ref` 冪等鍵（unique(tenant, ref)，例如 `order:<id>:earn`）、寫入前先把已到期的剩餘寫成 `expire`；`strict` 扣帳可用不足就 raise、`capped` 扣到可用為止（不足記 `meta.shortfall`）。
-- **到期（FIFO）**：批次＝正數且非退回的分錄（earn／topup／adjust＋，可帶到期日，null＝不到期排最後）；消耗（負數分錄減掉退回）依到期日先後分配；分配後仍有剩且已過期＝待到期，下一次記帳或每日 cron（`builder_ledger_expire`）寫成 expire。退回（reverse／refund 正數）讓消耗變少，點數回到最後被用掉的批次（那批已到期就會再到期）。SQL `builder_ledger_state` 與 TS `lib/loyalty/ledger.ts` 同一套規則（真 DB 比對測試）。已知限制：調短到期天數後，新批次可能比舊批次先到期，消耗會先算到最早到期的批次。
+- **到期（FIFO，依時間重播；2026-10 第五六批審查 H1 改寫）**：帳本依寫入順序 `seq` 逐筆重播——批次＝正數且非退回的分錄（earn／topup／adjust＋，可帶到期日，null＝不到期）；每筆扣帳**在它發生的當下**只從當時未到期的批次扣（依到期日先後，收回已賺點數優先扣同一張訂單的批次），`expire` 只扣當時已到期的批次。帳本只增不改，所以每筆扣帳從哪些批次扣了多少是確定、不會被事後改寫的（重播即得分配明細）。**退回（reverse＋／refund＋）回到原扣帳的批次**（先同訂單的 redeem／spend 分配，新到舊）——原批次已到期，退回的部分就屬於那個已到期批次，算入待到期、下一次記帳或每日 cron（`builder_ledger_expire`）寫成 expire，**不會跑到別的未到期批次而復活**。調短到期天數後，舊的扣帳也不會被事後改分配到新批次。SQL `builder_ledger_state`（0030，plpgsql 逐筆）與 TS `lib/loyalty/ledger.ts` 逐行同規則（真 DB 逐案比對測試：到期後才退回、改短有效天數、儲值贈送）。
 - **下單原子扣用**：`builder_place_order`／`builder_place_class_order`（簽章不變）在同一交易呼叫 `builder_apply_order_credits`：寫回訂單 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid`，並以 strict 扣點／扣儲值金——不足整筆回滾（真 DB：可用 300 點、8 張訂單各用 100 點只成立 3 張）。取消／逾期由 `builder_cancel_order` 同交易呼叫 `builder_release_order_credits` 退回（ref 冪等）。
 - **計價**（`lib/services/credits.ts`，server 端；前端只送想用多少）：商品（扣折扣碼）→ 等級折扣 % → 點數折抵（上限＝商品金額 × `maxRedeemPercent`，超過自動降到上限；1 點＝`pointValue` 元）→ 加運費 → 儲值金（最多付到剩下全部）。`total`＝要用付款方式收的錢。免運門檻仍用「折扣碼後」的商品金額（等級／點數折抵不影響免運）。
 - **🔴 線上付款最低 NT$30**：折抵後剩 1–29 元卻選線上付款 → **拒絕**並說明（少用一點點數／儲值金、全額折抵、或改線下匯款），不會默默改付款方式。剩 0 元且有用點數／儲值金 → 付款方式改為 `credit`（不經金流）、下單後立即條件式轉已付款並跑付款成功流程。
-- **發票**：金額＝`total + wallet_paid`（儲值金是預收款，消費時才是銷售）；等級折扣與點數折抵列為折扣。儲值方案訂單不開發票。
+- **發票**：金額＝`total + wallet_paid`（儲值金是預收款，消費時才是銷售）；等級折扣與點數折抵列為折扣。儲值方案訂單不開發票。**實收 0 元（全額以點數／折扣折抵）不開立**：自動開立略過並記稽核 `invoice.skip_zero`、手動開立回清楚訊息、cron 把舊版卡住的 0 元列停止重試（審查 L6）。
+- **店主手動調整**（審查 M3）：`adjust_points` 要 `points:adjust`、`adjust_balance` 要 `wallet:adjust`（`members:write` 不再能調整）；單次與每日（全站、台北日）上限可設定（loyalty／stored-value 設定 `adjustMaxPerCall`／`adjustMaxPerDay`，預設 5,000／20,000 點、NT$3,000／NT$10,000），加點扣點都算額度；成功與被拒都寫稽核。已知限制：每日上限是「讀加總再寫」，兩個同時送出的調整可能各自通過而略超過上限一筆。
 - 只在 shop 結帳提供折抵（活動／預約／課程訂單目前不能用點數或儲值金，但付款後一樣會賺點）。
 
 ### loyalty（點數＋等級）
 
-- **賺點**：付款成功 hook（只在真正轉成已付款那次；sandbox 不跑）依「商品淨額＝小計 − 折扣碼 − 等級折扣 − 點數折抵」（不含運費）× 等級倍率：`floor(floor(淨額 / earnPerAmount) × 倍率)`，到期日＝付款時 + `pointsExpireDays`（預設 365）。ref `order:<id>:earn` 冪等。儲值方案訂單不賺（儲值金消費時才賺）。
+- **賺點**：付款成功 hook（只在真正轉成已付款那次；sandbox 不跑）依「商品淨額＝小計 − 折扣碼 − 等級折扣 − 點數折抵」（`merchandiseNet()`，KOL 分潤基數也用它，審查 M4）（不含運費）× 等級倍率：`floor(floor(淨額 / earnPerAmount) × 倍率)`，到期日＝付款時 + `pointsExpireDays`（預設 365）。ref `order:<id>:earn` 冪等。儲值方案訂單不賺（儲值金消費時才賺）。
 - **取消沖回**：折抵的點數由 SQL 同交易退回；這張訂單賺到的點數以 `capped` 沖回（ref `order:<id>:earn_reverse`）——🔴 若已被用掉導致不足：**扣到 0 為止、不讓餘額變負、不追討**，不足部分記在分錄 `meta.shortfall` 與稽核 `loyalty.reverse_shortfall`。
 - **等級**：依 `tierWindowMonths`（預設 12，0＝累計）內已付款的商品淨額（`builder_member_spend`，不含運費、儲值、sandbox）取最高達標等級；`builder_member_tiers` 是快照（超過 1 天自動重算），付款／取消 hook 即時重算，每日 cron 重算全部（降級）。等級影響賺點倍率與等級折扣（商品金額 %）。等級設定在模組設定（`update_tiers`／`configure_module`，草稿→發布）。
 - 會員中心「我的點數」：可用點數、即將到期批次、等級與升級門檻、點數紀錄。
 
 ### stored-value（儲值金）
 
-- **儲值方案** `builder_topup_plans`：付 `pay_amount`（≥ 30）→ 入帳本金（不到期）＋ `bonus_amount` 贈送額度（`bonus_expire_days` 天後到期，可不設）。上架／改已上架方案需 publish＋confirm。
+- **儲值方案** `builder_topup_plans`：付 `pay_amount`（≥ 30）→ 入帳本金（不到期）＋ `bonus_amount` 贈送額度（`bonus_expire_days` 天後到期，可不設）。上架／改已上架方案需 publish＋confirm。**下單時把方案快照（名稱、金額、贈送、贈送到期天數）存進訂單 items**，付款入帳只讀快照——店主事後改方案或下架都不影響已下的單（審查 M1；2026-10-19 以前沒有快照的訂單退回讀現行方案並記稽核 `wallet.topup_no_snapshot`）。
 - **購買**：必須登入會員；`placeClassOrder` 建 `item_kind=topup` 的訂單（不能用折扣碼／點數／儲值金），付款方式、sandbox 只限預覽（H1）、notify 權威回查全部沿用。**付款真正成功那一次**（onOrderPaid hook；sandbox 不跑）才入帳，ref `order:<id>:topup`／`:bonus` 冪等。儲值訂單不開發票、不賺點、不計入等級消費。
 - **消費**：結帳選用儲值金（全額或部分），下單交易內 strict 扣款（ref `order:<id>:spend`），取消／逾期同交易退回（refund，ref `:spend_refund`）。FIFO：會到期的贈送額度先用，本金最後。
-- **儲值訂單取消**：收回本金＋贈送（`capped`，ref `:topup_reverse`）；🔴 已用掉的部分只收回到 0（不讓餘額變負），不足記 `meta.shortfall`＋稽核 `wallet.reverse_shortfall`，由店家與客人另行處理（例如退款時扣除已用金額）。不會自動退款到信用卡。
+- **儲值訂單取消**：收回本金＋贈送（`capped`，ref `:topup_reverse`）；🔴 已用掉的部分只收回到 0（不讓餘額變負），不足記 `meta.shortfall`＋稽核 `wallet.reverse_shortfall`，由店家與客人另行處理（例如退款時扣除已用金額）。不會自動退款到信用卡。**確認前先試算（審查 M2）**：`get_order`／後台訂單頁顯示 `topupReversal`（入帳、已用、可收回、不足），`cancel_order` 的確認訊息寫明「客人已用掉 X、只能收回 Y、不足 Z，退款時請只退可收回部分」，回傳結果附實際收回與 shortfall。
 - 🔴 **法規**：儲值金屬預收款。正式上線前店家應自行確認是否需依《零售業等禮券定型化契約應記載及不得記載事項》等規定提供履約保證（銀行保證、信託、同業連帶）——平台只提供功能，不提供履約保證。模組說明、MCP 工具說明與後台「會員經營」都有提示。
 
 ## 多語（i18n 模組）
@@ -195,7 +196,7 @@
 - **頁面翻譯存在草稿／快照**：`content.translations[lang] = { pages: { <path>: { title, seoTitle, seoDescription, sections: { <區塊 id>: { <欄位路徑>: { t, ai } } } } }, nav: { <索引>: { t, ai } } }`，跟著 `publish_site` 上線、`rollback` 一起還原；`preview_changes` 的差異會列出「翻譯有變（含 AI 翻譯）」。
 - **可翻譯欄位**（`lib/i18n/translatable.ts`）：區塊 props 的字串葉節點，排除比對鍵與非文字——key 為 id／slug／href／url／src／image／email／phone／code／*Slug／*Id／*Url…，或值是網址、路徑、純數字。渲染時（`SectionList`）只覆蓋「原本存在且為字串、且可翻譯」的位置，**翻譯永遠改不到 slug、價格、id**（記取農經官網比對鍵被翻譯的教訓）。缺翻譯的欄位顯示預設語言。
 - **模組資料翻譯** `builder_translations`（post／product／event／course × lang × field，field 只能是 title／name／excerpt／summary／body_md／description_md）：`draft_value` → `publish_translations`（publish＋confirm）才複製到 `published_value`。前台 `localizeRows()` 已發布網站讀 published、預覽讀草稿。
-- **AI 翻譯** `translate_content`（MCP、後台「多語」按鈕）：Gemini JSON 模式（`lib/ai/translate.ts`），只送可翻譯欄位、只採用送出去的 key（多回的丟掉）；結果一律進草稿並標 `ai: true`；預設不覆蓋店主手動翻譯（`overwrite: true` 才重翻）。限流（`builder_rate_hit`，DB 原子）：每租戶每日 `aiDailyLimit`（預設 50）＋每分鐘 6 次，被擋不呼叫 AI。沒有 `GEMINI_API_KEY` 時只有 is_test 網站用 mock（`[en] 原文`）供 e2e。
+- **AI 翻譯** `translate_content`（MCP、後台「多語」按鈕）：Gemini JSON 模式（`lib/ai/translate.ts`），只送可翻譯欄位、只採用送出去的 key（多回的丟掉）；結果一律進草稿並標 `ai: true`；預設不覆蓋店主手動翻譯（`overwrite: true` 才重翻）。限流（`builder_rate_hit`，DB 原子）：每租戶每日 `aiDailyLimit`（預設 50）＋每分鐘 6 次（先檢查每分鐘再扣每日，被每分鐘擋下的不吃每日額度——審查 L5），被擋不呼叫 AI。沒有 `GEMINI_API_KEY` 時只有 is_test 網站用 mock（`[en] 原文`）供 e2e。
 - 已知限制：模組頁面裡的固定按鈕／標籤文字（「加入購物車」「報名」等）第一版仍是中文，只有網站外框（購物車、會員、搜尋、語言、預覽橫幅）有字典；Email 通知仍是中文。
 
 ## 站內搜尋（search 模組）
@@ -216,7 +217,7 @@
 
 - `builder_certificates`：證號存兩份——`cert_no` 正規化比對鍵（NFKC 全形轉半形、大寫、去掉空白與分隔符號）、`cert_no_display` 原樣顯示；姓名 `name_norm`（NFKC、去空白）。生日只是**查詢條件**。
 - **CSV 匯入**（後台「證照」或 MCP `import_certificates`）：RFC 4180 解析（引號、CRLF、BOM），中英文欄名；必填證號／姓名／生日，日期 YYYY-MM-DD（也接受 / 與 .），驗證日期真實存在、到期不早於發證、證號不重複；🔴 任何欄位以 `= + - @`、Tab、CR（含全形 ＝＋－＠）開頭一律拒絕（防 CSV injection：不讓公式進 DB，日後匯出也不會變成公式）。任何一列有錯整份不匯入；先 dryRun 再 confirm；同證號覆蓋。
-- **公開查詢** `/s/<slug>/verify`（區塊 `certificate_lookup`）：前端 POST JSON 到 `/api/s/<slug>/verify`（`guardJsonPost`；生日不進網址）。兩種模式都要完整條件（只給姓名或只給生日不查 DB）；🔴 **不回傳生日**、姓名遮罩（王＊琳）；查無、姓名對生日錯、條件不完整一律回同一句 `LOOKUP_NOT_FOUND`（不洩漏證號或姓名是否存在）；狀態依到期日算（有效／已過期／撤銷／停權）。
+- **公開查詢** `/s/<slug>/verify`（區塊 `certificate_lookup`）：前端 POST JSON 到 `/api/s/<slug>/verify`（`guardJsonPost`；生日不進網址）。兩種模式都要完整條件：姓名＋生日，或**證號＋姓名**（審查 M5：只填證號預設查不到；店主可在 certificates 設定 `allowCertNoOnly: true` 開放只用證號，草稿→發布後生效）；🔴 **不回傳生日**、姓名遮罩（王＊琳）；查無、姓名對生日錯、條件不完整一律回同一句 `LOOKUP_NOT_FOUND`（不洩漏證號或姓名是否存在）；狀態依到期日算（有效／已過期／撤銷／停權）。
 - **限流**（`builder_rate_hit`）：每 IP 每 10 分鐘 10 次、每個查詢鍵（正規化證號或姓名）每小時 10 次——換 IP 也擋不了針對同一人的生日暴力猜測。
 - **查詢紀錄** `builder_cert_lookups`：只記模式、是否查到、IP 與查詢鍵的雜湊（不存姓名、生日原文）；只增不改（service_role 只有 select／insert，真 DB 42501）。
 - scope：`certificates:read`（列表遮罩、不含生日；查詢紀錄）、`certificates:write`（匯入、變更狀態，都需 confirm）。2026-10-19 新增，需重新發行 token。
@@ -243,7 +244,7 @@
 ## 訂單事件 hook
 
 `lib/services/order-hooks.ts`：模組在載入時以名稱註冊「付款成功」「訂單取消」副作用（referral、events、booking、courses…），`onOrderPaid`／`cancelOrder`／逾期取消呼叫；每個 hook 自己冪等。發票自動開立直接在 `onOrderPaid` 呼叫。
-- **失敗補做（2026-10 第四批審查 M2）**：hook 丟錯 → 寫 `builder_hook_failures`（訂單 × hook × 事件 一列，attempts 累加）。每日 cron 與讀取訂單（`get_order`、前台訂單頁）時 `retryOrderHooks` 補做：訂單狀態仍適用才重跑（paid hook 要求已付款／已出貨且非 sandbox；cancel hook 要求已取消），否則標為不再適用；成功標 resolved；連續失敗 3 次寄店主警示一次（`alerted_at` 條件更新），20 次後停止自動補做。hook 內部不可再吞錯（例如報名已失效無法確認要丟出，讓店主收到警示）。
+- **失敗補做（2026-10 第四批審查 M2）**：hook 丟錯 → 寫 `builder_hook_failures`（訂單 × hook × 事件 一列，attempts 累加）。每日 cron 與讀取訂單（`get_order`、前台訂單頁）時 `retryOrderHooks` 補做（**公開訂單頁的補做不計次、不警示，且每張訂單每 10 分鐘最多一次**；計次只來自 cron 與後台／MCP，第五六批審查 L3）：訂單狀態仍適用才重跑（paid hook 要求已付款／已出貨且非 sandbox；cancel hook 要求已取消），否則標為不再適用；成功標 resolved；連續失敗 3 次寄店主警示一次（`alerted_at` 條件更新），20 次後停止自動補做。hook 內部不可再吞錯（例如報名已失效無法確認要丟出，讓店主收到警示）。
 - **系統取消一律跑 hooks（L2）**：金流建單失敗、取消場次、取消預約都走 `cancelOrderWithHooks()`，不再直接 `store.cancelOrder`。
 
 ## 已知風險（第一版刻意不處理）

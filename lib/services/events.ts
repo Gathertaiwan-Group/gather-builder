@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RESERVE_ERRORS } from "../store/reserve-errors";
 import type { EventRow, EventSessionRow, MemberRow, OrderRow, RegistrationRow, RegistrationStatus, Store, TenantRow, TicketTypeRow, WaitlistRow } from "../store/types";
 import type { EventsSettings } from "@/modules/events/manifest";
 import { imageUrl, optText, postSlug, safeHref, text } from "../validators";
@@ -441,6 +442,10 @@ export async function releaseExpiredSessionHolds(deps: CheckoutDeps, tenant: Ten
 
 /** 免費報名／候補 email 確認期限（分鐘） */
 export const EMAIL_CONFIRM_MINUTES = 30;
+/** 審查 M6：未確認 email 的免費報名保留時間（佔名額，所以比候補確認更短） */
+export const PENDING_HOLD_MINUTES = 15;
+/** 審查 M6：每場次未確認保留最多佔容量的比例（%） */
+export const DEFAULT_UNCONFIRMED_HOLD_PERCENT = 20;
 
 /** email 確認連結：kind r＝報名、w＝候補；簽章 HMAC(PREVIEW_SECRET, event-confirm-<kind>:id)，不存原文 */
 export function confirmUrl(baseUrl: string, tenant: TenantRow, kind: "r" | "w", id: string) {
@@ -482,6 +487,8 @@ export async function confirmEventEmail(deps: CheckoutDeps, input: { tenant: Ten
 export type RegisterResult =
   | { kind: "free"; registration: RegistrationRow; checkinCode: string }
   | { kind: "pending"; registration: RegistrationRow }
+  /** 審查 M6：待確認保留已達上限 → 改登記候補（不佔名額，要 email 確認） */
+  | { kind: "waitlisted"; waitlistId: string }
   | { kind: "order"; order: OrderRow; accessKey: string; orderUrl: string; registrationId: string | null };
 
 /**
@@ -517,7 +524,29 @@ export async function registerEvent(deps: CheckoutDeps, input: { tenant: TenantR
     // M5：免費報名預設要 email 確認（已登入且 email 已驗證、且用的是帳號 email 的會員免確認；遞補連結本身已寄到候補者信箱，也免確認）
     const verifiedMember = !!member?.email_verified_at && normalizeEmail(member.email) === emailNorm;
     const needConfirm = settings.requireEmailConfirm !== false && !verifiedMember && !offerId;
-    const id = await deps.store.reserveEventFree(tenant.id, { ...res, pending_email: needConfirm, pending_minutes: EMAIL_CONFIRM_MINUTES });
+    if (needConfirm && d.qty !== 1) throw new ServiceError("invalid", "尚未確認 Email 的報名每筆限 1 張（登入已驗證 Email 的會員帳號可一次報多張）");
+    const pendingCap = Math.max(1, Math.floor((s.capacity * (settings.unconfirmedHoldPercent ?? DEFAULT_UNCONFIRMED_HOLD_PERCENT)) / 100));
+    let id: string;
+    try {
+      id = await deps.store.reserveEventFree(tenant.id, { ...res, pending_email: needConfirm, pending_minutes: PENDING_HOLD_MINUTES, pending_cap: pendingCap });
+    } catch (err) {
+      // 審查 M6：待確認保留已達上限 → 不佔名額，改登記（待確認的）候補；確認後依順序遞補
+      if (!(err instanceof ServiceError) || err.message !== RESERVE_ERRORS["pending cap"]!.message) throw err;
+      for (const x of await deps.store.listWaitlist(tenant.id, s.id)) {
+        if (x.email_norm === emailNorm && (x.status === "waiting" || x.status === "offered" || (x.status === "unconfirmed" && x.confirm_expires_at && new Date(x.confirm_expires_at).getTime() > Date.now()))) {
+          return { kind: "waitlisted", waitlistId: x.id };
+        }
+        if (x.email_norm === emailNorm && x.status === "unconfirmed") await deps.store.updateWaitlist(tenant.id, x.id, ["unconfirmed"], { status: "cancelled" });
+      }
+      const w = await deps.store.insertWaitlist({
+        tenant_id: tenant.id, session_id: s.id, ticket_type_id: t.id, member_id: member?.id ?? null, contact, email_norm: emailNorm, qty: 1,
+        status: "unconfirmed", confirm_expires_at: new Date(Date.now() + EMAIL_CONFIRM_MINUTES * 60_000).toISOString(),
+      });
+      if (!w) throw new ServiceError("conflict", "這個 Email 已登記過這個場次的候補");
+      await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.register_to_waitlist", payload: { waitlistId: w.id, reason: "pending_cap", pendingCap } });
+      await mailSafe(deps, contact.email, `【${tenant.name}】請確認候補登記：${e.title}`, `${contact.name} 你好，\n\n目前「${e.title}」${fmtTaipei(s.starts_at)}待確認的報名較多，你的報名已改為候補登記。\n請在 ${EMAIL_CONFIRM_MINUTES} 分鐘內點下面的連結確認，確認後會依順序遞補，有名額時寄信通知你：\n${confirmUrl(deps.baseUrl, tenant, "w", w.id)}\n\n如果不是你本人登記，忽略這封信即可。`);
+      return { kind: "waitlisted", waitlistId: w.id };
+    }
     await deps.store.insertAudit({ tenant_id: tenant.id, actor: member ? `member:${member.id}` : "guest", action: "event.register", payload: { registrationId: id, free: true, pendingEmail: needConfirm } });
     if (needConfirm) {
       const pending = (await deps.store.getRegistration(tenant.id, id))!;
@@ -525,7 +554,7 @@ export async function registerEvent(deps: CheckoutDeps, input: { tenant: TenantR
         deps,
         contact.email,
         `【${tenant.name}】請確認報名：${e.title}`,
-        `${contact.name} 你好，\n\n請在 ${EMAIL_CONFIRM_MINUTES} 分鐘內點下面的連結確認報名「${e.title}」${fmtTaipei(s.starts_at)}（逾時名額會釋出）：\n${confirmUrl(deps.baseUrl, tenant, "r", id)}\n\n如果不是你本人報名，忽略這封信即可。`,
+        `${contact.name} 你好，\n\n請在 ${PENDING_HOLD_MINUTES} 分鐘內點下面的連結確認報名「${e.title}」${fmtTaipei(s.starts_at)}（逾時名額會釋出）：\n${confirmUrl(deps.baseUrl, tenant, "r", id)}\n\n如果不是你本人報名，忽略這封信即可。`,
       );
       return { kind: "pending", registration: pending };
     }
