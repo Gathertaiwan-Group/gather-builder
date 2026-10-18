@@ -198,6 +198,12 @@
 - **AI 翻譯** `translate_content`（MCP、後台「多語」按鈕）：Gemini JSON 模式（`lib/ai/translate.ts`），只送可翻譯欄位、只採用送出去的 key（多回的丟掉）；結果一律進草稿並標 `ai: true`；預設不覆蓋店主手動翻譯（`overwrite: true` 才重翻）。限流（`builder_rate_hit`，DB 原子）：每租戶每日 `aiDailyLimit`（預設 50）＋每分鐘 6 次，被擋不呼叫 AI。沒有 `GEMINI_API_KEY` 時只有 is_test 網站用 mock（`[en] 原文`）供 e2e。
 - 已知限制：模組頁面裡的固定按鈕／標籤文字（「加入購物車」「報名」等）第一版仍是中文，只有網站外框（購物車、會員、搜尋、語言、預覽橫幅）有字典；Email 通知仍是中文。
 
+## 站內搜尋（search 模組）
+
+- `/s/<slug>/search?q=`（區塊 `search_box`；頁首有搜尋連結）。關鍵字 1–60 字；每 IP 每 10 分鐘 60 次（`builder_rate_hit`）。
+- 頁面：在目前顯示的快照（已發布或預覽草稿）裡比對頁面標題、SEO 描述與所有區塊的可翻譯文字（已套用目前語言的翻譯）。
+- 模組資料：SQL `builder_search_content`——`strpos(lower(欄位), lower(關鍵字))` 片語比對（中文可搜；不用 LIKE，`%`／`_` 不會變萬用字元；不新增 extension，不用 pg_trgm）。**只搜該租戶、只搜已發布**（文章另要求發布時間已到）。🔴 課程只比對課程介紹與已發布單元的「標題」，**絕不搜單元內文**（付費內容），摘要也只取課程介紹。外文網址另搜「已發布」的翻譯，命中後再確認主資料已發布才列出。模組沒開的種類不出現。人員名錄、公開文件由各自模組擴充同一個函式。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

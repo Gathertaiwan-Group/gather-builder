@@ -49,6 +49,7 @@ modules/<id>/
 | `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`get_payment_setup_status` |
 
 `shop` 的| `i18n` | core | `/s/<slug>/<lang>/…`（所有頁面）；語言切換；後台「多語」 | `builder_translations`；頁面翻譯在 `content.translations` | `translate_content`、`set_translation`、`list_translations`、`publish_translations` |
+| `search` | core | `/search?q=`；區塊 `search_box` | （函式 `builder_search_content`） | — |
 | `stored-value` | members、shop | `/wallet`（方案與購買）、`/s/<slug>/api/wallet/topup`；結帳「儲值金」；會員中心「我的儲值金」；區塊 `topup_plans`；後台「會員經營」 | `builder_wallet_ledger`（只增不改）、`builder_topup_plans` | `get_member_balance`、`adjust_balance`、`create_topup_plan`、`update_topup_plan`、`list_topup_plans` |
 | `loyalty` | members、shop | 結帳「點數折抵」；會員中心「我的點數」；區塊 `loyalty_tiers` | `builder_points_ledger`（只增不改）、`builder_member_tiers`；訂單欄位 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid` | `get_member_points`、`adjust_points`、`list_tiers`、`update_tiers` |
 

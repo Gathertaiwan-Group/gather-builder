@@ -92,7 +92,20 @@ export interface TranslationRow {
   updated_by: string | null;
 }
 
+/** 站內搜尋的原始命中（builder_search_content）；翻譯命中的 slug／title 為 null（由服務層補） */
+export interface SearchHit {
+  kind: string;
+  id: string;
+  slug: string | null;
+  title: string | null;
+  body: string | null;
+  rank: number;
+}
+
 export interface ContentStore {
+  // search（只搜該租戶、已發布；課程不搜單元內文）
+  searchContent(tenantId: string, q: string, lang: string | null, limit: number): Promise<SearchHit[]>;
+
   // i18n
   upsertTranslationDrafts(rows: Pick<TranslationRow, "tenant_id" | "entity_type" | "entity_id" | "lang" | "field" | "draft_value" | "draft_ai" | "updated_by">[]): Promise<void>;
   listTranslations(tenantId: string, opts: { lang?: string; entityType?: TrEntityType; entityIds?: string[] }): Promise<TranslationRow[]>;

@@ -10,6 +10,8 @@ import { publishSite } from "@/lib/services/publish";
 import { createPost } from "@/lib/services/posts";
 import { localizeRow, publishTranslations, translateContent } from "@/lib/services/i18n";
 import { loadSite } from "@/lib/site-loader";
+import { searchSite } from "@/lib/services/search";
+import { addLesson, createCourse } from "@/lib/services/courses";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -32,7 +34,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
     await publishSite(ctx, { site: slug, confirm: true });
   });
@@ -49,5 +51,22 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     // 欄位白名單在 DB 端也擋（slug 不能存）
     const bad = await db.from("builder_translations").insert({ tenant_id: site.tenant.id, entity_type: "post", entity_id: post.id, lang: "en", field: "slug", draft_value: "x" });
     expect(bad.error?.code).toBe("23514");
+  });
+
+  it("search（SQL builder_search_content）：只搜已發布、該租戶；課程單元內文不被搜出；中文片語；萬用字元不會變成萬用", async () => {
+    await createPost(ctx, { site: slug, slug: "pub-tea", title: "凍頂烏龍上市", bodyMd: "百分之百台灣茶", status: "published", confirm: true });
+    await createPost(ctx, { site: slug, slug: "draft-tea", title: "凍頂烏龍草稿", bodyMd: "x" });
+    const c = await createCourse(ctx, { site: slug, slug: "brew", title: "沖泡課", price: 500, status: "published", confirm: true });
+    await addLesson(ctx, { site: slug, courseId: c.id, slug: "l1", title: "溫杯", bodyMd: "付費內容：獨門手法", confirm: true });
+    const site = (await loadSite(slug, null, store, { lang: null }))!;
+    const r = await searchSite(store, site, "凍頂烏龍");
+    expect(r.results.filter((x) => x.kind === "post").map((x) => x.href)).toEqual(["/blog/pub-tea"]);
+    expect((await searchSite(store, site, "獨門手法")).results).toEqual([]);
+    expect((await searchSite(store, site, "溫杯")).results.map((x) => x.href)).toEqual(["/courses/brew"]);
+    // % 與 _ 是普通字元（strpos），不會變成「全部符合」
+    expect((await searchSite(store, site, "%")).results).toEqual([]);
+    // 其他租戶看不到
+    const other = await store.searchContent("00000000-0000-0000-0000-000000000000", "凍頂", null, 10);
+    expect(other).toEqual([]);
   });
 });

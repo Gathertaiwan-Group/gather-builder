@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, TopupPlanRow, TranslationRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -27,6 +27,8 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const walletEnabled = true;
   const plans = new Map<string, TopupPlanRow>();
   const translations = new Map<string, TranslationRow>();
+  /** directory／downloads 的記憶體搜尋來源（各模組的記憶體實作接上） */
+  const extraSearch: ((tenantId: string, q: string) => Promise<SearchHit[]>)[] = [];
   const trKey = (r: Pick<TranslationRow, "tenant_id" | "entity_type" | "entity_id" | "lang" | "field">) => `${r.tenant_id}|${r.entity_type}|${r.entity_id}|${r.lang}|${r.field}`;
 
   const entries = (l: CreditLedger, tenantId: string, memberId: string) => ledgers[l].filter((e) => e.tenant_id === tenantId && e.member_id === memberId);
@@ -97,6 +99,37 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async searchContent(tenantId, qRaw, lang, limit) {
+      // 同 SQL builder_search_content：lower 片語比對、只搜已發布、課程只比對介紹與單元標題
+      if (!root) return [];
+      const q = qRaw.trim().toLowerCase();
+      if (!q || q.length > 60) return [];
+      const has = (...xs: (string | null | undefined)[]) => xs.some((x) => (x ?? "").toLowerCase().includes(q));
+      const out: SearchHit[] = [];
+      const nowIso = now();
+      for (const p of (await root.listPosts(tenantId, { status: "published", limit: 1000, offset: 0 })).rows) {
+        if (p.published_at && p.published_at <= nowIso && has(p.title, p.excerpt, p.body_md)) out.push({ kind: "post", id: p.id, slug: p.slug, title: p.title, body: `${p.excerpt ?? ""}\n${p.body_md}`, rank: has(p.title) ? 2 : 1 });
+      }
+      for (const p of (await root.listProducts(tenantId, { status: "published", limit: 1000, offset: 0 })).rows) {
+        if (has(p.name, p.description_md)) out.push({ kind: "product", id: p.id, slug: p.slug, title: p.name, body: p.description_md, rank: has(p.name) ? 2 : 1 });
+      }
+      for (const e of (await root.listEvents(tenantId, { status: "published", limit: 1000, offset: 0 })).rows) {
+        if (has(e.title, e.summary, e.body_md)) out.push({ kind: "event", id: e.id, slug: e.slug, title: e.title, body: `${e.summary ?? ""}\n${e.body_md}`, rank: has(e.title) ? 2 : 1 });
+      }
+      const courses = await root.listCourses(tenantId, { status: "published" });
+      const lessons = await root.listLessons(tenantId, courses.map((c) => c.id));
+      for (const c of courses) {
+        const lessonHit = lessons.some((l) => l.course_id === c.id && l.status === "published" && has(l.title));
+        if (has(c.title, c.summary, c.body_md) || lessonHit) out.push({ kind: "course", id: c.id, slug: c.slug, title: c.title, body: `${c.summary ?? ""}\n${c.body_md}`, rank: has(c.title) ? 2 : 1 });
+      }
+      if (lang) {
+        for (const t of translations.values()) {
+          if (t.tenant_id === tenantId && t.lang === lang && t.published_value && t.published_value.toLowerCase().includes(q)) out.push({ kind: t.entity_type, id: t.entity_id, slug: null, title: null, body: t.published_value, rank: 1 });
+        }
+      }
+      for (const x of extraSearch) out.push(...(await x(tenantId, q)));
+      return out.sort((a, b) => b.rank - a.rank).slice(0, limit * 2);
+    },
     async upsertTranslationDrafts(rows) {
       for (const r of rows) {
         const k = trKey(r);

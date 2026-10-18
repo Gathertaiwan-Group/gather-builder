@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, TopupPlanRow, TranslationRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,9 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async searchContent(tenantId, q, lang, limit) {
+      return (must(await db.rpc("builder_search_content", { p_tenant: tenantId, p_q: q, p_lang: lang, p_limit: limit }), "searchContent") ?? []) as SearchHit[];
+    },
     async upsertTranslationDrafts(rows) {
       if (!rows.length) return;
       const now = nowIso();
