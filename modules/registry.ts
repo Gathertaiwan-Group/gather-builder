@@ -21,10 +21,11 @@ import { manifest as i18n } from "./i18n/manifest";
 import { manifest as search } from "./search/manifest";
 import { manifest as directory } from "./directory/manifest";
 import { manifest as downloads } from "./downloads/manifest";
+import { manifest as certificates } from "./certificates/manifest";
 import type { ModuleManifest, SectionTypeDef } from "./types";
 
 /** 模組註冊表：程式內唯一真相。新增模組只要在這裡加一行。 */
-export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty, storedValue, i18n, search, directory, downloads];
+export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat, events, booking, courses, loyalty, storedValue, i18n, search, directory, downloads, certificates];
 
 export type Registry = Map<string, ModuleManifest>;
 export const registry: Registry = new Map(MODULES.map((m) => [m.id, m]));

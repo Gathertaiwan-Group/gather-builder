@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow } from "./types-content";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -33,6 +33,43 @@ export function mapCreditError(message: string): ServiceError | null {
 /** 第五、六批的 Supabase 實作（所有查詢都帶 tenant_id） */
 export function createSupabaseContentStore(db: SupabaseClient): ContentStore {
   return {
+    async upsertCertificates(rows) {
+      if (!rows.length) return { inserted: 0, updated: 0 };
+      const tenantId = rows[0]!.tenant_id;
+      const existing = new Set<string>();
+      for (let i = 0; i < rows.length; i += 200) {
+        const nos = rows.slice(i, i + 200).map((r) => r.cert_no);
+        for (const r of (must(await db.from("builder_certificates").select("cert_no").eq("tenant_id", tenantId).in("cert_no", nos), "upsertCertificates.get") ?? []) as { cert_no: string }[]) existing.add(r.cert_no);
+      }
+      for (let i = 0; i < rows.length; i += 200) {
+        must(await db.from("builder_certificates").upsert(rows.slice(i, i + 200).map((r) => ({ ...r, updated_at: nowIso() })), { onConflict: "tenant_id,cert_no" }), "upsertCertificates");
+      }
+      const updated = rows.filter((r) => existing.has(r.cert_no)).length;
+      return { inserted: rows.length - updated, updated };
+    },
+    async getCertificateByNo(tenantId, certNo) {
+      return must(await db.from("builder_certificates").select("*").eq("tenant_id", tenantId).eq("cert_no", certNo).maybeSingle(), "getCertificateByNo") as CertificateRow | null;
+    },
+    async findCertificatesByNameBirth(tenantId, nameNorm, birth) {
+      return (must(await db.from("builder_certificates").select("*").eq("tenant_id", tenantId).eq("name_norm", nameNorm).eq("birth_date", birth).limit(20), "findCertificatesByNameBirth") ?? []) as CertificateRow[];
+    },
+    async listCertificates(tenantId, opts) {
+      let q = db.from("builder_certificates").select("*", { count: "exact" }).eq("tenant_id", tenantId);
+      if (opts.q && /^[A-Z0-9]{1,40}$/.test(opts.q)) q = q.eq("cert_no", opts.q);
+      const r = await q.order("issued_on", { ascending: false, nullsFirst: false }).order("cert_no").range(opts.offset, opts.offset + opts.limit - 1);
+      if (r.error) throw new Error(`listCertificates: ${r.error.message}`);
+      return { rows: (r.data ?? []) as CertificateRow[], total: r.count ?? 0 };
+    },
+    async updateCertificate(tenantId, id, patch) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_certificates").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).select("*").maybeSingle(), "updateCertificate") as CertificateRow | null;
+    },
+    async insertCertLookup(row) {
+      must(await db.from("builder_cert_lookups").insert(row), "insertCertLookup");
+    },
+    async listCertLookups(tenantId, limit) {
+      return (must(await db.from("builder_cert_lookups").select("*").eq("tenant_id", tenantId).order("id", { ascending: false }).limit(limit), "listCertLookups") ?? []) as CertLookupRow[];
+    },
     async insertDocument(row) {
       return must(await db.from("builder_documents").insert(row).select("*").single(), "insertDocument") as DocumentRow;
     },

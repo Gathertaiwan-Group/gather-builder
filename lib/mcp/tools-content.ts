@@ -6,6 +6,7 @@ import * as wallet from "../services/wallet";
 import * as i18n from "../services/i18n";
 import * as directory from "../services/directory";
 import * as downloads from "../services/downloads";
+import * as certificates from "../services/certificates";
 import { getFileStorage } from "../storage/files";
 
 /**
@@ -285,6 +286,49 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: RO,
     },
     wrap(async (a) => downloads.listDocuments(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 證照查詢（certificates） */
+
+  server.registerTool(
+    "import_certificates",
+    {
+      description:
+        "匯入證照 CSV（第一列標題：證號,姓名,生日,類別,發證日,到期日,狀態；英文 cert_no,name,birth_date,category,issued_on,expires_on,status 也可）。日期 YYYY-MM-DD；欄位以 = + - @ 開頭一律拒絕（防 CSV injection）；任何一列有錯整份不匯入。先 dryRun: true 驗證，使用者確認後 confirm: true 寫入（同證號覆蓋）。需要 certificates:write。",
+      inputSchema: { site, csv: z.string().describe("CSV 內容（UTF-8）"), dryRun: z.boolean().optional(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => certificates.importCertificates(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_certificates",
+    {
+      description: "證照列表（姓名遮罩、不含生日；狀態依到期日計算）。可用 certNo 查單筆（容錯：全形、大小寫、空白、分隔符號）。需要 certificates:read。",
+      inputSchema: { site, certNo: z.string().optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => certificates.listCertificates(ctx, a)),
+  );
+
+  server.registerTool(
+    "set_certificate_status",
+    {
+      description: "變更證照狀態：valid 有效／revoked 撤銷／suspended 停權（立即反映在公開查詢）。**必須** confirm: true。需要 certificates:write。",
+      inputSchema: { site, certNo: z.string(), status: z.enum(["valid", "revoked", "suspended"]), note: z.string().optional(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => certificates.setCertificateStatus(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_certificate_lookups",
+    {
+      description: "公開查詢紀錄（時間、查詢方式、是否查到；不含查詢內容）。需要 certificates:read。",
+      inputSchema: { site, limit: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => certificates.listCertificateLookups(ctx, a)),
   );
 }
 

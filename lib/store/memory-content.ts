@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import { computeLedgerState } from "../loyalty/ledger";
 import { CREDIT_ERRORS } from "./supabase-content";
-import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow } from "./types-content";
+import type { ContentStore, CreditLedger, CreditLedgerRow, CreditPostInput, MemberTierRow, SearchHit, TopupPlanRow, TranslationRow, PersonRow, DocumentRow, CertificateRow, CertLookupRow } from "./types-content";
 import type { OrderCreditsInput, OrderRow, Store } from "./types";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -31,6 +31,8 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   const extraSearch: ((tenantId: string, q: string) => Promise<SearchHit[]>)[] = [];
   const people = new Map<string, PersonRow>();
   const documents = new Map<string, DocumentRow>();
+  const certs = new Map<string, CertificateRow>();
+  const certLookups: CertLookupRow[] = [];
   extraSearch.push(async (tenantId, q) =>
     [...documents.values()]
       .filter((d) => d.tenant_id === tenantId && d.status === "published" && d.visibility === "public" && [d.title, d.description, d.category].some((x) => (x ?? "").toLowerCase().includes(q)))
@@ -111,6 +113,45 @@ export function createMemoryContentStore(): { store: ContentStore; credits: Cred
   };
 
   const store: ContentStore = {
+    async upsertCertificates(rows) {
+      let inserted = 0;
+      let updated = 0;
+      for (const r of rows) {
+        const cur = [...certs.values()].find((c) => c.tenant_id === r.tenant_id && c.cert_no === r.cert_no);
+        if (cur) {
+          certs.set(cur.id, { ...cur, ...clone(r), updated_at: now() });
+          updated++;
+        } else {
+          const id = randomUUID();
+          certs.set(id, { ...clone(r), id, created_at: now(), updated_at: now() });
+          inserted++;
+        }
+      }
+      return { inserted, updated };
+    },
+    async getCertificateByNo(tenantId, certNo) {
+      return clone([...certs.values()].find((c) => c.tenant_id === tenantId && c.cert_no === certNo) ?? null);
+    },
+    async findCertificatesByNameBirth(tenantId, nameNorm, birth) {
+      return clone([...certs.values()].filter((c) => c.tenant_id === tenantId && c.name_norm === nameNorm && c.birth_date === birth));
+    },
+    async listCertificates(tenantId, opts) {
+      const rows = [...certs.values()].filter((c) => c.tenant_id === tenantId && (!opts.q || c.cert_no === opts.q)).sort((a, b) => (b.issued_on ?? "").localeCompare(a.issued_on ?? "") || a.cert_no.localeCompare(b.cert_no));
+      return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
+    },
+    async updateCertificate(tenantId, id, patch) {
+      const c = certs.get(id);
+      if (!c || c.tenant_id !== tenantId) return null;
+      const next = { ...c, ...patch, updated_at: now() };
+      certs.set(id, next);
+      return clone(next);
+    },
+    async insertCertLookup(row) {
+      certLookups.push({ ...row, id: certLookups.length + 1, at: now() });
+    },
+    async listCertLookups(tenantId, limit) {
+      return clone(certLookups.filter((l) => l.tenant_id === tenantId).slice(-limit).reverse());
+    },
     async insertDocument(row) {
       const r: DocumentRow = { ...clone(row), id: row.id ?? randomUUID(), download_count: 0, created_at: now(), updated_at: now() };
       if (r.file_path && !r.file_path.startsWith(`${r.tenant_id}/`)) throw new Error("file_path 必須在租戶資料夾");

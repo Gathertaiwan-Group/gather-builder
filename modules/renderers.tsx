@@ -15,6 +15,7 @@ import { TopupPlans } from "./stored-value/sections";
 import { SearchBox } from "./search/sections";
 import { PeopleGrid } from "./directory/sections";
 import { DownloadsList } from "./downloads/sections";
+import { CertificateLookup } from "./certificates/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -43,4 +44,5 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   search_box: SearchBox,
   people_grid: PeopleGrid,
   downloads_list: DownloadsList,
+  certificate_lookup: CertificateLookup,
 };

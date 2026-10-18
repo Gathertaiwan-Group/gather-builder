@@ -20,6 +20,9 @@ export const SCOPES = {
   "classes:write": "活動／場次／票種、預約服務與營業時間、線上課程與單元（上架或改已上架項目另需 publish ＋ confirm；取消場次需 confirm）",
   "attendees:read": "讀取報名名單、預約、課程學員（個資遮罩；查看完整資料會留紀錄）",
   "attendees:write": "簽到、取消預約、手動開通／撤銷課程（都需 confirm）",
+  "certificates:read": "讀取證照資料與查詢紀錄（姓名遮罩、不含生日）",
+  "certificates:write": "匯入證照 CSV、變更證照狀態（都需 confirm）",
+  "reviews:write": "審核（公開／隱藏）與回覆商品評價（都需 confirm）",
 } as const;
 
 export type Scope = keyof typeof SCOPES;

@@ -36,10 +36,14 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 | `classes:write` | 活動／場次／票種、預約服務與營業時間、線上課程與單元（上架或改已上架項目另需 `publish` ＋ `confirm: true`）；`cancel_session`（confirm） |
 | `attendees:read` | 報名名單、預約、課程學員（個資遮罩） |
 | `attendees:write` | 簽到、取消預約、手動開通／撤銷課程（都需 `confirm: true`） |
+| `certificates:read` | 證照列表（姓名遮罩、不含生日）與查詢紀錄 |
+| `certificates:write` | 匯入證照 CSV、變更證照狀態（都需 `confirm: true`） |
+| `reviews:write` | 審核（公開／隱藏）與回覆商品評價（都需 `confirm: true`） |
 
 > 新 scope 是 2026-10 加的：之前發行的 token 沒有這些 scope，需重新發行（`create_site` 發出的 token 取呼叫者 scope 的交集）。
 > 第三批（invoices／shipping／marketing／newsletter）的 scope 於 2026-10-19 加入，同樣需要重新發行 token 才拿得到。
 > 第四批（classes:write／attendees:read／attendees:write）於 2026-10-19 加入，需要重新發行 token。
+> 第六批（certificates:read／certificates:write／reviews:write）於 2026-10-19 加入，需要重新發行 token（平台 token 也是：`scripts/issue-platform-token.mjs`）。
 
 ## 在 Claude Code 連線
 
@@ -168,6 +172,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `complete_document_upload` | content:write | 確認檔案已上傳（伺服器檢查存在與大小）；`publish: true` 上架需 publish ＋ confirm |
 | `update_document` | content:write | 標題、分類、公開／限會員、上下架（已上架或要上架需 publish ＋ confirm） |
 | `list_documents` | site:read | 文件與下載次數 |
+| `import_certificates` | certificates:write | 匯入證照 CSV（先 dryRun；公式開頭拒絕；有錯整份不匯入；`confirm: true` 寫入） |
+| `list_certificates` | certificates:read | 證照列表（姓名遮罩、不含生日；證號容錯查單筆） |
+| `set_certificate_status` | certificates:write | 有效／撤銷／停權（`confirm: true`） |
+| `list_certificate_lookups` | certificates:read | 公開查詢紀錄（不含查詢內容） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

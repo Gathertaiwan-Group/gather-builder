@@ -15,6 +15,7 @@ import { addLesson, createCourse } from "@/lib/services/courses";
 import { createPerson } from "@/lib/services/directory";
 import { completeDocumentUpload, createDocumentUpload, downloadDocument, uploadDocumentDirect } from "@/lib/services/downloads";
 import { DOWNLOADS_BUCKET, supabaseFileStorage } from "@/lib/storage/files";
+import { LOOKUP_NOT_FOUND, importCertificates, lookupCertificate } from "@/lib/services/certificates";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -40,7 +41,7 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["sections-basic", "blog", "search", "courses", "shop", "directory", "downloads", "certificates"], test: true });
     await enableModule(ctx, { site: slug, moduleId: "i18n", config: { languages: ["en"] } });
     await publishSite(ctx, { site: slug, confirm: true });
   });
@@ -111,5 +112,19 @@ describe.skipIf(!enabled)("第六批 Supabase 實作（整合）", () => {
     // 匿名 key 讀不到私有 bucket（沒有簽名就不能下載）
     const anon = await fetch(`${process.env.SUPABASE_URL}/storage/v1/object/public/${DOWNLOADS_BUCKET}/${uploaded[0]}`);
     expect(anon.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("certificates：匯入、證號容錯查詢、不回生日、查無同一句話；查詢紀錄只增不改（42501）", async () => {
+    const tenant = (await store.getTenantBySlug(slug))!;
+    await importCertificates(ctx, { site: slug, csv: "證號,姓名,生日,類別\nTW-2026-0001,吳宗憲,1980-08-08,講師\n", confirm: true });
+    const r = await lookupCertificate(store, tenant, { certNo: "tw 2026 0001", ipHash: `it-${ts}` });
+    expect(r).toMatchObject({ found: true, results: [{ certNo: "TW-2026-0001", name: "吳＊憲" }] });
+    expect(JSON.stringify(r)).not.toContain("1980");
+    expect(await lookupCertificate(store, tenant, { name: "吳宗憲", birth: "1980-08-09", ipHash: `it2-${ts}` })).toEqual({ found: false, message: LOOKUP_NOT_FOUND });
+    const up = await db.from("builder_cert_lookups").update({ found: true }).eq("tenant_id", tenant.id);
+    expect(up.error?.code).toBe("42501");
+    const del = await db.from("builder_cert_lookups").delete().eq("tenant_id", tenant.id);
+    expect(del.error?.code).toBe("42501");
+    expect((await store.listCertLookups(tenant.id, 10)).length).toBe(2);
   });
 });

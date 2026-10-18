@@ -33,6 +33,9 @@ export const ADMIN_ACTOR_SCOPES: Scope[] = [
   "classes:write",
   "attendees:read",
   "attendees:write",
+  "certificates:read",
+  "certificates:write",
+  "reviews:write",
 ];
 
 export function adminActor(): Actor {

@@ -212,9 +212,19 @@
   - 下載：前台連結一律是 `/s/<slug>/downloads/<id>`；伺服器檢查已上架、🔴 限會員的文件要有效會員 session（cookie 屬於該網站、會員未停用），通過才原子計次（`builder_bump_download`）並 302 到 **60 秒**簽名網址（公開文件也一樣，方便統計；`Content-Disposition: attachment`）。未登入 → 導到登入頁。每 IP 每 10 分鐘 120 次。
   - 只有公開且已上架的文件進站內搜尋。
 
+## 證照查詢（certificates 模組）
+
+- `builder_certificates`：證號存兩份——`cert_no` 正規化比對鍵（NFKC 全形轉半形、大寫、去掉空白與分隔符號）、`cert_no_display` 原樣顯示；姓名 `name_norm`（NFKC、去空白）。生日只是**查詢條件**。
+- **CSV 匯入**（後台「證照」或 MCP `import_certificates`）：RFC 4180 解析（引號、CRLF、BOM），中英文欄名；必填證號／姓名／生日，日期 YYYY-MM-DD（也接受 / 與 .），驗證日期真實存在、到期不早於發證、證號不重複；🔴 任何欄位以 `= + - @`、Tab、CR（含全形 ＝＋－＠）開頭一律拒絕（防 CSV injection：不讓公式進 DB，日後匯出也不會變成公式）。任何一列有錯整份不匯入；先 dryRun 再 confirm；同證號覆蓋。
+- **公開查詢** `/s/<slug>/verify`（區塊 `certificate_lookup`）：前端 POST JSON 到 `/api/s/<slug>/verify`（`guardJsonPost`；生日不進網址）。兩種模式都要完整條件（只給姓名或只給生日不查 DB）；🔴 **不回傳生日**、姓名遮罩（王＊琳）；查無、姓名對生日錯、條件不完整一律回同一句 `LOOKUP_NOT_FOUND`（不洩漏證號或姓名是否存在）；狀態依到期日算（有效／已過期／撤銷／停權）。
+- **限流**（`builder_rate_hit`）：每 IP 每 10 分鐘 10 次、每個查詢鍵（正規化證號或姓名）每小時 10 次——換 IP 也擋不了針對同一人的生日暴力猜測。
+- **查詢紀錄** `builder_cert_lookups`：只記模式、是否查到、IP 與查詢鍵的雜湊（不存姓名、生日原文）；只增不改（service_role 只有 select／insert，真 DB 42501）。
+- scope：`certificates:read`（列表遮罩、不含生日；查詢紀錄）、`certificates:write`（匯入、變更狀態，都需 confirm）。2026-10-19 新增，需重新發行 token。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。
+- JSON 端點另有證照查詢（`/api/s/<slug>/verify`）。
 - 表單端點（會員、結帳、退訂、確認訂閱、選店）在 `/s/<slug>/api/…`，用 `originOk()`。
 - 試算端點（L-4）：每 IP 每 10 分鐘 40 次；折扣碼無效與條件不符回同一句話，細節只在真正下單時回。
 

@@ -142,7 +142,44 @@ export interface DocumentRow {
   updated_at: string;
 }
 
+/** certificates：證照（生日只用來比對，永不輸出） */
+export interface CertificateRow {
+  id: string;
+  tenant_id: string;
+  cert_no: string;
+  cert_no_display: string;
+  name: string;
+  name_norm: string;
+  birth_date: string;
+  category: string | null;
+  issued_on: string | null;
+  expires_on: string | null;
+  status: "valid" | "revoked" | "suspended";
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface CertLookupRow {
+  id: number;
+  tenant_id: string;
+  mode: "cert_no" | "name_birth";
+  ip_hash: string | null;
+  found: boolean;
+  key_hash: string | null;
+  at: string;
+}
+
 export interface ContentStore {
+  // certificates
+  /** 依 (tenant, cert_no) upsert，回傳新增／更新筆數 */
+  upsertCertificates(rows: Omit<CertificateRow, "id" | "created_at" | "updated_at">[]): Promise<{ inserted: number; updated: number }>;
+  getCertificateByNo(tenantId: string, certNo: string): Promise<CertificateRow | null>;
+  findCertificatesByNameBirth(tenantId: string, nameNorm: string, birth: string): Promise<CertificateRow[]>;
+  listCertificates(tenantId: string, opts: { limit: number; offset: number; q?: string }): Promise<{ rows: CertificateRow[]; total: number }>;
+  updateCertificate(tenantId: string, id: string, patch: Partial<Pick<CertificateRow, "status" | "note" | "expires_on">>): Promise<CertificateRow | null>;
+  insertCertLookup(row: Omit<CertLookupRow, "id" | "at">): Promise<void>;
+  listCertLookups(tenantId: string, limit: number): Promise<CertLookupRow[]>;
+
   // downloads
   insertDocument(row: Omit<DocumentRow, "id" | "created_at" | "updated_at" | "download_count"> & { id?: string }): Promise<DocumentRow>;
   updateDocument(tenantId: string, id: string, patch: Partial<Omit<DocumentRow, "id" | "tenant_id" | "created_at" | "updated_at" | "download_count">>): Promise<DocumentRow | null>;

@@ -52,6 +52,7 @@ modules/<id>/
 | `search` | core | `/search?q=`；區塊 `search_box` | （函式 `builder_search_content`） | — |
 | `directory` | core | `/people`（`?category=` 篩選）、`/people/<slug>`；區塊 `people_grid` | `builder_people`（聯絡方式 `show_contact` 才公開） | `create_person`、`update_person`、`list_people` |
 | `downloads` | core | `/downloads`、`/downloads/<id>`（權限檢查後 302 到 60 秒簽名網址）；區塊 `downloads_list`；後台「文件」 | `builder_documents`；Storage 私有 bucket `builder-downloads` | `create_document_upload`、`complete_document_upload`、`update_document`、`list_documents` |
+| `certificates` | core | `/verify`、`/api/s/<slug>/verify`（JSON）；區塊 `certificate_lookup`；後台「證照」（CSV 匯入） | `builder_certificates`、`builder_cert_lookups`（只增不改） | `import_certificates`、`list_certificates`、`set_certificate_status`、`list_certificate_lookups` |
 | `stored-value` | members、shop | `/wallet`（方案與購買）、`/s/<slug>/api/wallet/topup`；結帳「儲值金」；會員中心「我的儲值金」；區塊 `topup_plans`；後台「會員經營」 | `builder_wallet_ledger`（只增不改）、`builder_topup_plans` | `get_member_balance`、`adjust_balance`、`create_topup_plan`、`update_topup_plan`、`list_topup_plans` |
 | `loyalty` | members、shop | 結帳「點數折抵」；會員中心「我的點數」；區塊 `loyalty_tiers` | `builder_points_ledger`（只增不改）、`builder_member_tiers`；訂單欄位 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid` | `get_member_points`、`adjust_points`、`list_tiers`、`update_tiers` |
 
