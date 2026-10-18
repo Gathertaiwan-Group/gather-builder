@@ -184,7 +184,11 @@ export async function subscribe(deps: SubDeps, input: { tenant: TenantRow; membe
   if (!provider) throw new ServiceError("invalid", "此網站目前無法線上訂閱");
   // 放棄的 pending（超過 1 小時沒完成）先作廢，讓會員可以重新訂閱
   for (const s of (await deps.store.listSubscriptions(tenant.id, { memberId: member.id, planId: plan.id, status: "pending", limit: 5, offset: 0 })).rows) {
-    if (Date.parse(s.created_at) < Date.now() - 3600_000) await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: new Date().toISOString(), ended_at: new Date().toISOString() });
+    if (Date.parse(s.created_at) < Date.now() - 3600_000) {
+      // 第七批審查 M4：已有委託單號（藍新那邊可能已成立）→ 先終止委託
+      if (s.period_no) await requestCancel(deps, tenant, s, "system:abandoned");
+      else await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: new Date().toISOString(), ended_at: new Date().toISOString() });
+    }
   }
   let sub: SubscriptionRow;
   try {
@@ -205,7 +209,7 @@ export async function subscribe(deps: SubDeps, input: { tenant: TenantRow; membe
     startType: pp.startType,
     times: plan.total_periods,
     notifyUrl: `${base}/api/subscriptions/newebpay/notify/${tenant.id}?${q}`,
-    returnUrl: `${base}/api/subscriptions/newebpay/return/${tenant.id}?${q}`,
+    returnUrl: `${base}/api/subscriptions/newebpay/return/${tenant.id}?s=${encodeURIComponent(sub.id)}&t=${payToken("return", `sub:${sub.id}`)}`,
     backUrl: `${base}/s/${tenant.slug}/account`,
     payerEmail: member.email,
   });
@@ -259,6 +263,14 @@ export async function handleSubscriptionNotify(deps: SubDeps, input: { tenantId:
 type R = (o: string) => SubNotifyResult;
 
 async function onCreation(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider, data: Record<string, unknown>, r: Record<string, unknown>, ok: R, retry: R) {
+  if ((sub.status === "cancelled" || sub.status === "expired") && String(data.Status) === "SUCCESS" && !sub.period_no && r.PeriodNo) {
+    // 第七批審查 M4：本地已取消（例如放棄後被清掉）才收到「委託建立成功」→ 立刻終止藍新委託、警示店主（若首期已扣款需退款）
+    const t = await provider.terminatePeriod(sub.merchant_order_no, String(r.PeriodNo));
+    await deps.store.updateSubscriptionIf(tenant.id, sub.id, {}, { period_no: String(r.PeriodNo), cancel_state: t.kind === "ok" || t.kind === "already" ? "done" : "failed", cancel_error: "message" in t ? t.message.slice(0, 300) : null });
+    const owner = await ownerEmail(deps.store, tenant);
+    if (owner) await mailSafe(deps, owner, `🔴【${tenant.name}】已取消的訂閱收到藍新委託成立`, `委託編號 ${sub.merchant_order_no}（PeriodNo ${String(r.PeriodNo)}）在本站已取消後才通知成立。系統${t.kind === "ok" || t.kind === "already" ? "已終止委託" : "終止委託失敗，請到藍新後台手動終止"}；若首期已授權（${String(r.RespondCode ?? "") === "00" ? "是" : "否"}），請到藍新後台退款。`);
+    return ok("created_after_cancel");
+  }
   if (sub.status !== "pending") return ok(`already:${sub.status}`);
   const plan = await deps.store.getSubscriptionPlan(tenant.id, sub.plan_id);
   if (String(data.Status) !== "SUCCESS") {
@@ -338,7 +350,14 @@ async function recordCharge(deps: SubDeps, tenant: TenantRow, sub: SubscriptionR
   const periodEnd = new Date(addInterval(now, sub.interval).getTime() + PERIOD_SLACK_MS).toISOString();
   const graceUntil = new Date(now.getTime() + (settings.graceDays ?? DEFAULT_GRACE_DAYS) * 86400_000).toISOString();
   const res = await deps.store.recordSubscriptionCharge(tenant.id, { subscriptionId: sub.id, periodIndex: n, amount: c.amount, status: c.failed ? "failed" : "paid", tradeNo: c.tradeNo, raw: c.raw, periodEnd, graceUntil });
-  if (!res.inserted) return ok(`duplicate:${n}`);
+  if (!res.inserted) {
+    // 第七批審查 M3：上一次入帳後在開通前中斷 → 重送時補開通（冪等）
+    if (!c.failed && res.status === "active") {
+      const cur = await deps.store.getSubscription(tenant.id, sub.id);
+      if (cur && cur.entitlement_state === "none") await afterActivated(deps, tenant, cur, `period_${n}_retry`);
+    }
+    return ok(`duplicate:${n}`);
+  }
   if (sub.query_failures) await deps.store.updateSubscriptionIf(tenant.id, sub.id, {}, { query_failures: 0 });
   const after = (await deps.store.getSubscription(tenant.id, sub.id))!;
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: "newebpay", action: c.failed ? "subscription.charge_failed" : "subscription.charge", payload: { subscriptionId: sub.id, period: n, amount: c.amount, status: res.status } });
@@ -365,11 +384,17 @@ async function recordCharge(deps: SubDeps, tenant: TenantRow, sub: SubscriptionR
 
 async function afterActivated(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, why: string) {
   if (sub.entitlement_state === "granted") return;
+  // 第七批審查 H1：藍新測試環境（sandbox）的訂閱沒有真的收到錢 → 不開通任何權益（同 shop 的 sandbox 規則）
+  if (sub.sandbox) {
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:subscriptions", action: "subscription.sandbox_no_entitlement", payload: { subscriptionId: sub.id, why } });
+    return;
+  }
   await grantEntitlement(deps.store, tenant, sub, why);
 }
 
 /** 開通權益（entitlement_state none／revoked → granted，條件式只成功一次） */
 export async function grantEntitlement(store: Store, tenant: TenantRow, sub: SubscriptionRow, why = "grant") {
+  if (sub.sandbox) return false;
   const plan = await store.getSubscriptionPlan(tenant.id, sub.plan_id);
   for (const from of ["none", "revoked"] as const) {
     const claimed = await store.updateSubscriptionIf(tenant.id, sub.id, { entitlement_state: from }, { entitlement_state: "granted" });
@@ -400,7 +425,7 @@ export async function revokeEntitlement(store: Store, tenant: TenantRow, sub: Su
 /** 其他模組可用：會員是否有有效訂閱（active 或寬限中，或已取消但仍在已付期間內） */
 export async function hasActiveSubscription(store: Store, tenantId: string, memberId: string, planId?: string) {
   const rows = (await store.listSubscriptions(tenantId, { memberId, planId, limit: 50, offset: 0 })).rows;
-  return rows.some((s) => s.entitlement_state === "granted" && (s.status === "active" || s.status === "past_due" || (s.status === "cancelled" && !!s.ended_at && Date.parse(s.ended_at) > Date.now())));
+  return rows.some((s) => !s.sandbox && s.entitlement_state === "granted" && (s.status === "active" || s.status === "past_due" || (s.status === "cancelled" && !!s.ended_at && Date.parse(s.ended_at) > Date.now())));
 }
 
 /* ================================================================== 取消 */
@@ -412,7 +437,7 @@ export async function hasActiveSubscription(store: Store, tenantId: string, memb
 export async function requestCancel(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, by: string): Promise<{ status: SubscriptionStatus; cancelState: SubscriptionRow["cancel_state"]; message: string }> {
   if (sub.status === "cancelled" || sub.status === "expired") return { status: sub.status, cancelState: sub.cancel_state, message: "這筆訂閱已經結束" };
   const nowIso = new Date().toISOString();
-  if (sub.status === "pending" || !sub.period_no) {
+  if (!sub.period_no) {
     const moved = await deps.store.transitionSubscription(tenant.id, sub.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso, cancel_state: "done" });
     return { status: moved?.status ?? sub.status, cancelState: "done", message: "已取消（委託尚未建立）" };
   }
@@ -511,7 +536,10 @@ export async function sweepSubscriptions(deps: SubDeps, now = new Date()) {
       continue;
     }
     if (s.status === "pending" && Date.parse(s.created_at) <= now.getTime() - 3600_000) {
-      if (await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso })) out.abandoned++;
+      if (s.period_no) {
+        await requestCancel(deps, tenant, s, "system:abandoned");
+        out.abandoned++;
+      } else if (await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso })) out.abandoned++;
       continue;
     }
     if (s.status === "past_due" && s.grace_until && s.grace_until <= nowIso) {

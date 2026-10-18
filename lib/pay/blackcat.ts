@@ -129,6 +129,10 @@ export function createBlackcatProvider(creds: BlackcatCreds, fetchImpl: FetchLik
       console.error(`[blackcat] 查單回 ${String(r.data.status)} ${String(r.data.msg ?? "")}`);
       return null;
     }
+    if (r.data.cust_order_no != null && String(r.data.cust_order_no) !== gatewayOrderNo) {
+      console.error(`[blackcat] 查單回應的訂單號不符 ${gatewayOrderNo}`);
+      return null;
+    }
     return r.data;
   }
 

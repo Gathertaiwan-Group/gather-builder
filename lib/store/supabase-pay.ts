@@ -67,11 +67,11 @@ export function createSupabasePayStore(db: SupabaseClient): PayStore {
       const filter = [
         `and(status.eq.past_due,grace_until.lte.${now})`,
         `and(status.eq.active,current_period_end.lte.${now})`,
-        `and(status.in.(cancelled,expired),entitlement_state.eq.granted)`,
-        `cancel_state.in.(requested,failed)`,
+        `and(status.in.(cancelled,expired),entitlement_state.eq.granted,ended_at.lte.${now})`,
+        `and(cancel_state.in.(requested,failed),cancel_attempts.lt.10,status.in.(pending,active,past_due))`,
         `and(status.eq.pending,created_at.lte.${hourAgo})`,
       ].join(",");
-      return (must(await db.from("builder_subscriptions").select("*").or(filter).limit(limit), "listSubscriptionsForSweep") ?? []) as SubscriptionRow[];
+      return (must(await db.from("builder_subscriptions").select("*").or(filter).order("updated_at").limit(limit), "listSubscriptionsForSweep") ?? []) as SubscriptionRow[];
     },
     async transitionSubscription(tenantId, id, from, to, patch = {}) {
       return must(

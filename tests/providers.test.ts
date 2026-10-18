@@ -411,3 +411,34 @@ describe("黑貓 PAY 專屬", () => {
     expect(r.outcome).toBe("signature:api_id");
   });
 });
+
+describe("第七批審查修正（金流）", () => {
+  it("M2：金額不符 → 警示店主（一次）；L8：綠界 callback SimulatePaid=1 → 不算已付", async () => {
+    const h = harnesses.find((x) => x.provider === "ecpay")!;
+    const store = newStore();
+    const s = await setup(store, h, "rv-amount");
+    const a = await s.order();
+    s.q.current = { state: "paid", amount: a.order.total - 1 };
+    await s.notify(a.payment, a.order.total);
+    await s.notify(a.payment, a.order.total);
+    expect(s.sent.filter((m) => m.subject.includes("無法確認"))).toHaveLength(1);
+    const b = await s.order();
+    s.q.current = { state: "paid", amount: b.order.total };
+    const p: Record<string, string> = { MerchantID: EC.merchantId, MerchantTradeNo: b.payment.gateway_order_no, RtnCode: "1", TradeAmt: String(b.order.total), SimulatePaid: "1" };
+    const body = new URLSearchParams({ ...p, CheckMacValue: ecpayCheckMac(p, EC.hashKey, EC.hashIv) }).toString();
+    const r = await handleProviderNotify(s.deps, { provider: "ecpay", tenantId: s.tenant.id, paymentId: b.payment.id, token: payToken("notify", b.payment.id), rawBody: body, contentType: "application/x-www-form-urlencoded" });
+    expect(r.outcome).toMatch(/^unknown_status/);
+    expect((await store.getOrderById(s.tenant.id, b.order.id))!.status).toBe("pending_payment");
+  });
+
+  it("L10：逾期前也回查先前失敗的付款（客人重刷成功、通知遺失）→ 認回已付不取消", async () => {
+    const h = harnesses.find((x) => x.provider === "newebpay")!;
+    const store = newStore();
+    const s = await setup(store, h, "rv-failed");
+    const a = await s.order();
+    s.q.current = { state: "failed", amount: a.order.total };
+    await s.notify(a.payment, a.order.total);
+    s.q.current = { state: "paid", amount: a.order.total };
+    expect((await expireIfDue(store, a.order, Date.now() + 3 * 3600_000, s.deps)).status).toBe("paid");
+  });
+});

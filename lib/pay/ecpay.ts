@@ -172,10 +172,12 @@ export function createEcpayProvider(creds: EcpayPayCreds, fetchImpl: FetchLike =
       return { ok: true, gatewayOrderNo: p.MerchantTradeNo, merchantId: p.MerchantID, hint: { RtnCode: p.RtnCode, SimulatePaid: p.SimulatePaid } };
     },
 
-    async queryPayment({ gatewayOrderNo }) {
+    async queryPayment({ gatewayOrderNo }, hint) {
       const q = await queryRaw(gatewayOrderNo);
       if (!q) return null;
       const r = classifyEcpayQuery(q);
+      // 第七批審查 L8：callback 標示 SimulatePaid=1（廠商後台模擬付款）→ 不算已付（官方：模擬付款請勿變更訂單狀態）
+      if (hint && String(hint.SimulatePaid ?? "") === "1") r.simulated = true;
       // 查單沒有 SimulatePaid 欄位；stage 環境的「已付款」只可能是模擬付款或測試卡，本來就只算 sandbox（不出貨）
       return r;
     },

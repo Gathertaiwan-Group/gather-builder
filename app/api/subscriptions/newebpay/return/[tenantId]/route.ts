@@ -13,7 +13,7 @@ async function handle(req: Request, { params }: { params: Promise<{ tenantId: st
   const { tenantId } = await params;
   const url = new URL(req.url);
   const s = url.searchParams.get("s") ?? "";
-  if (!UUID.test(tenantId) || !verifyPayToken("notify", `sub:${s}`, url.searchParams.get("t"))) return new Response("invalid", { status: 400 });
+  if (!UUID.test(tenantId) || !verifyPayToken("return", `sub:${s}`, url.searchParams.get("t"))) return new Response("invalid", { status: 400 });
   const tenant = await getStore().getTenantById(tenantId);
   if (!tenant) return new Response("not found", { status: 404 });
   return NextResponse.redirect(`${baseUrlFrom(req).replace(/\/$/, "")}/s/${tenant.slug}/account?ok=${encodeURIComponent("已送出訂閱，確認扣款結果後會寄信通知你（約一分鐘內）")}`, 303);

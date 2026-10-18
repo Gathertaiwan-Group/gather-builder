@@ -12,7 +12,7 @@ type P = keyof typeof CALLBACK_RESPONSES;
 
 export async function POST(req: Request, { params }: { params: Promise<{ provider: string; tenantId: string }> }) {
   const { provider, tenantId } = await params;
-  if (!(provider in CALLBACK_RESPONSES)) return new Response("not found", { status: 404 });
+  if (!Object.hasOwn(CALLBACK_RESPONSES, provider)) return new Response("not found", { status: 404 });
   const fmt = CALLBACK_RESPONSES[provider as P];
   const text = (r: { status: number; body: string }) => new Response(r.body, { status: r.status, headers: { "content-type": "text/plain; charset=utf-8" } });
   try {

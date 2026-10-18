@@ -296,3 +296,53 @@ describe("訂閱：寬限、停權、取消", () => {
     expect(l.subscriptions[0]).toMatchObject({ status: "active", amount: 299 });
   });
 });
+
+describe("第七批審查修正（訂閱）", () => {
+  it("H1：sandbox 訂閱不開通任何權益、不算有效訂閱", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv-sbx", { sandbox: true, course: true });
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, allowSandbox: true, data: { planId: s.plan.id } });
+    s.nw.st.already = 1;
+    expect((await s.notify(r.subscription.id, creation(r.subscription))).outcome).toBe("charged:1");
+    expect((await store.getSubscription(s.tenant.id, r.subscription.id))!).toMatchObject({ status: "active", sandbox: true, entitlement_state: "none" });
+    expect(await store.getEnrollment(s.tenant.id, s.course!.id, s.member.id)).toBeNull();
+    expect(await hasActiveSubscription(store, s.tenant.id, s.member.id)).toBe(false);
+  });
+
+  it("M5：晚到的扣款失敗通知不會把已扣款成功的期別降級", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv-late");
+    const { sub } = await activeSub(s);
+    s.nw.st.already = 2;
+    expect((await s.notify(sub.id, charge(sub, 2))).outcome).toBe("charged:2");
+    await s.notify(sub.id, charge(sub, 2, false));
+    expect((await store.getSubscription(s.tenant.id, sub.id))!.status).toBe("active");
+  });
+
+  it("M3：入帳後在開通前中斷 → 重送時補開通", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv-retry", { course: true });
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    await store.updateSubscriptionIf(s.tenant.id, r.subscription.id, {}, { period_no: "P2610190000aaaa" });
+    await store.recordSubscriptionCharge(s.tenant.id, { subscriptionId: r.subscription.id, periodIndex: 2, amount: 299, status: "paid", tradeNo: "x", raw: {}, periodEnd: new Date(Date.now() + 30 * D).toISOString(), graceUntil: new Date().toISOString() });
+    expect((await store.getSubscription(s.tenant.id, r.subscription.id))!.entitlement_state).toBe("none");
+    s.nw.st.already = 2;
+    expect((await s.notify(r.subscription.id, charge(r.subscription, 2))).outcome).toBe("duplicate:2");
+    expect((await store.getSubscription(s.tenant.id, r.subscription.id))!.entitlement_state).toBe("granted");
+  });
+
+  it("M4：pending 但已有委託單號 → 取消會終止藍新委託；本地已取消才收到建立成功 → 終止並警示", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv-pending");
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    await store.updateSubscriptionIf(s.tenant.id, r.subscription.id, {}, { period_no: "P2610190000aaaa" });
+    const c = await memberCancelSubscription(s.deps, { tenant: s.tenant, member: s.member, subscriptionId: r.subscription.id });
+    expect(c.status).toBe("cancelled");
+    expect(s.nw.st.terminates).toBe(1);
+    const r2 = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    await store.transitionSubscription(s.tenant.id, r2.subscription.id, ["pending"], "cancelled", {});
+    expect((await s.notify(r2.subscription.id, creation(r2.subscription))).outcome).toBe("created_after_cancel");
+    expect(s.nw.st.terminates).toBe(2);
+    expect(s.sent.some((m) => m.subject.includes("已取消的訂閱收到藍新委託成立"))).toBe(true);
+  });
+});

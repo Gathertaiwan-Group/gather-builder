@@ -234,3 +234,17 @@ describe("退款 refund_order", () => {
     await expect(refundOrder(ctxFor(store), { site: "rf-manual", orderNo: order.order_no, confirm: true })).rejects.toThrow(/沒有已付款的線上付款/);
   });
 });
+
+describe("第七批審查修正（LINE Pay）", () => {
+  it("M6：已授權但 confirm 被拒 → 付款 failed、警示，不再重送 confirm；訂單照常逾期取消", async () => {
+    const store = newStore();
+    const s = await lpShop(store, "rv-lp");
+    const { order, payment } = await s.order();
+    s.lp.st.confirmCode = "1106";
+    s.lp.st.checkCode = "0110";
+    expect((await s.confirm(payment)).result).toBe("failed");
+    expect(s.sent.some((m) => m.includes("無法確認"))).toBe(true);
+    expect((await expireIfDue(store, order, Date.now() + 3 * 3600_000, s.deps)).status).toBe("cancelled");
+    expect(s.lp.st.confirms).toHaveLength(1);
+  });
+});

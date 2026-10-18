@@ -164,7 +164,8 @@ export function createLinepayProvider(creds: LinepayCreds, fetchImpl: FetchLike 
       if (c === "0000") {
         const pi = Array.isArray(info(r.data).payInfo) ? (info(r.data).payInfo as Record<string, unknown>[]) : [];
         const sum = pi.length ? pi.reduce((s, p) => s + (intAmount(p.amount) ?? Number.NaN), 0) : undefined;
-        return { kind: "ok", amount: sum !== undefined && Number.isFinite(sum) ? sum : undefined, raw: r.data };
+        const amount = sum !== undefined && Number.isFinite(sum) ? sum : await paidAmount(transactionId);
+        return { kind: "ok", amount, raw: r.data };
       }
       return { kind: "rejected", code: c, message: String(r.data.returnMessage ?? ""), raw: r.data };
     },

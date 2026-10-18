@@ -95,6 +95,8 @@ describe.skipIf(!enabled)("第七批金流（整合）", () => {
     expect((await store.getSubscription(t.id, sub.id))!.status).toBe("active");
     expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 2, amount: 299, status: "failed", tradeNo: null, raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("past_due");
     expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 3, amount: 299, status: "paid", tradeNo: "T3", raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("active");
+    // 審查 M5：晚到的第 3 期失敗通知（第 3 期已成功）→ 不降級
+    expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 3, amount: 299, status: "failed", tradeNo: null, raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("active");
     // 條件式轉換：expired 之後不能回 active
     expect(await store.transitionSubscription(t.id, sub.id, ["active"], "expired", { ended_at: new Date().toISOString() })).toMatchObject({ status: "expired" });
     expect(await store.transitionSubscription(t.id, sub.id, ["past_due"], "active")).toBeNull();
@@ -103,7 +105,7 @@ describe.skipIf(!enabled)("第七批金流（整合）", () => {
     expect(up.error?.code).toBe("42501");
     const del = await db.from("builder_subscription_charges").delete().eq("tenant_id", t.id);
     expect(del.error?.code).toBe("42501");
-    expect((await store.listSubscriptionCharges(t.id, sub.id)).length).toBe(4);
+    expect((await store.listSubscriptionCharges(t.id, sub.id)).length).toBe(5);
     const chk = await db.rpc("builder_grant_enrollment", { p_tenant: t.id, p_course: "00000000-0000-0000-0000-000000000000", p_member: m.id, p_source: "subscription", p_order: null, p_by: "itest" });
     // 課程不存在 → FK 錯（23503），不是 check 錯（23514）：代表 source 'subscription' 已被接受
     expect(chk.error?.code).toBe("23503");

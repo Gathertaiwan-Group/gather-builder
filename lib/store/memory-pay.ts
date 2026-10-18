@@ -101,11 +101,11 @@ export function createMemoryPayStore(): PayStore {
             (s) =>
               (s.status === "past_due" && !!s.grace_until && s.grace_until <= nowIso) ||
               (s.status === "active" && !!s.current_period_end && s.current_period_end <= nowIso) ||
-              ((s.status === "cancelled" || s.status === "expired") && s.entitlement_state === "granted") ||
-              s.cancel_state === "requested" ||
-              s.cancel_state === "failed" ||
+              ((s.status === "cancelled" || s.status === "expired") && s.entitlement_state === "granted" && !!s.ended_at && s.ended_at <= nowIso) ||
+              ((s.cancel_state === "requested" || s.cancel_state === "failed") && s.cancel_attempts < 10 && LIVE_SUB.has(s.status)) ||
               (s.status === "pending" && s.created_at <= new Date(Date.parse(nowIso) - 3600_000).toISOString()),
           )
+          .sort((a, b) => a.updated_at.localeCompare(b.updated_at))
           .slice(0, limit),
       );
     },
@@ -133,7 +133,7 @@ export function createMemoryPayStore(): PayStore {
       if (input.status === "paid" && LIVE_SUB.has(s.status)) {
         const end = !s.current_period_end || input.periodEnd > s.current_period_end ? input.periodEnd : s.current_period_end;
         next = { ...s, status: "active", current_period_end: end, grace_until: null, failed_count: 0, last_charge_at: now(), activated_at: s.activated_at ?? now(), updated_at: now() };
-      } else if (input.status === "failed" && (s.status === "active" || s.status === "past_due")) {
+      } else if (input.status === "failed" && (s.status === "active" || s.status === "past_due") && !charges.some((c) => c.subscription_id === s.id && c.status === "paid" && c.period_index >= input.periodIndex)) {
         next = { ...s, status: "past_due", grace_until: s.grace_until ?? input.graceUntil, failed_count: s.failed_count + 1, updated_at: now() };
       }
       subs.set(s.id, next);

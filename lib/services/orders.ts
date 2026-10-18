@@ -128,9 +128,15 @@ export async function expireIfDue(store: Store, order: OrderRow, now = Date.now(
     const d = deps ?? defaultPayDeps(store);
     const tenant = await store.getTenantById(order.tenant_id);
     if (!tenant) return order;
-    const pending = (await store.listPaymentsForOrder(order.tenant_id, order.id)).filter((p) => p.status === "pending");
+    const pending = (await store.listPaymentsForOrder(order.tenant_id, order.id)).filter((p) => p.status === "pending" || (p.status === "failed" && p.provider !== "pchomepay"));
     for (const p of pending) {
       const r = await queryAuthoritative(d, tenant, p, order.order_no);
+      if (p.status === "failed") {
+        // 第七批審查 L10：之前回查失敗（刷卡被拒）的付款，客人可能在同一付款頁重試成功而通知遺失 → 已付才重新打開
+        if (r.kind !== "paid") continue;
+        if (!(await store.transitionPayment(order.tenant_id, p.id, "failed", "pending", {}))) continue;
+        p.status = "pending";
+      }
       if (r.kind === "query_failed" || r.kind === "unknown") return order; // 不確定就不取消
       if (r.kind === "paid") {
         const out = await settlePaid(d, tenant, p, order, r.q);
@@ -566,6 +572,8 @@ async function settlePaid(deps: PayDeps, tenant: TenantRow, payment: PaymentRow,
   if (Math.round(q.amount) !== expected || Math.round(order.total) !== expected) {
     console.error(`[${payment.provider}] 金額不符，不標記付款！order=${order.order_no} gateway=${gw} 期望=${expected} 權威=${q.amount}`);
     await deps.store.updatePayment(tenant.id, payment.id, { raw });
+    // 第七批審查 M2：金額不符＝錢可能扣了但訂單不會轉已付 → 警示店主（同一筆只寄一次）
+    await alertOwner(deps, tenant, payment, order.order_no, `付款金額不符（訂單 ${expected}、${label} 回查 ${q.amount}），系統沒有標記已付款，請到商家後台確認並處理`);
     return "amount_mismatch";
   }
   const paidAt = new Date().toISOString();
@@ -600,8 +608,13 @@ async function settlePaid(deps: PayDeps, tenant: TenantRow, payment: PaymentRow,
     }
     return "paid_after_cancel";
   }
-  // 已是 paid／fulfilled（重複 notify 或已手動處理）：只補記付款紀錄，不重跑副作用
-  await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
+  // 已是 paid／fulfilled（重複 notify 或已手動處理）：只補記付款紀錄，不重跑寄信
+  const firstRecord = await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
+  // 第七批審查 M3：訂單已轉 paid、但付款紀錄是這次才補記 → 上一次可能在跑副作用前中斷：補跑模組 hooks 與自動發票（兩者都冪等；不重寄信）
+  if (firstRecord && order.status === "paid" && !order.payment_sandbox && !payment.sandbox) {
+    await autoIssueOnPaid(deps.store, tenant, order);
+    await runPaidHooks(deps, tenant, order);
+  }
   return "already_processed";
 }
 
@@ -938,7 +951,8 @@ export async function confirmLinepayPayment(deps: PayDeps, tenant: TenantRow, pa
   if (!(await deps.store.claimPaymentConfirm(tenant.id, payment.id, new Date(Date.now() - LINEPAY_CONFIRM_STALE_MS).toISOString()))) return "pending";
   const c = await provider.confirm(payment.gateway_trade_no, payment.amount);
   if (c.kind === "ok") {
-    const out = await settlePaid(deps, tenant, payment, order, { amount: c.amount ?? payment.amount, raw: { confirm: c.raw } });
+    // 第七批審查 L7：實收金額一定來自 LINE Pay（confirm 的 payInfo 或 Payment Details），取不到就不標記
+    const out = await settlePaid(deps, tenant, payment, order, { amount: c.amount, raw: { confirm: c.raw } });
     return out === "paid" || out === "already_processed" ? "paid" : out === "paid_after_cancel" ? "failed" : "pending";
   }
   // 非 0000（含 1172 重複、逾時）：權威回查
@@ -952,8 +966,10 @@ export async function confirmLinepayPayment(deps: PayDeps, tenant: TenantRow, pa
     return "failed";
   }
   if (r.kind === "pending" && r.q.needsConfirm && c.kind === "rejected") {
-    // 已授權但 confirm 被拒（例如金額不符）→ 不重試、警示店主
-    await alertOwner(deps, tenant, payment, order.order_no, `LINE Pay confirm 被拒（${c.code} ${c.message}），交易仍是已授權未請款`);
+    // 第七批審查 M6：已授權但 confirm 被拒（例如金額不符）→ 不再重送 confirm：付款標 failed、警示店主；訂單照常逾期取消（授權未請款會自動失效）
+    await deps.store.transitionPayment(tenant.id, payment.id, "pending", "failed", { raw: { confirm: c.raw, query: r.q.raw } });
+    await alertOwner(deps, tenant, payment, order.order_no, `LINE Pay confirm 被拒（${c.code} ${c.message}），交易仍是已授權未請款，系統不會再 confirm`);
+    return "failed";
   }
   // 放掉宣告讓下次（逾期前回查或客人重新整理）可以再試
   if (c.kind === "rejected") await deps.store.updatePayment(tenant.id, payment.id, { confirm_claimed_at: null, raw: { confirm: c.raw } });

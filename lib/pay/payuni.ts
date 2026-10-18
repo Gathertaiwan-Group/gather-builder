@@ -106,7 +106,7 @@ export function createPayuniProvider(creds: PayuniCreds, fetchImpl: FetchLike = 
 
   async function queryRaw(merTradeNo: string) {
     const q = await call("/api/trade/query", { MerTradeNo: merTradeNo, Timestamp: nowSec() }, "2.0");
-    if (q && String(q.Status) === "SUCCESS" && q.MerTradeNo && String(q.MerTradeNo) !== merTradeNo) {
+    if (q && String(q.Status) === "SUCCESS" && (String(q.MerTradeNo ?? "") !== merTradeNo || (q.MerID != null && String(q.MerID) !== creds.merId))) {
       console.error(`[payuni] 查詢回應的訂單號不符 ${merTradeNo}`);
       return null;
     }
