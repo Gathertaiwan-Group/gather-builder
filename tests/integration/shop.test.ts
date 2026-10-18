@@ -9,7 +9,7 @@ import { createSite } from "@/lib/services/sites";
 import { configureModule } from "@/lib/services/modules";
 import { publishSite } from "@/lib/services/publish";
 import { createProduct, placeOrder, updateProduct } from "@/lib/services/shop";
-import { cancelOrder, handlePchomepayNotify, markOrderPaid, savePaymentAccount, startPchomepayPayment } from "@/lib/services/orders";
+import { cancelOrder, fulfillOrder, handlePchomepayNotify, markOrderPaid, savePaymentAccount, startPchomepayPayment } from "@/lib/services/orders";
 import { getSessionMember, loginMember, registerMember, resetPassword, sha256 } from "@/lib/services/members";
 import { decryptSecret } from "@/lib/secretbox";
 import { adminActor } from "@/lib/tokens";
@@ -129,8 +129,12 @@ describe.skipIf(!enabled)("members／shop Supabase 實作（整合）", () => {
     expect((await store.listOrderItems(a.id, o1.order.id)).every((i) => i.deducted_from === "variant")).toBe(true);
     await expect(placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, variantId: M.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } })).rejects.toThrow(/庫存不足/);
     // 改價（保留 M、刪掉 L）
-    const up = await updateProduct(ctx, { site: slugA, productId: p.id, confirm: true, patch: { variants: [{ options: { size: "M" }, price: 450, stock: 0 }] } });
+    const up = await updateProduct(ctx, { site: slugA, productId: p.id, confirm: true, patch: { variants: [{ options: { size: "M" }, price: 450 }] } });
     expect(up.variants[0]!.id).toBe(M.id);
+    expect(up.variants[0]!.stock).toBe(0); // 第二輪審查 M2：沒帶 stock 不動庫存
+    // 帶錯的 expectedStock → conflict（真 DB 條件更新）
+    await expect(updateProduct(ctx, { site: slugA, productId: p.id, confirm: true, patch: { variants: [{ options: { size: "M" }, stock: 7, expectedStock: 3 }] } })).rejects.toMatchObject({ code: "conflict" });
+    expect(await store.setProductStockIf(a.id, p.id, 99, 5)).toBe(false);
     await cancelOrder(ctx, { site: slugA, orderId: o1.order.id, confirm: true });
     vs = await store.listVariants(a.id, [p.id]);
     expect(vs).toHaveLength(1);
@@ -142,6 +146,12 @@ describe.skipIf(!enabled)("members／shop Supabase 實作（整合）", () => {
     const mug = await createProduct(ctx, { site: slugA, slug: "counter", name: "C", price: 10, status: "published", confirm: true });
     const big = await store.placeOrder(a.id, { order_prefix: "IT", member_id: null, contact, shipping, subtotal: 10, shipping_fee: 0, total: 10, payment_method: "offline", expires_at: new Date(Date.now() + 3600e3).toISOString(), access_key_hash: "x", note: null }, [{ product_id: mug.id, variant_id: null, name: "C", variant_label: null, sku: null, unit_price: 10, qty: 1, line_total: 10 }], "20991230");
     expect(big.order_no).toBe("IT-20991230-10000");
+
+    // M1：依商品找逾期未付的訂單（下單前釋放保留）
+    const stale = await store.placeOrder(a.id, { order_prefix: "IT", member_id: null, contact, shipping, subtotal: 10, shipping_fee: 0, total: 10, payment_method: "offline", expires_at: new Date(Date.now() - 60e3).toISOString(), access_key_hash: "x", note: null }, [{ product_id: mug.id, variant_id: null, name: "C", variant_label: null, sku: null, unit_price: 10, qty: 1, line_total: 10 }], "20991231");
+    const due = await store.listExpiredPendingOrdersForProducts(a.id, [mug.id], new Date().toISOString(), 10);
+    expect(due.map((o) => o.id)).toEqual([stale.id]);
+    expect(due[0]!.payment_sandbox).toBe(false);
   });
 
   it("金流憑證加密存放（DB 看不到明文）＋ notify 重複只轉換一次", async () => {
@@ -155,29 +165,40 @@ describe.skipIf(!enabled)("members／shop Supabase 實作（整合）", () => {
 
     await store.markPaymentAccount(a.id, "pchomepay", { status: "verified", verified_at: new Date().toISOString(), last_error: null });
     const p = await createProduct(ctx, { site: slugA, slug: "online", name: "線上", price: 120, status: "published", confirm: true });
-    const { order, accessKey } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "pchomepay" } });
+    const { order, accessKey } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "pchomepay" }, allowSandbox: true });
     const factory = async () => ({ sandbox: true, client: { createPayment: async () => ({ paymentUrl: "https://sandbox-secure.pchomepay.com.tw/mock" }) } as unknown as PchomepayClient });
     const pay = await startPchomepayPayment({ store, baseUrl: "http://itest", clientFactory: factory }, { tenant: a, order, accessKey });
     const sent: string[] = [];
-    const d = { store, baseUrl: "http://itest", sendMail: async (_t: string, s: string) => void sent.push(s), queryFor: async () => ({ queryPayment: async () => ({ status_code: "S", amount: 120, raw: {} }) }) };
+    const d = { store, baseUrl: "http://itest", sendMail: async (_t: string, s: string) => void sent.push(s), queryFor: async () => ({ queryPayment: async () => ({ status: "S", amount: 120, raw: { status: "S", status_code: null, amount: 120 } }) }) };
     const body = new URLSearchParams({ notify_type: "order_confirm", notify_message: JSON.stringify({ order_id: pay.gatewayOrderNo }) }).toString();
     const rs = await Promise.all(Array.from({ length: 3 }, () => handlePchomepayNotify(d, { tenantId: a.id, rawBody: body })));
     expect(rs.filter((r) => r.outcome === "paid")).toHaveLength(1);
-    expect((await store.getOrderById(a.id, order.id))!.status).toBe("paid");
+    const paid = (await store.getOrderById(a.id, order.id))!;
+    expect(paid.status).toBe("paid");
+    // H1：sandbox 付款成功 → 訂單標記 payment_sandbox（真 DB 欄位），不能出貨
+    expect(paid.payment_sandbox).toBe(true);
+    await expect(fulfillOrder(ctx, { site: slugA, orderId: order.id, confirm: true })).rejects.toMatchObject({ code: "invalid" });
     expect((await store.getPaymentByGatewayNo(pay.gatewayOrderNo))!.status).toBe("paid");
   });
 
   it("已取消訂單收到付款：不改狀態、付款標 paid_after_cancel", async () => {
     const a = (await store.getTenantBySlug(slugA))!;
     const p = await createProduct(ctx, { site: slugA, slug: "late", name: "遲到", price: 90, status: "published", confirm: true });
-    const { order, accessKey } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "pchomepay" } });
+    const { order, accessKey } = await placeOrder({ store, baseUrl: "http://itest" }, { tenant: a, member: null, data: { items: [{ productId: p.id, qty: 1 }], contact, shipping, paymentMethod: "pchomepay" }, allowSandbox: true });
     const factory = async () => ({ sandbox: true, client: { createPayment: async () => ({ paymentUrl: "https://sandbox-secure.pchomepay.com.tw/mock" }) } as unknown as PchomepayClient });
     const pay = await startPchomepayPayment({ store, baseUrl: "http://itest", clientFactory: factory }, { tenant: a, order, accessKey });
     await cancelOrder(ctx, { site: slugA, orderId: order.id, confirm: true });
-    const d = { store, baseUrl: "http://itest", queryFor: async () => ({ queryPayment: async () => ({ status_code: "S", amount: 90, raw: {} }) }) };
+    const d = { store, baseUrl: "http://itest", queryFor: async () => ({ queryPayment: async () => ({ status: "S", amount: 90, raw: { status: "S", status_code: null, amount: 90 } }) }) };
     const body = new URLSearchParams({ notify_type: "order_confirm", notify_message: JSON.stringify({ order_id: pay.gatewayOrderNo }) }).toString();
     expect((await handlePchomepayNotify(d, { tenantId: a.id, rawBody: body })).outcome).toBe("paid_after_cancel");
     expect((await store.getOrderById(a.id, order.id))!.status).toBe("cancelled");
     expect((await store.getPaymentByGatewayNo(pay.gatewayOrderNo))!.status).toBe("paid_after_cancel");
+    // H2：回查失敗計數與「只警示一次」在真 DB 上的語意
+    const pr = (await store.getPaymentByGatewayNo(pay.gatewayOrderNo))!;
+    expect(await store.bumpPaymentQueryFailure(a.id, pr.id, "x")).toBe(1);
+    expect(await store.bumpPaymentQueryFailure(a.id, pr.id, "y")).toBe(2);
+    const flags = await Promise.all([store.markPaymentAlerted(a.id, pr.id), store.markPaymentAlerted(a.id, pr.id)]);
+    expect(flags.filter(Boolean)).toHaveLength(1);
+    expect((await store.getPaymentByGatewayNo(pay.gatewayOrderNo))!.last_query_error).toBe("y");
   });
 });

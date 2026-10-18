@@ -125,20 +125,38 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       // 依 options 比對沿用原本的列：未付款訂單的 variant_id 不會因為「只是改價格」而失效
       const existing = (must(await db.from("builder_product_variants").select("*").eq("tenant_id", tenantId).eq("product_id", productId), "replaceVariants.read") ?? []) as VariantRow[];
       const byKey = new Map(existing.map((v) => [optionsKey(v.options), v]));
+      // 先整批檢查 expectedStock，不符整份不寫（真正寫入時再以條件更新防競態）
+      for (const r of rows) {
+        const hit = byKey.get(optionsKey(r.options));
+        if (r.stock !== undefined && r.expectedStock !== undefined && (hit?.stock ?? 0) !== r.expectedStock) {
+          throw new ServiceError("conflict", `規格「${Object.values(r.options).join(" / ")}」的庫存在你讀取後已變動（目前 ${hit?.stock ?? 0}，你讀到的是 ${r.expectedStock}），請重新讀取後再改`);
+        }
+      }
       const keep = new Set<string>();
       for (const r of rows) {
+        const { expectedStock, stock, ...rest } = r;
         const hit = byKey.get(optionsKey(r.options));
         if (hit && !keep.has(hit.id)) {
           keep.add(hit.id);
-          must(await db.from("builder_product_variants").update({ price: r.price, sku: r.sku, stock: r.stock, sort: r.sort, options: r.options }).eq("tenant_id", tenantId).eq("id", hit.id), "replaceVariants.update");
+          let q = db.from("builder_product_variants").update({ ...rest, ...(stock !== undefined ? { stock } : {}) }).eq("tenant_id", tenantId).eq("id", hit.id);
+          if (stock !== undefined && expectedStock !== undefined) q = q.eq("stock", expectedStock);
+          const upd = must(await q.select("id"), "replaceVariants.update") as { id: string }[];
+          if (!upd.length) throw new ServiceError("conflict", `規格「${Object.values(r.options).join(" / ")}」的庫存剛被訂單扣過，請重新讀取後再改`);
         } else {
-          const ins = must(await db.from("builder_product_variants").insert({ ...r, tenant_id: tenantId, product_id: productId }).select("id").single(), "replaceVariants.insert") as { id: string };
+          const ins = must(await db.from("builder_product_variants").insert({ ...rest, stock: stock ?? 0, tenant_id: tenantId, product_id: productId }).select("id").single(), "replaceVariants.insert") as { id: string };
           keep.add(ins.id);
         }
       }
       const drop = existing.filter((v) => !keep.has(v.id)).map((v) => v.id);
       if (drop.length) must(await db.from("builder_product_variants").delete().eq("tenant_id", tenantId).in("id", drop), "replaceVariants.delete");
       return (must(await db.from("builder_product_variants").select("*").eq("tenant_id", tenantId).eq("product_id", productId).order("sort"), "replaceVariants.list") ?? []) as VariantRow[];
+    },
+    async setProductStockIf(tenantId, id, expected, next) {
+      const rows = must(
+        await db.from("builder_products").update({ stock: next, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", id).eq("stock", expected).select("id"),
+        "setProductStockIf",
+      ) as { id: string }[];
+      return rows.length > 0;
     },
 
     /* ---------------------------------------------------------- orders */
@@ -201,6 +219,18 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       ) ?? [];
     },
 
+    async listExpiredPendingOrdersForProducts(tenantId, productIds, nowIso, limit) {
+      const valid = productIds.filter(isUuid);
+      if (!valid.length) return [];
+      const items = (must(await db.from("builder_order_items").select("order_id").eq("tenant_id", tenantId).in("product_id", valid).limit(2000), "expiredForProducts.items") ?? []) as { order_id: string }[];
+      const ids = [...new Set(items.map((i) => i.order_id))];
+      if (!ids.length) return [];
+      return (must(
+        await db.from("builder_orders").select("*").eq("tenant_id", tenantId).in("id", ids.slice(0, 500)).eq("status", "pending_payment").lt("expires_at", nowIso).order("expires_at").limit(limit),
+        "expiredForProducts.orders",
+      ) ?? []) as OrderRow[];
+    },
+
     /* ---------------------------------------------------------- payments */
     async getPaymentAccount(tenantId, provider) {
       return must(await db.from("builder_payment_accounts").select("*").eq("tenant_id", tenantId).eq("provider", provider).maybeSingle(), "getPaymentAccount") as PaymentAccountRow | null;
@@ -229,6 +259,21 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
     },
     async updatePayment(tenantId, id, patch) {
       must(await db.from("builder_payments").update({ ...patch, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", id), "updatePayment");
+    },
+    async bumpPaymentQueryFailure(tenantId, id, error) {
+      // 讀＋寫兩步：失敗次數只用來決定何時警示（警示本身用 markPaymentAlerted 條件更新保證只寄一次）
+      const cur = must(await db.from("builder_payments").select("query_failures").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "bumpPaymentQueryFailure.read") as { query_failures: number } | null;
+      if (!cur) return 0;
+      const n = (cur.query_failures ?? 0) + 1;
+      must(await db.from("builder_payments").update({ query_failures: n, last_query_error: error.slice(0, 300), updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", id), "bumpPaymentQueryFailure");
+      return n;
+    },
+    async markPaymentAlerted(tenantId, id) {
+      const rows = must(
+        await db.from("builder_payments").update({ alerted_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", id).is("alerted_at", null).select("id"),
+        "markPaymentAlerted",
+      ) as { id: string }[];
+      return rows.length > 0;
     },
     async transitionPayment(tenantId, id, from, to, patch) {
       const rows = must(

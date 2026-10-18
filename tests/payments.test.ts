@@ -21,10 +21,11 @@ const shipping = { name: "客人", phone: "0912345678", address: "台中市" };
 /** 建一張 PChomePay 待付款訂單（mock 建單），回傳閘道編號 */
 async function pendingPchomepayOrder(store: Store, slug: string) {
   const shop = await makeShop(store, slug);
-  await savePaymentAccount(ctxFor(store), { site: slug, appId: "APPID123", secret: "secret-value-123", sandbox: true });
+  // 正式環境旗標的憑證＋mock client（不打任何真實 API）。sandbox 的行為另見「H1」測試
+  await savePaymentAccount(ctxFor(store), { site: slug, appId: "APPID123", secret: "secret-value-123", sandbox: false });
   await store.markPaymentAccount(shop.tenant.id, "pchomepay", { status: "verified", verified_at: new Date().toISOString(), last_error: null });
   const { order, accessKey } = await placeOrder({ store, baseUrl: "http://t" }, { tenant: shop.tenant, member: null, data: { items: [{ productId: shop.mug.id, qty: 2 }], contact, shipping, paymentMethod: "pchomepay" } });
-  const factory = async () => ({ sandbox: true, client: { createPayment: async () => ({ paymentUrl: "https://sandbox-secure.pchomepay.com.tw/x" }) } as unknown as PchomepayClient });
+  const factory = async () => ({ sandbox: false, client: { createPayment: async () => ({ paymentUrl: "https://sandbox-secure.pchomepay.com.tw/x" }) } as unknown as PchomepayClient });
   const pay = await startPchomepayPayment({ store, baseUrl: "http://t", clientFactory: factory }, { tenant: shop.tenant, order, accessKey });
   return { ...shop, order, gatewayOrderNo: pay.gatewayOrderNo };
 }
@@ -45,13 +46,24 @@ function deps(store: Store, query: (orderNo: string) => Promise<PchomepayQuery |
   };
 }
 
-const paidQuery = (amount: number): PchomepayQuery => ({ status_code: "S", amount, raw: { status_code: "S", amount } });
+/**
+ * 查單回應的真實結構（依 Realreal 正式站實測：成功時 status="S"、status_code=null；
+ * 欄位見 Realreal/apps/api/src/lib/pchomepay.ts queryPayment 與官方外掛 OrderStatusCodeEnum.php）
+ */
+const realQuery = (data: Record<string, unknown>): PchomepayQuery => ({
+  status: data.status != null ? String(data.status) : undefined,
+  status_code: data.status_code != null ? String(data.status_code) : undefined,
+  amount: data.amount != null ? Number(data.amount) : undefined,
+  raw: data,
+});
+const paidQuery = (amount: number): PchomepayQuery =>
+  realQuery({ order_id: "GBX", status: "S", status_code: null, pay_type: "CARD", amount, payment_info: { installment: 1, card_last_number: "1234" } });
 
 describe("PChomePay notify 安全規則", () => {
   it("偽造 payload（自稱已付款），回查結果未付 → 不改狀態", async () => {
     const store = newStore();
     const s = await pendingPchomepayOrder(store, "forge-shop");
-    const { d, sent } = deps(store, async () => ({ status_code: "W", amount: s.order.total, raw: {} }));
+    const { d, sent } = deps(store, async () => realQuery({ order_id: "GBX", status: "P", status_code: "WP", pay_type: "ATM", amount: s.order.total }));
     const r = await handlePchomepayNotify(d, { tenantId: s.tenant.id, rawBody: body(s.gatewayOrderNo, "order_confirm", { status: "S" }) });
     expect(r).toMatchObject({ status: 200, body: "success" });
     expect((await store.getOrderById(s.tenant.id, s.order.id))!.status).toBe("pending_payment");
@@ -71,7 +83,7 @@ describe("PChomePay notify 安全規則", () => {
     const store = newStore();
     const s = await pendingPchomepayOrder(store, "retry-shop");
     expect(await handlePchomepayNotify(deps(store, async () => null).d, { tenantId: s.tenant.id, rawBody: body(s.gatewayOrderNo) })).toMatchObject({ status: 500, body: "retry" });
-    expect(await handlePchomepayNotify(deps(store, async () => ({ status_code: "S", raw: {} })).d, { tenantId: s.tenant.id, rawBody: body(s.gatewayOrderNo) })).toMatchObject({ status: 500 });
+    expect(await handlePchomepayNotify(deps(store, async () => realQuery({ order_id: "GBX", status: "S", status_code: null })).d, { tenantId: s.tenant.id, rawBody: body(s.gatewayOrderNo) })).toMatchObject({ status: 500 });
     expect((await store.getOrderById(s.tenant.id, s.order.id))!.status).toBe("pending_payment");
   });
 
@@ -153,11 +165,11 @@ describe("PChomePay client", () => {
         fail401 = false;
         return new Response("unauthorized", { status: 401 });
       }
-      return new Response(JSON.stringify({ order_id: "X", status_code: "S", amount: 100, pay_type: ["CARD"] }), { status: 200 });
+      return new Response(JSON.stringify({ order_id: "X", status: "S", status_code: null, amount: 100, pay_type: "CARD" }), { status: 200 });
     };
     const a = createPchomepayClient({ cacheKey: "tenant-a", appId: "A", secret: "S", sandbox: true }, fetchImpl);
     const b = createPchomepayClient({ cacheKey: "tenant-b", appId: "B", secret: "S", sandbox: true }, fetchImpl);
-    expect((await a.queryPayment("X"))?.status_code).toBe("S");
+    expect((await a.queryPayment("X"))?.status).toBe("S");
     await a.queryPayment("X");
     await b.queryPayment("X");
     expect(calls.filter((c) => c.endsWith("/v1/token"))).toHaveLength(2); // a 一次、b 一次

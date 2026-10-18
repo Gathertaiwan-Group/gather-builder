@@ -27,8 +27,12 @@ export function decryptSecret(enc: string, aad: string, key: Buffer = loadEncKey
   const [v, kid, iv, tag, ct] = enc.split(".");
   if (v !== "v1" || !kid || !iv || !tag || !ct) throw new Error("密文格式不正確");
   if (kid !== kidOf(key)) throw new Error("密文不是用目前的 PAYMENT_ENC_KEY 加密的（金鑰不符）");
-  const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
+  const ivBuf = Buffer.from(iv, "base64url");
+  const tagBuf = Buffer.from(tag, "base64url");
+  // GCM 會接受被截短的 tag（降低偽造難度），一律要求完整 16 bytes；IV 固定 12 bytes
+  if (tagBuf.length !== 16 || ivBuf.length !== 12) throw new Error("密文格式不正確（tag／iv 長度）");
+  const d = createDecipheriv("aes-256-gcm", key, ivBuf, { authTagLength: 16 });
   d.setAAD(Buffer.from(aad, "utf8"));
-  d.setAuthTag(Buffer.from(tag, "base64url"));
+  d.setAuthTag(tagBuf);
   return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
 }

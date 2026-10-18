@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { getStore } from "./store";
 import { requireSecret } from "./secrets";
 import { getMailer } from "./mail";
@@ -33,7 +33,7 @@ export async function handleMemberPost(req: Request, rawSlug: string, action: Me
   } catch {
     return new NextResponse("not found", { status: 404 });
   }
-  const deps: MemberDeps = { store, ipSecret: requireSecret("PREVIEW_SECRET"), baseUrl: baseUrlFrom(req), sendMail: getMailer() };
+  const deps: MemberDeps = { store, ipSecret: requireSecret("PREVIEW_SECRET"), baseUrl: baseUrlFrom(req), sendMail: getMailer(), defer: (t) => after(() => t) };
   const ip = clientIp(req);
   const back: Record<MemberAction, string> = { login: "/account/login", register: "/account/register", logout: "/account/login", forgot: "/account/forgot", reset: "/account/reset", profile: "/account" };
   let form: Record<string, string> = {};

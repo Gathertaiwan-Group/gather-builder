@@ -10,7 +10,31 @@ import { randomBytes } from "node:crypto";
  * - notify 沒有簽章：絕不信 payload，一律 `GET /v1/payment/{order_id}` 回查權威狀態。
  */
 export const PCHOMEPAY_MIN_AMOUNT = 30;
-export const PAID_STATUS_CODES = new Set(["S", "00", "1"]);
+
+/**
+ * 查單 `GET /v1/payment/{order_id}` 回應的判讀（H3，2026-10 依下列依據修正）：
+ * - 權威欄位是 `status`：`"S"` 成功、`"F"` 失敗、`"P"` 處理中。**成功時 `status_code` 通常是 null**。
+ *   依據：Realreal 正式站實付款的實作 `Realreal/apps/api/src/lib/pchomepay.ts`（queryPayment 型別註解）與
+ *   `routes/webhooks/pchomepay.ts`（2026-07-12 事件：只認 status_code 導致 4 筆已付訂單卡 pending，改看 status="S"）。
+ * - `status_code` 只是失敗／等待的細節碼：F 開頭為失敗（FE 訂單過期、FB 餘額不足、FX ATM 失效、FT、FF、FA、FP、FC、FE*），
+ *   W 開頭為等待（WP ATM 待繳款、WB 尚未選銀行、WAP／WAC 審單中、WO 等 OTP）。
+ *   依據：PChomePay 官方 WooCommerce 外掛 `includes/OrderStatusCodeEnum.php`
+ *   https://github.com/PChomePay/PChomePay-Cart-for-WooCommerce/blob/master/includes/OrderStatusCodeEnum.php
+ * - 金額欄位是 `amount`（整數新台幣）；官方外掛 PChomePayGateway.php 以 `$order->amount` 比對。
+ * - PChomePay 未公開正式 API 文件；任何不在上列的組合一律視為「無法辨識」→ 不標記、回 500 讓對方重試、警示店主。
+ */
+export type PchomepayPaymentState = "paid" | "failed" | "pending" | "unknown";
+
+export function classifyPchomepayQuery(q: Pick<PchomepayQuery, "status" | "status_code">): PchomepayPaymentState {
+  const status = (q.status ?? "").trim().toUpperCase();
+  const code = (q.status_code ?? "").trim().toUpperCase();
+  if (status === "S") return code && code.startsWith("F") ? "unknown" : "paid";
+  if (status === "F") return "failed";
+  if (status === "P") return code && code.startsWith("F") ? "failed" : "pending";
+  if (!status && code.startsWith("F")) return "failed";
+  if (!status && code.startsWith("W")) return "pending";
+  return "unknown";
+}
 
 /**
  * ATM 虛擬帳號的繳費期限必須比訂單保留時間短，否則客人在訂單逾期取消後才繳款（只能人工退款）。
@@ -34,6 +58,9 @@ export interface PchomepayCreds {
 }
 
 export interface PchomepayQuery {
+  /** 權威付款狀態：S 成功／F 失敗／P 處理中（見 classifyPchomepayQuery） */
+  status?: string;
+  /** 失敗／等待細節碼（成功時通常為 null） */
   status_code?: string;
   amount?: number;
   pay_type?: string;
@@ -166,6 +193,7 @@ export function createPchomepayClient(creds: PchomepayCreds, fetchImpl: FetchLik
       try {
         const data = JSON.parse(text) as Record<string, unknown>;
         return {
+          status: data.status != null ? String(data.status) : undefined,
           status_code: data.status_code != null ? String(data.status_code) : undefined,
           amount: data.amount != null && Number.isFinite(Number(data.amount)) ? Number(data.amount) : undefined,
           pay_type: Array.isArray(data.pay_type) ? data.pay_type.map(String).join(",") : data.pay_type != null ? String(data.pay_type) : undefined,

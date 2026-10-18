@@ -21,8 +21,12 @@ export const VERIFY_TTL_SECONDS = 48 * 60 * 60;
 export const RESET_TTL_SECONDS = 60 * 60;
 
 export const RATE = {
-  loginIp: { limit: 10, window: 15 * 60 },
-  loginEmail: { limit: 10, window: 15 * 60 },
+  /** 每 IP（不分帳號） */
+  loginIp: { limit: 30, window: 15 * 60 },
+  /** 主要門檻：同一 email＋同一 IP */
+  loginEmailIp: { limit: 10, window: 15 * 60 },
+  /** email 單獨（跨 IP）：門檻高，而且超過只「延遲」不鎖死，避免被拿來鎖住特定會員（L3） */
+  loginEmail: { limit: 100, window: 15 * 60 },
   registerIp: { limit: 5, window: 60 * 60 },
   forgotIp: { limit: 5, window: 60 * 60 },
   forgotEmail: { limit: 3, window: 60 * 60 },
@@ -44,7 +48,20 @@ export interface MemberDeps {
   /** 對外網址，例如 https://gather-builder.vercel.app */
   baseUrl: string;
   sendMail?: SendMail;
+  /**
+   * 把寄信排到回應之後（Next 的 after()）。忘記密碼用它讓「帳號存在／不存在」的回應時間一致（L2）；
+   * 沒給就直接 await（測試）。
+   */
+  defer?: (task: Promise<unknown>) => void;
+  /** 測試用：覆寫登入延遲 */
+  slowdownMs?: number;
 }
+
+/** 超過 email 單獨門檻時每次登入嘗試的延遲（毫秒） */
+export const LOGIN_EMAIL_SLOWDOWN_MS = 1500;
+/** 忘記密碼回應的最短時間（毫秒），抹平查 DB／發 token 的時間差 */
+export const FORGOT_MIN_MS = 350;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const newRawToken = () => randomBytes(32).toString("base64url");
@@ -185,7 +202,10 @@ export async function loginMember(
     throw new ServiceError("unauthorized", LOGIN_FAILED);
   }
   const email = emailParsed.data;
-  await limit(deps, `member-login-email:${tenant.id}`, emailKey(email, deps.ipSecret), RATE.loginEmail);
+  // 主要門檻是 email＋IP；email 單獨的門檻只會讓每次嘗試變慢，不會把帳號本人鎖在外面
+  await limit(deps, `member-login-eip:${tenant.id}`, `${emailKey(email, deps.ipSecret)}:${ipHash}`, RATE.loginEmailIp);
+  const perEmail = await deps.store.rateHit(`member-login-email:${tenant.id}`, emailKey(email, deps.ipSecret), RATE.loginEmail.window, RATE.loginEmail.limit);
+  if (!perEmail.allowed) await sleep(deps.slowdownMs ?? LOGIN_EMAIL_SLOWDOWN_MS);
 
   const member = await deps.store.getMemberByEmail(tenant.id, email);
   if (!member) {
@@ -237,6 +257,7 @@ export async function updateOwnProfile(store: Store, tenant: TenantRow, member: 
 
 export async function requestPasswordReset(deps: MemberDeps, input: { tenant: TenantRow; ip: string; email?: unknown }): Promise<{ message: string }> {
   const { tenant } = input;
+  const started = Date.now();
   await limit(deps, `member-forgot:${tenant.id}`, hashIp(input.ip || "unknown", deps.ipSecret), RATE.forgotIp);
   const parsed = emailSchema.safeParse(input.email);
   if (!parsed.success) throw new ServiceError("invalid", "Email 格式不正確");
@@ -245,13 +266,18 @@ export async function requestPasswordReset(deps: MemberDeps, input: { tenant: Te
   const member = await deps.store.getMemberByEmail(tenant.id, email);
   if (member && member.status === "active") {
     const raw = await issueMemberToken(deps, tenant, member, "reset_password");
-    await deliver(
+    const send = deliver(
       deps,
       email,
       `【${tenant.name}】重設密碼`,
       `請點下列連結設定新密碼（1 小時內有效，只能使用一次）：\n${siteUrl(deps, tenant, `/account/reset?token=${raw}`)}\n\n如果不是你本人申請，請忽略這封信，你的密碼不會改變。`,
     );
+    // L2：寄信（數百毫秒）排到回應之後，否則回應時間就能分辨帳號是否存在
+    if (deps.defer) deps.defer(send);
+    else await send;
   }
+  const wait = FORGOT_MIN_MS - (Date.now() - started);
+  if (wait > 0 && deps.defer) await sleep(wait);
   return { message: FORGOT_DONE };
 }
 

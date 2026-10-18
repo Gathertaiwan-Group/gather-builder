@@ -54,7 +54,7 @@ check(before.shopModuleStatus === "pending_setup" && before.pchomepay?.configure
 const login = await post("/api/admin/login", { password: adminPassword });
 const adminCookie = login.setCookie.split(";")[0];
 check(login.status === 303 && adminCookie.startsWith("gb_admin="), "後台登入");
-const save = await post(`/api/admin/tenants/${slug}/payment-account`, { appId, secret, sandbox: "on" }, adminCookie);
+const save = await post(`/api/admin/tenants/${slug}/payment-account`, { appId, secret, sandbox: "on" }, adminCookie); // 勾選框預設不勾，這裡明確勾 sandbox
 check(save.status === 303 && !!flash(save.location).ok, "後台輸入 sandbox 憑證（加密儲存）", flash(save.location).ok ?? flash(save.location).err);
 const verify = await post(`/api/admin/tenants/${slug}/payment-account/verify`, {}, adminCookie);
 const vf = flash(verify.location);
@@ -64,8 +64,8 @@ const after = await site.call("get_payment_setup_status");
 check(after.pchomepay?.status === "verified" && after.pchomepay?.sandbox === true && after.shopModuleStatus === "enabled", "驗證後：verified／sandbox／shop enabled", JSON.stringify({ s: after.shopModuleStatus, p: after.pchomepay?.status, sb: after.pchomepay?.sandbox }));
 check(!JSON.stringify(after).includes(secret) && !JSON.stringify(after).includes(appId), "MCP 狀態查詢不含 secret 與完整 APP ID");
 
-// 結帳選 PChomePay → 303 到 sandbox-secure（不跟隨、不刷卡）
-const co = await post(`/s/${slug}/api/shop/checkout`, {
+// H1：已發布網站的一般結帳（沒有預覽簽章）不能用 sandbox 憑證
+const form = {
   items: JSON.stringify([{ productId: prod.id, qty: 1 }]),
   contactName: "Sandbox 測試",
   contactEmail: `pc-${ts}@example.com`,
@@ -73,7 +73,14 @@ const co = await post(`/s/${slug}/api/shop/checkout`, {
   shipSame: "on",
   shipAddress: "測試地址",
   paymentMethod: "pchomepay",
-});
+};
+const blocked = await post(`/s/${slug}/api/shop/checkout`, form);
+check(blocked.status === 303 && new URL(blocked.location, base).pathname === `/s/${slug}/checkout`, "沒有預覽簽章 → sandbox 線上付款被拒（導回結帳頁）", blocked.location.slice(0, 80));
+const pv2 = await site.call("preview_changes");
+const previewToken = new URL(pv2.previewUrl).searchParams.get("preview");
+
+// 帶預覽簽章結帳選 PChomePay → 303 到 sandbox-secure（不跟隨、不刷卡）
+const co = await post(`/s/${slug}/api/shop/checkout`, { ...form, preview: previewToken ?? "" });
 let host = "";
 try {
   host = new URL(co.location).host;

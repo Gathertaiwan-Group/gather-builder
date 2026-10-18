@@ -58,7 +58,7 @@ export default async function PaymentsAdmin({ params, searchParams }: { params: 
               <input name="appId" required placeholder="APP ID" className="rounded border px-3 py-1" autoComplete="off" />
               <input name="secret" required type="password" placeholder="SECRET" className="rounded border px-3 py-1" autoComplete="new-password" />
               <label className="flex items-center gap-1">
-                <input type="checkbox" name="sandbox" defaultChecked /> 測試環境（sandbox）
+                <input type="checkbox" name="sandbox" /> 測試環境（sandbox）——只在預覽模式的結帳可用，已發布網站的訪客看不到線上付款
               </label>
               <div>
                 <button className="rounded bg-neutral-900 px-3 py-1 text-white" type="submit">

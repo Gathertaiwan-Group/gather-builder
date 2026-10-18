@@ -1,6 +1,7 @@
 import type { OrderRow, OrderStatus, PaymentRow, Store, TenantRow } from "../store/types";
 import { ORDER_STATUS_LABEL, assertTransition, canTransition, sourcesFor } from "../shop/machine";
-import { PAID_STATUS_CODES, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
+import { classifyPchomepayQuery, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
+import { getMailer } from "../mail";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
@@ -9,12 +10,109 @@ type Mailer = CheckoutDeps["sendMail"];
 
 /* ================================================================== 逾期 */
 
+/** 權威回查的依賴（notify 與逾期處理共用） */
+export interface PayDeps {
+  store: Store;
+  sendMail?: Mailer;
+  baseUrl: string;
+  /** 依「建單時的環境」取查單 client；環境與目前憑證不符（L1）或沒有憑證回 null */
+  queryFor?: (tenantId: string, sandbox: boolean) => Promise<Pick<PchomepayClient, "queryPayment"> | null>;
+}
+
+const ctxPayDeps = (ctx: ServiceContext): PayDeps => ({ store: ctx.store, sendMail: ctx.sendMail, baseUrl: ctx.baseUrl });
+
+/** 回查連續失敗幾次就警示店主 */
+export const QUERY_FAILURE_ALERT_AT = 3;
+
+function defaultPayDeps(store: Store): PayDeps {
+  return { store, sendMail: getMailer(), baseUrl: (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "") };
+}
+
+async function defaultQueryFor(store: Store, tenantId: string, sandbox: boolean) {
+  const acct = await store.getPaymentAccount(tenantId, "pchomepay");
+  if (!acct) return null;
+  // L1：付款是在 sandbox 建的就只能用 sandbox 憑證回查（反之亦然）；換過環境 → 不回查（當成失敗，稍後重試＋警示）
+  if (acct.sandbox !== sandbox) {
+    console.error(`[pchomepay] 憑證環境（${acct.sandbox ? "sandbox" : "正式"}）與付款建單環境（${sandbox ? "sandbox" : "正式"}）不符，拒絕回查 tenant=${tenantId}`);
+    return null;
+  }
+  return (await pchomepayClientFor(store, tenantId, { requireVerified: false }))?.client ?? null;
+}
+
+/** 回查異常警示（同一筆付款只寄一次：alerted_at 條件更新） */
+async function alertOwner(deps: PayDeps, tenant: TenantRow, payment: PaymentRow, orderNo: string, reason: string) {
+  if (!(await deps.store.markPaymentAlerted(tenant.id, payment.id))) return;
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system", action: "payment.query_alert", payload: { orderNo, gatewayOrderNo: payment.gateway_order_no, reason } });
+  const settings = await publishedShopSettings(deps.store, tenant);
+  if (settings.ownerEmail) {
+    await mailSafe(
+      deps,
+      settings.ownerEmail,
+      `⚠️【${tenant.name}】線上付款狀態無法確認 ${orderNo}`,
+      `訂單 ${orderNo}（閘道編號 ${payment.gateway_order_no}）向 PChomePay 回查付款狀態時發生問題：${reason}\n系統不會自動取消這張訂單，會持續重試。請到 PChomePay 商家後台確認是否已收款。`,
+    );
+  }
+}
+
+type QueryOutcome =
+  | { kind: "query_failed" }
+  | { kind: "unknown"; q: PchomepayQuery }
+  | { kind: "pending"; q: PchomepayQuery }
+  | { kind: "failed"; q: PchomepayQuery }
+  | { kind: "paid"; q: PchomepayQuery };
+
+/** 對一筆付款做權威回查並分類；回查失敗會累計次數，達門檻警示店主 */
+async function queryAuthoritative(deps: PayDeps, tenant: TenantRow, payment: PaymentRow, orderNo: string): Promise<QueryOutcome> {
+  let q: PchomepayQuery | null = null;
+  let err = "回查失敗";
+  try {
+    const client = deps.queryFor ? await deps.queryFor(tenant.id, payment.sandbox) : await defaultQueryFor(deps.store, tenant.id, payment.sandbox);
+    if (!client) err = "沒有可用的憑證，或憑證環境與建單時不符";
+    q = client ? await client.queryPayment(payment.gateway_order_no) : null;
+  } catch (e) {
+    err = `回查例外：${e instanceof Error ? e.message : String(e)}`;
+  }
+  if (!q) {
+    const n = await deps.store.bumpPaymentQueryFailure(tenant.id, payment.id, err);
+    console.error(`[pchomepay] ${err}（第 ${n} 次）order=${orderNo} gateway=${payment.gateway_order_no}`);
+    if (n >= QUERY_FAILURE_ALERT_AT) await alertOwner(deps, tenant, payment, orderNo, `連續 ${n} 次回查失敗（${err}）`);
+    return { kind: "query_failed" };
+  }
+  const state = classifyPchomepayQuery(q);
+  if (state === "unknown") {
+    console.error(`[pchomepay] 🔴 無法辨識的查單狀態 status=${q.status ?? "-"} status_code=${q.status_code ?? "-"} order=${orderNo}`);
+    await deps.store.updatePayment(tenant.id, payment.id, { raw: { query: q.raw } });
+    await alertOwner(deps, tenant, payment, orderNo, `無法辨識的付款狀態（status=${q.status ?? "-"}, status_code=${q.status_code ?? "-"}）`);
+    return { kind: "unknown", q };
+  }
+  if (payment.query_failures) await deps.store.updatePayment(tenant.id, payment.id, { query_failures: 0, last_query_error: null });
+  return { kind: state, q };
+}
+
 /**
  * 逾期未付 → 取消並回補庫存（冪等：條件式取消，重複呼叫只會成功一次）。
  * 讀訂單時 lazy 呼叫；另有每日 cron 掃一遍（/api/cron/expire-orders）。
+ * 🔴 H2：線上付款訂單取消前，先對所有 pending 付款做權威回查——
+ *   已付 → 走正常付款流程（不取消）；回查失敗或狀態無法辨識 → 這次不取消（下次再試），連續失敗警示店主。
  */
-export async function expireIfDue(store: Store, order: OrderRow, now = Date.now()): Promise<OrderRow> {
+export async function expireIfDue(store: Store, order: OrderRow, now = Date.now(), deps?: PayDeps): Promise<OrderRow> {
   if (order.status !== "pending_payment" || !order.expires_at || new Date(order.expires_at).getTime() > now) return order;
+  if (order.payment_method === "pchomepay") {
+    const d = deps ?? defaultPayDeps(store);
+    const tenant = await store.getTenantById(order.tenant_id);
+    if (!tenant) return order;
+    const pending = (await store.listPaymentsForOrder(order.tenant_id, order.id)).filter((p) => p.status === "pending");
+    for (const p of pending) {
+      const r = await queryAuthoritative(d, tenant, p, order.order_no);
+      if (r.kind === "query_failed" || r.kind === "unknown") return order; // 不確定就不取消
+      if (r.kind === "paid") {
+        await settlePaid(d, tenant, p, order, r.q);
+        return (await store.getOrderById(order.tenant_id, order.id)) ?? order;
+      }
+      if (r.kind === "failed") await store.transitionPayment(order.tenant_id, p.id, "pending", "failed", { raw: { query: r.q.raw } });
+      // pending（P／W*）＝客人沒完成付款，可以取消
+    }
+  }
   const r = await store.cancelOrder(order.tenant_id, order.id, ["pending_payment"], "expired");
   if (r.transitioned) {
     await store.insertAudit({ tenant_id: order.tenant_id, actor: "system", action: "order.expire", payload: { orderNo: order.order_no, stockReleased: r.stockReleased } });
@@ -22,16 +120,23 @@ export async function expireIfDue(store: Store, order: OrderRow, now = Date.now(
   return (await store.getOrderById(order.tenant_id, order.id)) ?? order;
 }
 
-export async function expireDueOrders(store: Store, limit = 200): Promise<{ scanned: number; expired: number }> {
+export async function expireDueOrders(store: Store, limit = 200, deps?: PayDeps): Promise<{ scanned: number; expired: number }> {
   const due = await store.listExpiredPendingOrders(new Date().toISOString(), limit);
   let expired = 0;
   for (const d of due) {
     const o = await store.getOrderById(d.tenant_id, d.id);
     if (!o) continue;
-    const after = await expireIfDue(store, o);
+    const after = await expireIfDue(store, o, Date.now(), deps);
     if (after.status === "cancelled" && o.status === "pending_payment") expired++;
   }
   return { scanned: due.length, expired };
+}
+
+/** 下單前：先釋放這些商品已逾期的保留（線上付款單一樣先回查） */
+export async function releaseExpiredHolds(deps: PayDeps, tenantId: string, productIds: string[]) {
+  const due = await deps.store.listExpiredPendingOrdersForProducts(tenantId, productIds, new Date().toISOString(), 20);
+  for (const o of due) await expireIfDue(deps.store, o, Date.now(), deps);
+  return due.length;
 }
 
 /* ================================================================== 讀取 */
@@ -43,6 +148,8 @@ function orderSummary(o: OrderRow) {
     status: o.status,
     statusLabel: ORDER_STATUS_LABEL[o.status],
     paymentMethod: o.payment_method,
+    /** true = PChomePay 測試環境付款（沒有實際收款，不能出貨） */
+    paymentSandbox: o.payment_sandbox ?? false,
     total: o.total,
     memberId: o.member_id,
     contactName: o.contact.name,
@@ -55,7 +162,7 @@ function orderSummary(o: OrderRow) {
 async function findOrder(ctx: ServiceContext, tenant: TenantRow, ref: { orderId?: string; orderNo?: string }) {
   const o = ref.orderId ? await ctx.store.getOrderById(tenant.id, ref.orderId) : ref.orderNo ? await ctx.store.getOrderByNo(tenant.id, ref.orderNo) : null;
   if (!o) throw new ServiceError("not_found", "找不到訂單（請給 orderId 或 orderNo）");
-  return expireIfDue(ctx.store, o);
+  return expireIfDue(ctx.store, o, Date.now(), ctxPayDeps(ctx));
 }
 
 export async function listOrders(ctx: ServiceContext, input: { site?: string | null; status?: OrderStatus; limit?: number; offset?: number }) {
@@ -67,7 +174,7 @@ export async function listOrders(ctx: ServiceContext, input: { site?: string | n
   // lazy 逾期處理
   const due = r.rows.filter((o) => o.status === "pending_payment" && o.expires_at && new Date(o.expires_at).getTime() <= Date.now());
   if (due.length) {
-    for (const o of due) await expireIfDue(ctx.store, o);
+    for (const o of due) await expireIfDue(ctx.store, o, Date.now(), ctxPayDeps(ctx));
     r = await ctx.store.listOrders(tenant.id, { status: input.status, limit: lim, offset: Math.max(0, input.offset ?? 0) });
   }
   return { total: r.total, orders: r.rows.map(orderSummary) };
@@ -114,9 +221,17 @@ function transitionGuard(o: OrderRow, to: OrderStatus) {
 }
 
 /** 付款成功的副作用（只在「真正轉換成功」那一次呼叫）：通知客人與店主 */
-export async function onOrderPaid(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow, via: string) {
+export async function onOrderPaid(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, order: OrderRow, via: string, opts: { sandbox?: boolean } = {}) {
   const settings = await publishedShopSettings(deps.store, tenant);
   const url = orderPageUrl(deps.baseUrl, tenant, order.order_no);
+  if (opts.sandbox) {
+    // H1：測試環境付款不是真的收到錢——客人與店主都要清楚看到「不會出貨」
+    await mailSafe(deps, order.contact.email, `【${tenant.name}】［測試付款］${order.order_no}`, `${order.contact.name} 你好，\n\n訂單 ${order.order_no} 是在金流「測試環境」完成付款，並沒有實際扣款，這筆訂單不會出貨。\n\n訂單狀態：${url}`);
+    if (settings.ownerEmail) {
+      await mailSafe(deps, settings.ownerEmail, `［測試付款・請勿出貨］【${tenant.name}】${order.order_no}`, `這筆訂單是用 PChomePay 測試環境（sandbox）憑證付款，沒有收到真的錢，系統會拒絕出貨。\n如果網站已正式營業，請到平台後台換成正式憑證。`);
+    }
+    return;
+  }
   await mailSafe(deps, order.contact.email, `【${tenant.name}】付款成功 ${order.order_no}`, `${order.contact.name} 你好，\n\n訂單 ${order.order_no} 已確認付款 ${twd(order.total)}，我們會盡快出貨。\n\n訂單狀態：${url}（會員可在會員中心查看）`);
   if (settings.ownerEmail) {
     await mailSafe(deps, settings.ownerEmail, `【${tenant.name}】訂單已付款 ${order.order_no}（${twd(order.total)}）`, `付款方式：${via}\n訂購人：${order.contact.name} ${order.contact.email}\n請安排出貨。`);
@@ -149,6 +264,9 @@ export async function fulfillOrder(
   await requireShop(ctx, tenant);
   const o = await findOrder(ctx, tenant, input);
   transitionGuard(o, "fulfilled");
+  // H1：測試環境（sandbox）付款的訂單沒有真的收到錢，絕不能出貨
+  const sandboxPaid = o.payment_sandbox || (await ctx.store.listPaymentsForOrder(tenant.id, o.id)).some((p) => p.sandbox && p.status === "paid");
+  if (sandboxPaid) throw new ServiceError("invalid", `訂單 ${o.order_no} 是 PChomePay 測試環境（sandbox）付款，沒有實際收款，不能出貨。請取消這張訂單。`);
   requireConfirm(input.confirm, `把訂單 ${o.order_no} 標記為已出貨會通知客人`);
   const moved = await ctx.store.transitionOrder(tenant.id, o.id, "paid", "fulfilled", {
     fulfilled_at: new Date().toISOString(),
@@ -248,7 +366,7 @@ export async function getPaymentSetupStatus(ctx: ServiceContext, input: { site?:
       ? { configured: true, status: acct.status, sandbox: acct.sandbox, appId: maskAppId(acct.app_id), verifiedAt: acct.verified_at, lastError: acct.last_error }
       : { configured: false, status: "not_configured" },
     offlineTransfer: { enabled: !!settings.offlineTransfer?.enabled },
-    note: "憑證只能由平台擁有者在後台「金流設定」輸入並驗證；MCP 無法設定或讀出金鑰。",
+    note: `憑證只能由平台擁有者在後台「金流設定」輸入並驗證；MCP 無法設定或讀出金鑰。${acct?.sandbox ? "目前是測試環境（sandbox）憑證：只有帶預覽簽章的結帳能用線上付款，已發布網站的訪客看不到線上付款；正式營業前請換成正式憑證。" : ""}`,
   };
 }
 
@@ -296,17 +414,69 @@ export async function startPchomepayPayment(
 export type NotifyResult = { status: 200 | 500; body: "success" | "retry"; outcome: string };
 
 /**
- * PChomePay notify（天生公開、沒有簽章）。安全規則：
- * 1. 絕不信 payload：只取 order_id 當查詢鍵，一律 GET /v1/payment/{order_id} 回查權威狀態（用該租戶自己的憑證）。
- * 2. status_code ∈ {S,00,1} 才算付款；金額 round 後必須等於訂單金額，不符不標記。
- * 3. 回查失敗回 500（讓對方重試）；其餘處理完一律回純文字 success。
- * 4. 條件式更新（where status='pending_payment'）：只有真正轉換成功的那一次才跑副作用，重複 notify 冪等。
- * 5. 訂單已取消／逾期卻收到付款 → 不改訂單狀態、寫 log、寄店主警示（需人工退款），警示也只寄一次。
+ * 權威回查判定「已付」之後的處理（notify 與逾期前回查共用）。回傳 outcome。
+ * - 金額 round 後必須等於付款紀錄與訂單總額，不符不標記。
+ * - 條件式轉換 pending_payment → paid：只有真正轉換成功的那一次才跑副作用（冪等）。
+ * - 訂單已取消／逾期卻收到付款 → 不改訂單、付款標 paid_after_cancel、寄店主警示（只寄一次）。
+ * - H1：sandbox 付款成功的訂單標記 payment_sandbox（不是真的收到錢，不能出貨）。
  */
-export async function handlePchomepayNotify(
-  deps: { store: Store; sendMail?: Mailer; baseUrl: string; queryFor?: (tenantId: string) => Promise<Pick<PchomepayClient, "queryPayment"> | null> },
-  input: { tenantId: string; rawBody: string },
-): Promise<NotifyResult> {
+async function settlePaid(deps: PayDeps, tenant: TenantRow, payment: PaymentRow, orderIn: OrderRow, q: PchomepayQuery): Promise<"paid" | "missing_amount" | "amount_mismatch" | "paid_after_cancel" | "already_processed" | "order_missing"> {
+  const gw = payment.gateway_order_no;
+  if (q.amount == null || !Number.isFinite(q.amount)) {
+    console.error(`[pchomepay] 權威已付但缺 amount，待重試 order=${gw}`);
+    return "missing_amount";
+  }
+  let order = (await deps.store.getOrderById(tenant.id, orderIn.id)) ?? null;
+  if (!order) return "order_missing";
+  const raw = { query: q.raw };
+  const expected = Math.round(payment.amount);
+  if (Math.round(q.amount) !== expected || Math.round(order.total) !== expected) {
+    console.error(`[pchomepay] 金額不符，不標記付款！order=${order.order_no} gateway=${gw} 期望=${expected} 權威=${q.amount}`);
+    await deps.store.updatePayment(tenant.id, payment.id, { raw });
+    return "amount_mismatch";
+  }
+  const paidAt = new Date().toISOString();
+  if (order.status === "pending_payment") {
+    const moved = await deps.store.transitionOrder(tenant.id, order.id, "pending_payment", "paid", { paid_at: paidAt, ...(payment.sandbox ? { payment_sandbox: true } : {}) });
+    if (moved) {
+      await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
+      await deps.store.insertAudit({ tenant_id: tenant.id, actor: "pchomepay", action: "order.paid", payload: { orderNo: moved.order_no, gatewayOrderNo: gw, sandbox: payment.sandbox } });
+      await onOrderPaid(deps, tenant, moved, `PChomePay${payment.sandbox ? "（測試環境）" : ""}`, { sandbox: payment.sandbox });
+      return "paid";
+    }
+    order = (await deps.store.getOrderById(tenant.id, order.id)) ?? order;
+  }
+  if (order.status === "cancelled") {
+    const first = await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid_after_cancel", { raw, paid_at: paidAt });
+    console.error(`[pchomepay] 🔴 已取消的訂單收到付款，需人工退款 order=${order.order_no} gateway=${gw} amount=${q.amount} first=${first}`);
+    if (first) {
+      await deps.store.insertAudit({ tenant_id: tenant.id, actor: "pchomepay", action: "order.paid_after_cancel", payload: { orderNo: order.order_no, gatewayOrderNo: gw, amount: q.amount, sandbox: payment.sandbox } });
+      const settings = await publishedShopSettings(deps.store, tenant);
+      if (settings.ownerEmail) {
+        await mailSafe(
+          deps,
+          settings.ownerEmail,
+          `🔴【${tenant.name}】已取消的訂單收到付款，請人工退款 ${order.order_no}${payment.sandbox ? "（測試環境）" : ""}`,
+          `訂單 ${order.order_no}（${order.cancel_reason === "expired" ? "逾期自動取消" : "已取消"}）收到 PChomePay 付款 ${twd(Math.round(q.amount))}。\n閘道訂單編號：${gw}\n系統沒有改變訂單狀態，請到 PChomePay 商家後台退款，或與客人（${order.contact.name} ${order.contact.email}）聯繫。`,
+        );
+      }
+    }
+    return "paid_after_cancel";
+  }
+  // 已是 paid／fulfilled（重複 notify 或已手動處理）：只補記付款紀錄，不重跑副作用
+  await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
+  return "already_processed";
+}
+
+/**
+ * PChomePay notify（天生公開、沒有簽章）。安全規則：
+ * 1. 絕不信 payload：只取 order_id 當查詢鍵，一律 GET /v1/payment/{order_id} 回查權威狀態
+ *    （用該租戶自己的憑證，且憑證環境必須與建單時相同——L1）。
+ * 2. 權威欄位是 `status`（S／F／P，見 lib/pay/pchomepay.ts 的依據）；無法辨識的狀態 → 記 log、警示店主、回 500 讓對方重試（H3）。
+ * 3. 回查失敗回 500（讓對方重試），連續失敗警示店主；其餘處理完一律回純文字 success。
+ * 4. 已付的處理見 settlePaid（金額比對、條件式轉換、取消後收款警示、sandbox 標記）。
+ */
+export async function handlePchomepayNotify(deps: PayDeps, input: { tenantId: string; rawBody: string }): Promise<NotifyResult> {
   const ok = (outcome: string): NotifyResult => ({ status: 200, body: "success", outcome });
   const retry = (outcome: string): NotifyResult => ({ status: 500, body: "retry", outcome });
 
@@ -330,71 +500,23 @@ export async function handlePchomepayNotify(
   }
   const tenant = await deps.store.getTenantById(payment.tenant_id);
   if (!tenant) return ok("unknown_tenant");
-
-  const queryFor = deps.queryFor ?? (async (tid: string) => (await pchomepayClientFor(deps.store, tid, { requireVerified: false }))?.client ?? null);
-  let q: PchomepayQuery | null = null;
-  try {
-    const client = await queryFor(tenant.id);
-    q = client ? await client.queryPayment(orderId) : null;
-  } catch (e) {
-    console.error(`[pchomepay/notify] 回查例外 order=${orderId}`, e instanceof Error ? e.message : e);
-  }
-  if (!q) {
-    console.error(`[pchomepay/notify] 回查失敗，回 500 待重試 order=${orderId}`);
-    return retry("query_failed");
-  }
-  const raw = { notifyType, query: q.raw };
-  if (!PAID_STATUS_CODES.has(String(q.status_code ?? ""))) {
-    await deps.store.updatePayment(tenant.id, payment.id, { raw });
-    return ok(`not_paid:${q.status_code ?? "?"}`);
-  }
-  if (q.amount == null || !Number.isFinite(q.amount)) {
-    console.error(`[pchomepay/notify] 權威已付但缺 amount，回 500 待重試 order=${orderId}`);
-    return retry("missing_amount");
-  }
-  let order = await deps.store.getOrderById(tenant.id, payment.order_id);
+  const order = await deps.store.getOrderById(tenant.id, payment.order_id);
   if (!order) return ok("order_missing");
-  const expected = Math.round(payment.amount);
-  if (Math.round(q.amount) !== expected || Math.round(order.total) !== expected) {
-    console.error(`[pchomepay/notify] 金額不符，不標記付款！order=${order.order_no} gateway=${orderId} 期望=${expected} 權威=${q.amount}`);
-    await deps.store.updatePayment(tenant.id, payment.id, { raw });
-    return ok("amount_mismatch");
-  }
-  const paidAt = new Date().toISOString();
 
-  if (order.status === "pending_payment") {
-    const moved = await deps.store.transitionOrder(tenant.id, order.id, "pending_payment", "paid", { paid_at: paidAt });
-    if (moved) {
-      await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
-      await deps.store.insertAudit({ tenant_id: tenant.id, actor: "pchomepay", action: "order.paid", payload: { orderNo: moved.order_no, gatewayOrderNo: orderId, sandbox: payment.sandbox } });
-      await onOrderPaid(deps, tenant, moved, `PChomePay${payment.sandbox ? "（測試環境）" : ""}`);
-      return ok("paid");
-    }
-    order = (await deps.store.getOrderById(tenant.id, order.id)) ?? order;
+  const r = await queryAuthoritative(deps, tenant, payment, order.order_no);
+  if (r.kind === "query_failed") return retry("query_failed");
+  if (r.kind === "unknown") return retry(`unknown_status:${r.q.status ?? "-"}/${r.q.status_code ?? "-"}`);
+  if (r.kind === "pending") {
+    await deps.store.updatePayment(tenant.id, payment.id, { raw: { notifyType, query: r.q.raw } });
+    return ok(`not_paid:${r.q.status ?? r.q.status_code ?? "?"}`);
   }
-
-  if (order.status === "cancelled") {
-    // 已取消／逾期的訂單收到付款：不改訂單狀態，警示店主人工退款（只在第一次轉換時寄）
-    const first = await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid_after_cancel", { raw, paid_at: paidAt });
-    console.error(`[pchomepay/notify] 🔴 已取消的訂單收到付款，需人工退款 order=${order.order_no} gateway=${orderId} amount=${q.amount} first=${first}`);
-    if (first) {
-      await deps.store.insertAudit({ tenant_id: tenant.id, actor: "pchomepay", action: "order.paid_after_cancel", payload: { orderNo: order.order_no, gatewayOrderNo: orderId, amount: q.amount } });
-      const settings = await publishedShopSettings(deps.store, tenant);
-      if (settings.ownerEmail) {
-        await mailSafe(
-          deps,
-          settings.ownerEmail,
-          `🔴【${tenant.name}】已取消的訂單收到付款，請人工退款 ${order.order_no}`,
-          `訂單 ${order.order_no}（${order.cancel_reason === "expired" ? "逾期自動取消" : "已取消"}）收到 PChomePay 付款 ${twd(Math.round(q.amount))}。\n閘道訂單編號：${orderId}\n系統沒有改變訂單狀態，請到 PChomePay 商家後台退款，或與客人（${order.contact.name} ${order.contact.email}）聯繫。`,
-        );
-      }
-    }
-    return ok("paid_after_cancel");
+  if (r.kind === "failed") {
+    await deps.store.transitionPayment(tenant.id, payment.id, "pending", "failed", { raw: { notifyType, query: r.q.raw } });
+    return ok(`failed:${r.q.status_code ?? r.q.status ?? "F"}`);
   }
-
-  // 已是 paid／fulfilled（重複 notify 或已手動處理）：只補記付款紀錄，不重跑副作用
-  await deps.store.transitionPayment(tenant.id, payment.id, "pending", "paid", { raw, paid_at: paidAt });
-  return ok("already_processed");
+  const outcome = await settlePaid(deps, tenant, payment, order, r.q);
+  if (outcome === "missing_amount") return retry("missing_amount");
+  return ok(outcome);
 }
 
 export type { PaymentRow };

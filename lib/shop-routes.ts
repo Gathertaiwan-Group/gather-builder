@@ -13,8 +13,10 @@ import { orderPageUrl, placeOrder, priceCart, sendOrderPlacedMails, shopSettings
 import { pchomepayClientFor, startPchomepayPayment } from "./services/orders";
 import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect } from "./site-request";
 import { json } from "./http";
+import { verifyPreviewToken } from "./preview";
 
-export const CHECKOUT_LIMIT_PER_HOUR = 20;
+/** M1：每 IP 每小時下單上限（原 20，降低以減少庫存凍結） */
+export const CHECKOUT_LIMIT_PER_HOUR = 6;
 export const QUOTE_LIMIT_PER_10MIN = 120;
 
 async function shopSite(slug: string, store: Store) {
@@ -66,6 +68,7 @@ export function checkoutFromForm(f: Record<string, string>) {
     },
     note: f.note?.trim() ? f.note : undefined,
     paymentMethod: f.paymentMethod,
+    pchomepayType: f.paymentMethod === "pchomepay" && f.pchomepayType === "atm" ? ("atm" as const) : undefined,
   };
 }
 
@@ -81,7 +84,9 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
     if (!hit.allowed) throw new ServiceError("rate_limited", "下單太頻繁，請稍後再試");
     const form = await formObject(req);
     const member = (await getSessionMember(store, tenant, memberTokenFromRequest(req, tenant)))?.member ?? null;
-    const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data: checkoutFromForm(form), settings: s.settings });
+    // H1：只有帶「有效預覽簽章」的結帳才可以用 sandbox 憑證（網站主自己測試用）
+    const allowSandbox = !!form.preview && verifyPreviewToken(form.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
+    const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data: checkoutFromForm(form), settings: s.settings, allowSandbox });
     if (order.payment_method === "pchomepay") {
       try {
         const pay = await startPchomepayPayment({ store, baseUrl, clientFactory }, { tenant, order, accessKey });

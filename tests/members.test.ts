@@ -232,13 +232,46 @@ describe("限流", () => {
     await expect(loginMember(deps, { tenant: t, ip: "8.8.8.8", email: "x@example.com", password: "whatever-1" })).rejects.toMatchObject({ code: "unauthorized" });
   });
 
-  it("同一個 email 被多個 IP 猜密碼也會被擋", async () => {
+  it("L3：同 email＋同 IP 超過門檻 → rate_limited；同 email 換 IP 不會被鎖死（帳號本人仍可登入）", async () => {
     const { store, deps } = setup();
     const t = await site(store, "rate-email");
-    for (let i = 0; i < RATE.loginEmail.limit; i++) {
-      await loginMember(deps, { tenant: t, ip: `10.0.0.${i}`, email: "target@example.com", password: "guess-0000" }).catch(() => undefined);
+    await registerMember(deps, { tenant: t, ip: "1.1.1.1", data: { email: "target@example.com", password: "real-password" } });
+    for (let i = 0; i < RATE.loginEmailIp.limit; i++) {
+      await loginMember(deps, { tenant: t, ip: "10.0.0.1", email: "target@example.com", password: "guess-0000" }).catch(() => undefined);
     }
-    await expect(loginMember(deps, { tenant: t, ip: "10.0.1.1", email: "target@example.com", password: "guess-0000" })).rejects.toMatchObject({ code: "rate_limited" });
+    await expect(loginMember(deps, { tenant: t, ip: "10.0.0.1", email: "target@example.com", password: "guess-0000" })).rejects.toMatchObject({ code: "rate_limited" });
+    // 本人從別的 IP 登入不受影響
+    await expect(loginMember(deps, { tenant: t, ip: "10.9.9.9", email: "target@example.com", password: "real-password" })).resolves.toBeTruthy();
+  });
+
+  it("L3：email 單獨（跨 IP）超過高門檻後只會被延遲，不會被鎖", async () => {
+    const { store, deps } = setup();
+    const d = { ...deps, slowdownMs: 30 };
+    const t = await site(store, "rate-email2");
+    await registerMember(deps, { tenant: t, ip: "1.1.1.1", data: { email: "victim@example.com", password: "real-password" } });
+    const key = "victim@example.com";
+    // 模擬大量來自不同 IP 的猜測（直接打滿 email 桶）
+    for (let i = 0; i < RATE.loginEmail.limit; i++) {
+      await loginMember(d, { tenant: t, ip: `10.1.${Math.floor(i / 250)}.${i % 250}`, email: key, password: "guess" }).catch(() => undefined);
+    }
+    const started = Date.now();
+    await expect(loginMember(d, { tenant: t, ip: "10.200.0.1", email: key, password: "real-password" })).resolves.toBeTruthy();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+  });
+
+  it("L2：忘記密碼有 defer 時寄信排到回應之後，且帳號存在與否回應同一句話", async () => {
+    const { store, deps } = setup();
+    const t = await site(store, "forgot-timing");
+    await registerMember(deps, { tenant: t, ip: "1.1.1.1", data: { email: "real@example.com", password: "password-123" } });
+    const deferred: Promise<unknown>[] = [];
+    const sent: string[] = [];
+    const d = { ...deps, sendMail: async (to: string) => void sent.push(to), defer: (p: Promise<unknown>) => void deferred.push(p) };
+    const a = await requestPasswordReset(d, { tenant: t, ip: "2.2.2.2", email: "real@example.com" });
+    const b = await requestPasswordReset(d, { tenant: t, ip: "2.2.2.2", email: "ghost@example.com" });
+    expect(a.message).toBe(b.message);
+    expect(deferred).toHaveLength(1); // 只有真的帳號排了寄信，但不在回應路徑上 await
+    await Promise.all(deferred);
+    expect(sent).toEqual(["real@example.com"]);
   });
 
   it(`註冊每 IP ${RATE.registerIp.limit} 次／小時`, async () => {

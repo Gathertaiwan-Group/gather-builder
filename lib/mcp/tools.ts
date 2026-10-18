@@ -456,7 +456,8 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     options: z.record(z.string(), z.string()).describe("規格選項，例如 {\"尺寸\":\"M\",\"顏色\":\"黑\"}"),
     price: z.number().int().optional().describe("此規格價格（省略則沿用商品價格）"),
     sku: z.string().optional(),
-    stock: z.number().int().optional(),
+    stock: z.number().int().optional().describe("庫存；update_product 時沒帶＝不動既有規格的庫存"),
+    expectedStock: z.number().int().optional().describe("update_product 改既有規格的 stock 時必填：你讀到的目前庫存"),
   });
 
   server.registerTool(
@@ -489,7 +490,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     "update_product",
     {
       description:
-        "修改商品（productId 或 slug 指定），只傳要改的欄位；variants 若有給則整份取代。草稿商品只需 commerce:write；已上架商品的任何修改、上架、下架都會立即影響線上，需要 publish scope 並帶 confirm: true。",
+        "修改商品（productId 或 slug 指定），只傳要改的欄位；variants 若有給則整份取代規格清單（依 options 比對既有規格；規格沒帶 stock 就不動它的庫存，要改既有規格的 stock 必須同時帶該規格的 expectedStock）。改商品層 stock 必須帶 expectedStock。草稿商品只需 commerce:write；已上架商品的任何修改、上架、下架都會立即影響線上，需要 publish scope 並帶 confirm: true。",
       inputSchema: {
         site,
         productId: z.string().optional(),
@@ -511,7 +512,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
           })
           .describe("要修改的欄位"),
         confirm: z.boolean().optional().describe("影響已上架商品時必填 true"),
-        expectedStock: z.number().int().optional().describe("改 stock 時建議帶入你讀到的目前庫存：期間若有訂單扣庫存就拒絕（避免蓋掉）"),
+        expectedStock: z.number().int().optional().describe("改 patch.stock 時「必填」你讀到的目前庫存：期間若有訂單扣庫存就拒絕（避免蓋掉）"),
       },
       annotations: WRITE,
     },

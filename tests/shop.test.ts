@@ -185,7 +185,7 @@ describe("訂單狀態機", () => {
   it("PChomePay 訂單不能手動標記已收款；orders:read 不能改狀態", async () => {
     const store = newStore();
     const { tenant, mug } = await makeShop(store, "nomark-shop");
-    await savePaymentAccount(ctxFor(store), { site: "nomark-shop", appId: "APPID123", secret: "secret-value-123", sandbox: true });
+    await savePaymentAccount(ctxFor(store), { site: "nomark-shop", appId: "APPID123", secret: "secret-value-123", sandbox: false });
     await store.markPaymentAccount(tenant.id, "pchomepay", { status: "verified", verified_at: new Date().toISOString(), last_error: null });
     const { order } = await placeOrder({ store, baseUrl: "http://t" }, { tenant, member: null, data: orderInput([{ productId: mug.id, qty: 1 }], { paymentMethod: "pchomepay" }) });
     await expect(markOrderPaid(ctxFor(store), { site: "nomark-shop", orderNo: order.order_no, confirm: true })).rejects.toThrow(/不能手動標記/);
@@ -220,13 +220,13 @@ describe("付款方式與金流設定", () => {
     const store = newStore();
     const { ctx, tenant } = await makeShop(store, "pc-shop", { shippingFee: 0 });
     const cheap = await createProduct(ctx, { site: "pc-shop", slug: "sticker", name: "貼紙", price: 20, status: "published", confirm: true });
-    await savePaymentAccount(ctx, { site: "pc-shop", appId: "APPID123", secret: "secret-value-123", sandbox: true });
+    await savePaymentAccount(ctx, { site: "pc-shop", appId: "APPID123", secret: "secret-value-123", sandbox: false });
     await store.markPaymentAccount(tenant.id, "pchomepay", { status: "verified", verified_at: new Date().toISOString(), last_error: null });
     await expect(placeOrder({ store, baseUrl: "http://t" }, { tenant, member: null, data: orderInput([{ productId: cheap.id, qty: 1 }], { paymentMethod: "pchomepay" }) })).rejects.toThrow(/最低金額為 NT\$30/);
 
     let created: Record<string, unknown> | null = null;
     const factory = async () => ({
-      sandbox: true,
+      sandbox: false,
       client: {
         createPayment: async (i: Record<string, unknown>) => {
           created = i;
@@ -250,9 +250,9 @@ describe("付款方式與金流設定", () => {
   it("金流建單失敗：訂單取消並回補庫存，導回結帳頁帶錯誤", async () => {
     const store = newStore();
     const { tenant, mug } = await makeShop(store, "fail-shop");
-    await savePaymentAccount(ctxFor(store), { site: "fail-shop", appId: "APPID123", secret: "secret-value-123", sandbox: true });
+    await savePaymentAccount(ctxFor(store), { site: "fail-shop", appId: "APPID123", secret: "secret-value-123", sandbox: false });
     await store.markPaymentAccount(tenant.id, "pchomepay", { status: "verified", verified_at: new Date().toISOString(), last_error: null });
-    const factory = async () => ({ sandbox: true, client: { createPayment: async () => null } as unknown as PchomepayClient });
+    const factory = async () => ({ sandbox: false, client: { createPayment: async () => null } as unknown as PchomepayClient });
     const form = new URLSearchParams({ items: JSON.stringify([{ productId: mug.id, qty: 1 }]), contactName: "A", contactEmail: "a@example.com", contactPhone: "0912000000", shipSame: "on", shipAddress: "addr", paymentMethod: "pchomepay" });
     const res = await handleCheckout(new Request("http://test.local/s/fail-shop/api/shop/checkout", { method: "POST", body: form, headers: { "content-type": "application/x-www-form-urlencoded" } }), "fail-shop", store, factory);
     expect(new URL(res.headers.get("location")!).pathname).toBe("/s/fail-shop/checkout");

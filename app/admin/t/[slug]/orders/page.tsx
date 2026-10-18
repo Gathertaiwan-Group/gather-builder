@@ -26,7 +26,8 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
         <Card title={`訂單 ${detail.orderNo}`}>
           <div className="text-sm" data-admin="order-detail">
             <p className="mt-0">
-              {detail.statusLabel} · {detail.paymentMethod === "offline" ? "線下匯款" : "PChomePay"} · 總計 {twd(detail.total)}（小計 {twd(detail.subtotal)}＋運費 {twd(detail.shippingFee)}）
+              {detail.statusLabel} · {detail.paymentMethod === "offline" ? "線下匯款" : "PChomePay"}
+              {detail.paymentSandbox && <strong className="ml-1 rounded bg-amber-100 px-1 text-amber-800" data-admin="sandbox-badge">測試付款・不能出貨</strong>} · 總計 {twd(detail.total)}（小計 {twd(detail.subtotal)}＋運費 {twd(detail.shippingFee)}）
             </p>
             <p>
               訂購人：{detail.contact.name} {detail.contact.email} {detail.contact.phone}
@@ -100,7 +101,10 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
                       <a href={`/admin/t/${slug}/orders?order=${encodeURIComponent(o.orderNo)}`}>{o.orderNo}</a>
                     </td>
                     <td className="py-1 pr-3">{o.statusLabel}</td>
-                    <td className="py-1 pr-3">{o.paymentMethod === "offline" ? "線下匯款" : "PChomePay"}</td>
+                    <td className="py-1 pr-3">
+                      {o.paymentMethod === "offline" ? "線下匯款" : "PChomePay"}
+                      {o.paymentSandbox && <span className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-800" data-admin="sandbox-badge">sandbox</span>}
+                    </td>
                     <td className="py-1 pr-3">{twd(o.total)}</td>
                     <td className="py-1 pr-3">{o.contactName}</td>
                     <td className="py-1 pr-3">{fmt(o.createdAt)}</td>

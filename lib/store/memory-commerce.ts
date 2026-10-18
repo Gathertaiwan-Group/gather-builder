@@ -146,19 +146,35 @@ export function createMemoryCommerceStore(): CommerceStore {
       products.set(id, next);
       return clone(next);
     },
+    async setProductStockIf(tenantId, id, expected, next) {
+      const p = products.get(id);
+      if (!p || p.tenant_id !== tenantId || p.stock !== expected) return false;
+      products.set(id, { ...p, stock: next, updated_at: now() });
+      return true;
+    },
     async listVariants(tenantId, productIds) {
       return clone([...variants.values()].filter((v) => v.tenant_id === tenantId && productIds.includes(v.product_id)).sort((a, b) => a.sort - b.sort));
     },
     async replaceVariants(tenantId, productId, rows) {
       const existing = [...variants.values()].filter((v) => v.tenant_id === tenantId && v.product_id === productId);
       const keep = new Set<string>();
+      // 先整批檢查 expectedStock（同步區段內＝原子），不符整份不寫
+      const matched = new Set<string>();
       for (const r of rows) {
+        const hit = existing.find((v) => !matched.has(v.id) && optionsKey(v.options) === optionsKey(r.options));
+        if (hit) matched.add(hit.id);
+        if (r.stock !== undefined && r.expectedStock !== undefined && (hit?.stock ?? 0) !== r.expectedStock) {
+          throw new ServiceError("conflict", `規格「${Object.values(r.options).join(" / ")}」的庫存在你讀取後已變動（目前 ${hit?.stock ?? 0}，你讀到的是 ${r.expectedStock}），請重新讀取後再改`);
+        }
+      }
+      for (const r of rows) {
+        const { expectedStock: _e, stock, ...rest } = r;
         const hit = existing.find((v) => !keep.has(v.id) && optionsKey(v.options) === optionsKey(r.options));
         if (hit) {
           keep.add(hit.id);
-          variants.set(hit.id, { ...hit, ...r });
+          variants.set(hit.id, { ...hit, ...rest, stock: stock ?? hit.stock });
         } else {
-          const v: VariantRow = { ...r, id: randomUUID(), tenant_id: tenantId, product_id: productId, created_at: now() };
+          const v: VariantRow = { ...rest, stock: stock ?? 0, id: randomUUID(), tenant_id: tenantId, product_id: productId, created_at: now() };
           variants.set(v.id, v);
           keep.add(v.id);
         }
@@ -227,6 +243,7 @@ export function createMemoryCommerceStore(): CommerceStore {
         invoice_status: null,
         shipping_method: null,
         shipping_tracking: null,
+        payment_sandbox: false,
         created_at: now(),
         updated_at: now(),
       };
@@ -274,6 +291,14 @@ export function createMemoryCommerceStore(): CommerceStore {
         .slice(0, limit)
         .map((o) => ({ id: o.id, tenant_id: o.tenant_id }));
     },
+    async listExpiredPendingOrdersForProducts(tenantId, productIds, nowIso, limit) {
+      const ids = new Set(orderItems.filter((i) => i.tenant_id === tenantId && productIds.includes(i.product_id)).map((i) => i.order_id));
+      return clone(
+        [...orders.values()]
+          .filter((o) => o.tenant_id === tenantId && ids.has(o.id) && o.status === "pending_payment" && o.expires_at && o.expires_at < nowIso)
+          .slice(0, limit),
+      );
+    },
 
     async getPaymentAccount(tenantId, provider) {
       return clone(accounts.get(`${tenantId}|${provider}`) ?? null);
@@ -300,7 +325,7 @@ export function createMemoryCommerceStore(): CommerceStore {
     },
     async insertPayment(row) {
       if ([...payments.values()].some((p) => p.gateway_order_no === row.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
-      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, created_at: now(), updated_at: now() };
+      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, query_failures: 0, last_query_error: null, alerted_at: null, created_at: now(), updated_at: now() };
       payments.set(p.id, p);
       return clone(p);
     },
@@ -313,6 +338,19 @@ export function createMemoryCommerceStore(): CommerceStore {
     async updatePayment(tenantId, id, patch) {
       const p = payments.get(id);
       if (p && p.tenant_id === tenantId) payments.set(id, { ...p, ...patch, updated_at: now() });
+    },
+    async bumpPaymentQueryFailure(tenantId, id, error) {
+      const p = payments.get(id);
+      if (!p || p.tenant_id !== tenantId) return 0;
+      const n = p.query_failures + 1;
+      payments.set(id, { ...p, query_failures: n, last_query_error: error.slice(0, 300), updated_at: now() });
+      return n;
+    },
+    async markPaymentAlerted(tenantId, id) {
+      const p = payments.get(id);
+      if (!p || p.tenant_id !== tenantId || p.alerted_at) return false;
+      payments.set(id, { ...p, alerted_at: now(), updated_at: now() });
+      return true;
     },
     async transitionPayment(tenantId, id, from, to, patch) {
       const p = payments.get(id);

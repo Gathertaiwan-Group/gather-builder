@@ -24,6 +24,12 @@ export const shopSettings = z
     offlineTransfer: z.object({ enabled: z.boolean(), instructions: optText(1000) }).strict().optional(),
     /** false = 即使憑證已驗證也不提供 PChomePay */
     pchomepay: z.boolean().optional(),
+    /** 線上刷卡訂單的保留時間（分鐘），逾期未付自動取消並回補庫存；預設 60 */
+    onlinePaymentHoldMinutes: z.number().int().min(15).max(1440).optional(),
+    /** true = 另外提供「ATM 轉帳」（保留 orderExpireHours，需 ≥ 48 小時；ATM 繳費期限一定短於保留時間） */
+    pchomepayAtm: z.boolean().optional(),
+    /** 每張訂單每個品項的數量上限（1–99），預設 10 */
+    maxQtyPerItem: z.number().int().min(1).max(99).optional(),
   })
   .strict();
 export type ShopSettings = z.output<typeof shopSettings>;

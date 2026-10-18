@@ -21,7 +21,7 @@ describe("審查回饋修正", () => {
     const { ctx, tenant, tee } = await makeShop(store, "m1-shop");
     const M = tee.variants.find((v) => v.options["尺寸"] === "M")!;
     const { order } = await placeOrder({ store, baseUrl: "http://t" }, { tenant, member: null, data: { items: [{ productId: tee.id, variantId: M.id, qty: 2 }], contact, shipping, paymentMethod: "offline" } });
-    const r = await updateProduct(ctx, { site: "m1-shop", productId: tee.id, confirm: true, patch: { variants: [{ options: { 尺寸: "M" }, price: 999, stock: 0 }, { options: { 尺寸: "L" }, stock: 1 }] } });
+    const r = await updateProduct(ctx, { site: "m1-shop", productId: tee.id, confirm: true, patch: { variants: [{ options: { 尺寸: "M" }, price: 999, stock: 0, expectedStock: 0 }, { options: { 尺寸: "L" }, stock: 1, expectedStock: 1 }] } });
     expect(r.variants.find((v) => v.options["尺寸"] === "M")!.id).toBe(M.id);
     await cancelOrder(ctx, { site: "m1-shop", orderNo: order.order_no, confirm: true });
     expect((await store.listVariants(tenant.id, [tee.id])).find((v) => v.id === M.id)!.stock).toBe(2);
@@ -33,7 +33,7 @@ describe("審查回饋修正", () => {
     const { ctx, tenant, tee } = await makeShop(store, "m1b-shop");
     const L = tee.variants.find((v) => v.options["尺寸"] === "L")!;
     const { order } = await placeOrder({ store, baseUrl: "http://t" }, { tenant, member: null, data: { items: [{ productId: tee.id, variantId: L.id, qty: 1 }], contact, shipping, paymentMethod: "offline" } });
-    await updateProduct(ctx, { site: "m1b-shop", productId: tee.id, confirm: true, patch: { variants: [{ options: { 尺寸: "M" }, stock: 2 }] } });
+    await updateProduct(ctx, { site: "m1b-shop", productId: tee.id, confirm: true, patch: { variants: [{ options: { 尺寸: "M" }, stock: 2, expectedStock: 2 }] } });
     await cancelOrder(ctx, { site: "m1b-shop", orderNo: order.order_no, confirm: true });
     expect((await store.getProductById(tenant.id, tee.id))!.stock).toBe(0);
   });
@@ -45,6 +45,8 @@ describe("審查回饋修正", () => {
     await expect(updateProduct(ctx, { site: "m2-shop", productId: mug.id, confirm: true, expectedStock: 5, patch: { stock: 5 } })).rejects.toMatchObject({ code: "conflict" });
     expect((await store.getProductById(tenant.id, mug.id))!.stock).toBe(3);
     await updateProduct(ctx, { site: "m2-shop", productId: mug.id, confirm: true, patch: { price: 400 } });
+    // 第二輪審查 M2：改庫存一定要帶 expectedStock
+    await expect(updateProduct(ctx, { site: "m2-shop", productId: mug.id, confirm: true, patch: { stock: 9 } })).rejects.toMatchObject({ code: "invalid" });
     expect((await store.getProductById(tenant.id, mug.id))!.stock).toBe(3);
   });
 
@@ -74,7 +76,7 @@ describe("審查回饋修正", () => {
 
   it("L4：訂單金額上限", async () => {
     const store = newStore();
-    const { ctx, tenant } = await makeShop(store, "l4-shop");
+    const { ctx, tenant } = await makeShop(store, "l4-shop", { maxQtyPerItem: 99 });
     const { createProduct } = await import("@/lib/services/shop");
     const big = await createProduct(ctx, { site: "l4-shop", slug: "big", name: "很貴", price: 9_000_000, status: "published", confirm: true });
     await expect(placeOrder({ store, baseUrl: "http://t" }, { tenant, member: null, data: { items: [{ productId: big.id, qty: 99 }], contact, shipping, paymentMethod: "offline" } })).rejects.toThrow(/上限/);

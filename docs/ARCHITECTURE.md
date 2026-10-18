@@ -52,7 +52,7 @@
 
 - **隔離**：帳號唯一性是 `(tenant_id, email)`，同一個 email 在不同網站是不同帳號、不同密碼。session cookie 名為 `gbm_<tenant id 前 12 碼>`、`Path=/s/<slug>`、HttpOnly、SameSite=Lax、prod 加 Secure，瀏覽器不會把 A 站 cookie 送到 B 站；server 端另外比對 `session.tenant_id === 目前網站`，cookie 被搬到別站也無效。
 - **儲存**：密碼 scrypt（N=16384, r=8, p=1，每人 16 bytes salt），格式 `scrypt$N$r$p$salt$hash`（參數在字串裡，日後可升級）。session、驗證信、重設密碼 token 都只存 sha256；token 一次性（條件更新 `used_at is null and expires_at > now`），驗證信 48 小時、重設 1 小時。
-- **防枚舉**：登入失敗（不存在／密碼錯／停用）一律「Email 或密碼錯誤」，帳號不存在時也跑一次同成本的雜湊；註冊已存在的 email 回同一句話（另寄提醒信給帳號本人）；忘記密碼一律回同一句話。
+- **防枚舉**：忘記密碼的寄信以 `after()` 排到回應之後，並補到固定最短回應時間，回應時間不洩漏帳號是否存在。登入失敗（不存在／密碼錯／停用）一律「Email 或密碼錯誤」，帳號不存在時也跑一次同成本的雜湊；註冊已存在的 email 回同一句話（另寄提醒信給帳號本人）；忘記密碼一律回同一句話。
 - **限流**（`builder_rate_hit`）：登入每 IP 10 次／15 分＋每 email 10 次／15 分、註冊每 IP 5 次／小時、忘記密碼每 IP 5 次＋每 email 3 次／小時、重設每 IP 10 次／小時。
 - 重設密碼成功 → 撤銷該會員所有 session；停用會員 → 同樣撤銷。登出撤銷該筆 session。
 - 公開 POST 在 `app/s/[site]/api/account/*`（必須在 `/s/<slug>` 底下才收得到 cookie），檢查 Origin、303 回頁面帶訊息。
@@ -63,7 +63,10 @@
 - **計價**：`priceCart()` 是唯一的計價入口，前端只送 `{productId, variantId, qty}`，價格、運費、總額全部依 DB 重算（多送的 price/total 欄位直接丟掉）。購物車存在瀏覽器 localStorage，結帳頁顯示的金額也是呼叫 `/s/<slug>/api/shop/quote` 由 server 算的。
 - **下單**：SQL 函式 `builder_place_order`（單一交易）：逐項 `update … set stock = stock - qty where stock >= qty`（只有 `track_inventory` 的商品扣），任一不足就 raise、整筆回滾；同交易內遞增 `builder_order_counters` 產生 `<前綴>-YYYYMMDD-####`（台北日期）並寫入訂單與明細（明細記錄 `stock_deducted`，回補只補真的扣過的）。
 - **狀態機**：`lib/shop/machine.ts` 是唯一的轉換表（待付款→已付款/取消、已付款→出貨/取消，fulfilled／cancelled 為終點）；寫入一律條件式（`where status = from`），併發只有一個成功。
-- **取消與逾期**：`builder_cancel_order` 在同一交易內轉 cancelled ＋ 呼叫 `builder_release_order_stock`；回補以 `stock_released_at is null` 條件更新為冪等旗標，重複取消／重複回補不會多補。逾期未付（預設 72 小時）在讀取訂單時 lazy 處理，另有每日 cron `/api/cron/expire-orders`（`CRON_SECRET`，Vercel Hobby 只能每日）。
+- **取消與逾期**：`builder_cancel_order` 在同一交易內轉 cancelled ＋ 呼叫 `builder_release_order_stock`；回補以 `stock_released_at is null` 條件更新為冪等旗標，重複取消／重複回補不會多補。逾期未付在讀取訂單時 lazy 處理，另有每日 cron `/api/cron/expire-orders`（`CRON_SECRET`，Vercel Hobby 只能每日）；**下單前也會先釋放同商品已逾期的保留**（`releaseExpiredHolds`）。
+- **保留時間（2026-10 審查 M1）**：線上刷卡 `onlinePaymentHoldMinutes`（預設 60 分鐘，只給 CARD）；ATM 需店家開 `pchomepayAtm`，保留 `orderExpireHours`（≥ 48h，ATM 繳費期限一定更短）；線下匯款保留 `orderExpireHours`（預設 72）。每品項每單上限 `maxQtyPerItem`（預設 10）；每 IP 每小時下單上限 6。
+- **🔴 逾期前回查（H2）**：PChomePay 訂單逾期取消前，先對所有 pending 付款做權威回查：已付 → 走付款流程（不取消）；處理中（P／W*）或失敗（F）→ 才取消；回查失敗或狀態無法辨識 → **這次不取消**、累計 `builder_payments.query_failures`，連續 3 次寄店主警示（`alerted_at` 條件更新，只寄一次）。
+- **庫存寫入（M2）**：改商品層 `stock` 必須帶 `expectedStock`（條件更新 `where stock = expected`）；`variants` 是 patch 語意——規格沒帶 `stock` 就不動，要改既有規格的 stock 必須帶該規格的 `expectedStock`。
 - **庫存回補對位**：明細記錄 `deducted_from`（product／variant）。`update_product` 帶 variants 時依 options 比對沿用原規格列（id 不變）；被移除的規格才刪除，其未付款訂單取消時不會誤補到商品層。後台／MCP 改庫存可帶 `expectedStock`（後台自動帶），期間被訂單扣過就拒絕，避免把庫存蓋回去。
 - **GA**：`/account`、`/orders`、`/checkout` 一律不載入 GA（網址可能含一次性 token 或訂單金鑰）。
 - **ATM 期限**：保留時間 < 48h 時不提供 ATM（只刷卡）；否則 ATM 期限 = 保留天數 − 1（上限 5），一定早於訂單逾期。
@@ -78,12 +81,13 @@
 - **return_url** = 訂單頁：只顯示狀態、待付款時每 5 秒刷新，**不在 return 上改任何狀態**。
 - **notify** `/api/pay/pchomepay/notify/<tenantId>` 安全規則（`handlePchomepayNotify`）：
   1. notify 沒有簽章 → 絕不信 payload，只取 `order_id` 當查詢鍵；付款紀錄的 tenant 必須等於路徑上的 tenant。
-  2. 一律用「該租戶自己的憑證」`GET /v1/payment/{order_id}` 回查；`status_code ∈ {S,00,1}` 才算付款。
+  2. 一律用「該租戶自己的憑證」`GET /v1/payment/{order_id}` 回查，且憑證環境必須等於建單時的環境（sandbox／正式，L1）。**權威欄位是 `status`**：`S` 成功（此時 `status_code` 通常為 null）、`F` 失敗、`P` 處理中；`status_code` 是 F*（失敗）／W*（等待）細節碼。依據：Realreal 正式站實作（`apps/api/src/lib/pchomepay.ts`、`routes/webhooks/pchomepay.ts`，2026-07-12 只看 status_code 導致已付訂單卡 pending 的事件）與官方外掛 `includes/OrderStatusCodeEnum.php`（PChomePay 未公開正式查單文件）。無法辨識的狀態 → 不標記、回 500、警示店主。
   3. 權威金額 round 後必須等於付款紀錄與訂單總額，不符不標記（回 success、寫 log）。
   4. 回查失敗或缺金額 → 回 500 讓對方重試；其餘處理完一律回純文字 `success`。
   5. 條件式轉換 `pending_payment → paid`：只有真正轉換成功的那一次寄付款成功信（客人＋店主），重複／併發 notify 冪等。
   6. 訂單已取消（含逾期）卻收到付款 → 不改訂單、付款標 `paid_after_cancel`、寫 error log、寄店主警示（需人工退款），警示只寄一次。
 - **線下匯款**：訂單 pending_payment，店主在後台或 MCP `mark_order_paid`（`orders:write`＋confirm）；PChomePay 訂單不能手動標記。
+- **🔴 sandbox 憑證（H1）**：sandbox 憑證只在「帶有效預覽簽章」的結帳可用（結帳頁在 `?preview=` 模式會把簽章帶進表單，`handleCheckout` 驗簽後才允許）；已發布網站的一般訪客看不到線上付款。sandbox 付款成功的訂單標記 `builder_orders.payment_sandbox`，店主信寫「請勿出貨」，`fulfill_order` 一律拒絕；後台訂單列表顯示 sandbox 標記；「測試環境」勾選框預設不勾。
 - 🔴 規則：正式金鑰不准拿來測試；`scripts/e2e-pchomepay-sandbox.mjs` 只允許 localhost＋sandbox，且不跟隨付款頁。notify 用單元／整合測試模擬（mock 回查結果）。
 
 ## 已知風險（第一版刻意不處理）
@@ -95,7 +99,7 @@
 | 未付款訂單佔庫存 | 訪客下單即扣庫存，保留到逾期（預設 72h）；每 IP 每小時 20 單限流，但多 IP 仍可凍結限量商品。 | 線上付款縮短保留時間、每 email/電話限制同時 pending 單數、提高 cron 頻率。 |
 | 更換 PChomePay 憑證後舊單回查失敗 | notify 回查用「目前」的憑證；正式帳號 A→B 更換後，A 帳號的未完成付款回查會失敗（回 500 讓對方重試），可能逾期取消且不會警示。 | payments 記錄建單時的 app_id、或有 pending 線上付款時禁止更換憑證、回查連續失敗寄警示。 |
 | 所有租戶同源 | `/s/<slug>` 共用一個 origin：cookie 的 path／名稱隔離只防瀏覽器自動帶 cookie，防不了同源 JS。目前租戶無法放自訂程式碼（只允許 G- 格式 GA、Markdown 已消毒）。 | 開放任何自訂 HTML/script/GTM 之前，必須先改子網域或自有網域隔離。 |
-| 登入限流的 email 桶可被拿來鎖帳號 | 任何人對某 email 猜 10 次，該會員 15 分鐘內無法登入。 | 改成 IP＋email 組合，或對已知裝置放寬。 |
+| 登入限流 | 已改為 email＋IP 組合（10 次／15 分）為主、每 IP 30 次；email 單獨超過 100 次／15 分只延遲 1.5 秒不鎖死。分散式大量 IP 仍可慢速猜測。 | 加 CAPTCHA 或裝置指紋。 |
 | 會員信件依賴 Resend | 沒設 `RESEND_API_KEY` 時驗證／重設連結只寫 server log（正式站 log 會含一次性連結）。 | 正式站一定要設 Resend；長期改成每個租戶自己的寄件網域。 |
 | 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
 | 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |

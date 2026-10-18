@@ -48,7 +48,7 @@ modules/<id>/
 | `members` | core | `/account`、`/account/login`、`register`、`forgot`、`reset?token=`、`verify?token=` | `builder_members`、`builder_member_sessions`、`builder_member_tokens` | `list_members`、`get_member`、`disable_member` |
 | `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`get_payment_setup_status` |
 
-`shop` 的設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`。
+`shop` 的設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`、`onlinePaymentHoldMinutes`（線上刷卡保留，預設 60）、`pchomepayAtm`（另提供 ATM）、`maxQtyPerItem`（預設 10）。
 **金流金鑰不在模組設定裡**：只能由平台擁有者在後台「金流設定」分頁輸入（見 ARCHITECTURE「金流」）。
 `shop` 的狀態除了 settingsSchema 之外還看金流：沒有已驗證的 PChomePay 憑證 → `pending_setup`（`lib/shop/status.ts`），區塊照常顯示，結帳只提供已開放的線下匯款；兩種付款都沒開則結帳頁顯示「尚未開放結帳」。
 

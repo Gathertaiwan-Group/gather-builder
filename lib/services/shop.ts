@@ -3,10 +3,12 @@ import { z } from "zod";
 import { shopSettings, type ShopSettings } from "@/modules/shop/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
 import type { MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, Store, TenantRow, VariantRow } from "../store/types";
-import { PCHOMEPAY_MIN_AMOUNT } from "../pay/pchomepay";
+import { PCHOMEPAY_MIN_AMOUNT, atmExpireDays } from "../pay/pchomepay";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { publishedModuleSettings, sha256 } from "./members";
+import { optionsKey } from "../store/supabase-commerce";
+import { releaseExpiredHolds } from "./orders";
 
 /* ================================================================== 共用 */
 
@@ -50,7 +52,10 @@ const variantInput = z
     options: z.record(z.string().trim().min(1).max(30), z.string().trim().min(1).max(60)),
     price: z.number().int().min(0).max(10_000_000).optional(),
     sku: optText(64),
-    stock: z.number().int().min(0).max(1_000_000).default(0),
+    /** 沒帶 = 不動既有規格的庫存（新規格為 0） */
+    stock: z.number().int().min(0).max(1_000_000).optional(),
+    /** 改既有規格的 stock 時必填：你讀到的目前庫存；期間被訂單扣過就拒絕（避免把庫存蓋回去） */
+    expectedStock: z.number().int().min(0).max(1_000_000).optional(),
   })
   .strict();
 
@@ -111,7 +116,7 @@ export async function createProduct(ctx: ServiceContext, input: { site?: string 
     sort: d.sort,
   });
   const variants = d.variants?.length
-    ? await ctx.store.replaceVariants(tenant.id, row.id, d.variants.map((v, i) => ({ options: v.options, price: v.price ?? null, sku: v.sku ?? null, stock: v.stock, sort: i })))
+    ? await ctx.store.replaceVariants(tenant.id, row.id, d.variants.map((v, i) => ({ options: v.options, price: v.price ?? null, sku: v.sku ?? null, stock: v.stock ?? 0, sort: i })))
     : [];
   await audit(ctx, tenant.id, "product.create", { productId: row.id, slug: row.slug, status: row.status });
   return { ...productSummary(row, variants), note: row.status === "published" ? "商品已上架（立即對外）。" : "商品為草稿，status 改為 published 才會上架。" };
@@ -135,9 +140,22 @@ export async function updateProduct(
   const nextStatus = given.status ?? existing.status;
   if (existing.status === "published" || nextStatus === "published") requireLiveConfirm(ctx, "修改／上架／下架已上架的商品", input.confirm);
   if (p.slug && p.slug !== existing.slug && (await ctx.store.getProductBySlug(tenant.id, p.slug))) throw new ServiceError("conflict", `商品 slug「${p.slug}」已存在`);
-  // 庫存是絕對值：帶 expectedStock 時若期間有人下單（庫存已變）就拒絕，避免把剛扣掉的庫存蓋回去
-  if (given.stock !== undefined && input.expectedStock !== undefined && existing.stock !== input.expectedStock) {
+  // M2：庫存是絕對值，改庫存一定要帶 expectedStock（你讀到的值），寫入時以條件更新比對，期間被訂單扣過就拒絕
+  if (given.stock !== undefined && input.expectedStock === undefined) {
+    throw new ServiceError("invalid", `改「${existing.name}」的庫存必須帶 expectedStock（你讀到的目前庫存 ${existing.stock}），避免蓋掉期間被訂單扣掉的庫存`);
+  }
+  if (given.stock !== undefined && existing.stock !== input.expectedStock) {
     throw new ServiceError("conflict", `「${existing.name}」的庫存在你讀取後已變動（目前 ${existing.stock}，你讀到的是 ${input.expectedStock}），請重新讀取後再改`);
+  }
+  let curVariants: VariantRow[] | null = null;
+  if (p.variants !== undefined) {
+    curVariants = await ctx.store.listVariants(tenant.id, [existing.id]);
+    for (const v of p.variants) {
+      const hit = curVariants.find((x) => optionsKey(x.options) === optionsKey(v.options));
+      if (hit && v.stock !== undefined && v.expectedStock === undefined) {
+        throw new ServiceError("invalid", `改規格「${Object.values(v.options).join(" / ")}」的庫存必須帶 expectedStock（目前 ${hit.stock}）；不改庫存就不要帶 stock`);
+      }
+    }
   }
   const patch: Partial<ProductRow> = {};
   if (given.slug !== undefined) patch.slug = p.slug;
@@ -148,13 +166,22 @@ export async function updateProduct(
   if (given.compareAtPrice !== undefined) patch.compare_at_price = p.compareAtPrice ?? null;
   if (given.sku !== undefined) patch.sku = p.sku ?? null;
   if (given.trackInventory !== undefined) patch.track_inventory = p.trackInventory;
-  if (given.stock !== undefined) patch.stock = p.stock;
   if (given.sort !== undefined) patch.sort = p.sort;
   if (given.status !== undefined) patch.status = p.status;
-  const row = Object.keys(patch).length ? await ctx.store.updateProduct(tenant.id, existing.id, patch) : existing;
+  if (given.stock !== undefined && p.stock !== existing.stock) {
+    if (!(await ctx.store.setProductStockIf(tenant.id, existing.id, input.expectedStock!, p.stock!))) {
+      throw new ServiceError("conflict", `「${existing.name}」的庫存剛被訂單扣過，請重新讀取後再改`);
+    }
+  }
+  let row = Object.keys(patch).length ? await ctx.store.updateProduct(tenant.id, existing.id, patch) : existing;
+  if (!Object.keys(patch).length && given.stock !== undefined) row = (await ctx.store.getProductById(tenant.id, existing.id)) ?? existing;
   let variants: VariantRow[];
   if (p.variants !== undefined) {
-    variants = await ctx.store.replaceVariants(tenant.id, existing.id, p.variants.map((v, i) => ({ options: v.options, price: v.price ?? null, sku: v.sku ?? null, stock: v.stock, sort: i })));
+    variants = await ctx.store.replaceVariants(
+      tenant.id,
+      existing.id,
+      p.variants.map((v, i) => ({ options: v.options, price: v.price ?? null, sku: v.sku ?? null, stock: v.stock, expectedStock: v.expectedStock, sort: i })),
+    );
   } else {
     variants = await ctx.store.listVariants(tenant.id, [existing.id]);
   }
@@ -193,6 +220,11 @@ export const cartLineInput = z.object({
   qty: z.number().int().min(1).max(99),
 });
 export const cartInput = z.array(cartLineInput).min(1, { message: "購物車是空的" }).max(30);
+
+/** 每張訂單每個品項預設上限（M1：避免一張單凍結整批限量庫存） */
+export const DEFAULT_MAX_QTY_PER_ITEM = 10;
+/** 線上刷卡訂單預設保留時間（分鐘） */
+export const DEFAULT_ONLINE_HOLD_MINUTES = 60;
 
 export interface PricedCart {
   lines: (OrderItemInput & { stockAvailable: number | null; slug: string })[];
@@ -236,6 +268,11 @@ export async function priceCart(store: Store, tenantId: string, raw: unknown, se
       problems.push(`「${p.name}」沒有這個規格`);
       continue;
     }
+    const maxQty = settings.maxQtyPerItem ?? DEFAULT_MAX_QTY_PER_ITEM;
+    if (m.qty > maxQty) {
+      problems.push(`「${p.name}${v ? `（${variantLabel(v)}）` : ""}」每張訂單最多 ${maxQty} 件`);
+      continue;
+    }
     const unit = v?.price ?? p.price;
     const avail = p.track_inventory ? (v ? v.stock : p.stock) : null;
     if (avail !== null && m.qty > avail) problems.push(`「${p.name}${v ? `（${variantLabel(v)}）` : ""}」庫存不足（剩 ${avail} 件）`);
@@ -268,20 +305,30 @@ export const checkoutInput = z
     shipping: z.object({ name: text(80), phone: z.string().trim().min(6, { message: "請填寫收件人電話" }).max(40), address: text(300) }).strict(),
     note: optText(500),
     paymentMethod: z.enum(["pchomepay", "offline"]),
+    /** 線上付款的方式：card（預設，保留時間短）／atm（需店家開啟 pchomepayAtm） */
+    pchomepayType: z.enum(["card", "atm"]).optional(),
   })
   .strict();
 
 export interface PaymentAvailability {
   pchomepay: boolean;
+  /** 線上付款可另選 ATM（保留 orderExpireHours） */
+  pchomepayAtm: boolean;
   offline: boolean;
   offlineInstructions: string | null;
   pchomepaySandbox: boolean;
 }
 
-export async function paymentAvailability(store: Store, tenant: TenantRow, settings: ShopSettings): Promise<PaymentAvailability> {
+/**
+ * 🔴 H1：sandbox（測試環境）憑證只在「帶有效預覽簽章」的結帳可用。
+ * 已發布網站的一般訪客永遠拿不到 sandbox 付款——否則任何人都能用公開測試卡把訂單「付款成功」。
+ */
+export async function paymentAvailability(store: Store, tenant: TenantRow, settings: ShopSettings, opts: { allowSandbox?: boolean } = {}): Promise<PaymentAvailability> {
   const acct = await store.getPaymentAccount(tenant.id, "pchomepay");
+  const usable = settings.pchomepay !== false && acct?.status === "verified" && (!acct.sandbox || opts.allowSandbox === true);
   return {
-    pchomepay: settings.pchomepay !== false && acct?.status === "verified",
+    pchomepay: usable,
+    pchomepayAtm: usable && settings.pchomepayAtm === true && atmExpireDays(settings.orderExpireHours ?? 72) !== null,
     pchomepaySandbox: !!acct?.sandbox,
     offline: !!settings.offlineTransfer?.enabled,
     offlineInstructions: settings.offlineTransfer?.instructions ?? null,
@@ -300,26 +347,31 @@ export interface CheckoutDeps {
  */
 export async function placeOrder(
   deps: CheckoutDeps,
-  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings },
+  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings; allowSandbox?: boolean },
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
   const settings = input.settings ?? (await publishedShopSettings(deps.store, tenant));
   if (settings.allowGuestCheckout === false && !member) throw new ServiceError("unauthorized", "此商店需要先登入會員才能結帳");
   const d = parse(checkoutInput, input.data);
+  // M1：先釋放這些商品已逾期的保留（線上付款單會先權威回查），避免逾期單繼續佔庫存
+  await releaseExpiredHolds({ store: deps.store, sendMail: deps.sendMail, baseUrl: deps.baseUrl }, tenant.id, [...new Set(d.items.map((i) => i.productId))]);
   const priced = await priceCart(deps.store, tenant.id, d.items, settings);
   if (priced.problems.length || !priced.lines.length) throw new ServiceError("invalid", priced.problems.join("；") || "購物車是空的");
 
-  const avail = await paymentAvailability(deps.store, tenant, settings);
+  const avail = await paymentAvailability(deps.store, tenant, settings, { allowSandbox: input.allowSandbox });
   const method: PaymentMethod = d.paymentMethod;
+  const atm = method === "pchomepay" && d.pchomepayType === "atm";
   if (method === "pchomepay") {
     if (!avail.pchomepay) throw new ServiceError("invalid", "此商店目前無法使用線上付款，請選擇其他付款方式");
+    if (atm && !avail.pchomepayAtm) throw new ServiceError("invalid", "此商店未開放 ATM 轉帳，請改用信用卡");
     if (priced.total < PCHOMEPAY_MIN_AMOUNT) throw new ServiceError("invalid", `線上付款最低金額為 NT$${PCHOMEPAY_MIN_AMOUNT}，請改用其他付款方式或加購商品`);
   } else if (!avail.offline) {
     throw new ServiceError("invalid", "此商店未開放線下匯款");
   }
 
   const accessKey = randomBytes(24).toString("base64url");
-  const hours = settings.orderExpireHours ?? 72;
+  // M1：線上刷卡只保留短時間；ATM 與線下匯款保留 orderExpireHours（ATM 繳費期限由 atmExpireDays 保證更短）
+  const hours = method === "pchomepay" && !atm ? (settings.onlinePaymentHoldMinutes ?? DEFAULT_ONLINE_HOLD_MINUTES) / 60 : (settings.orderExpireHours ?? 72);
   const { id } = await deps.store.placeOrder(
     tenant.id,
     {

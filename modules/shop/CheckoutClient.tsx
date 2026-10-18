@@ -34,13 +34,16 @@ export function CheckoutClient(props: {
   shopHref: string;
   loginHref: string;
   member: { name: string; email: string; phone: string } | null;
-  methods: { pchomepay: boolean; offline: boolean; offlineInstructions: string | null; sandbox: boolean };
+  methods: { pchomepay: boolean; atm: boolean; offline: boolean; offlineInstructions: string | null; sandbox: boolean };
   minOnline: number;
+  /** 預覽模式（網站主自己測試）才有：sandbox 金流只接受帶簽章的結帳 */
+  previewToken?: string | null;
 }) {
   const [cart, setCart] = useState<CartLine[] | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [error, setError] = useState("");
   const [method, setMethod] = useState<"pchomepay" | "offline">(props.methods.pchomepay ? "pchomepay" : "offline");
+  const [payType, setPayType] = useState<"card" | "atm">("card");
   const [same, setSame] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -138,6 +141,7 @@ export function CheckoutClient(props: {
       ) : (
         <form method="post" action={props.action} className="gb-card flex flex-col gap-4 p-4 md:p-5" data-gb="checkout-form" onSubmit={() => setSubmitting(true)}>
           <input type="hidden" name="items" value={JSON.stringify(cart.map(({ productId, variantId, qty }) => ({ productId, variantId, qty })))} />
+          {props.previewToken && <input type="hidden" name="preview" value={props.previewToken} />}
           {!m && (
             <p className="m-0 text-sm">
               已是會員？<a href={props.loginHref}>登入</a>後訂單會出現在會員中心。也可以直接以訪客身分結帳。
@@ -187,8 +191,18 @@ export function CheckoutClient(props: {
             {props.methods.pchomepay && (
               <label className="flex items-center gap-2 text-sm">
                 <input type="radio" name="paymentMethod" value="pchomepay" checked={method === "pchomepay"} onChange={() => setMethod("pchomepay")} />
-                線上付款（信用卡／ATM，PChomePay 支付連）{props.methods.sandbox && <span className="gb-muted">［測試環境］</span>}
+                線上付款（PChomePay 支付連）{props.methods.sandbox && <span className="gb-muted">［測試環境］</span>}
               </label>
+            )}
+            {method === "pchomepay" && props.methods.atm && (
+              <div className="ml-6 flex flex-col gap-1 text-sm" data-gb="pay-type">
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="pchomepayType" value="card" checked={payType === "card"} onChange={() => setPayType("card")} /> 信用卡
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="pchomepayType" value="atm" checked={payType === "atm"} onChange={() => setPayType("atm")} /> ATM 轉帳
+                </label>
+              </div>
             )}
             {props.methods.offline && (
               <label className="flex items-center gap-2 text-sm">

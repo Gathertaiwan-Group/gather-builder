@@ -178,6 +178,16 @@ export interface VariantRow {
   created_at: string;
 }
 
+export interface VariantWrite {
+  options: Record<string, string>;
+  price: number | null;
+  sku: string | null;
+  sort: number;
+  /** undefined = 不動（既有規格）／0（新規格） */
+  stock?: number;
+  expectedStock?: number;
+}
+
 export type OrderStatus = "pending_payment" | "paid" | "fulfilled" | "cancelled";
 export type PaymentMethod = "pchomepay" | "offline";
 
@@ -236,6 +246,8 @@ export interface OrderRow {
   invoice_status: string | null;
   shipping_method: string | null;
   shipping_tracking: string | null;
+  /** 付款來自 PChomePay 測試環境（sandbox）：不是真的收到錢，不能出貨 */
+  payment_sandbox: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -280,6 +292,11 @@ export interface PaymentRow {
   payment_url: string | null;
   raw: Record<string, unknown> | null;
   paid_at: string | null;
+  /** 權威回查連續失敗次數（成功回查歸零） */
+  query_failures: number;
+  last_query_error: string | null;
+  /** 已寄出「回查異常」警示給店主的時間（同一筆只寄一次） */
+  alerted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -363,7 +380,13 @@ export interface Store {
   updateProduct(tenantId: string, id: string, patch: Partial<Omit<ProductRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<ProductRow>;
   listVariants(tenantId: string, productIds: string[]): Promise<VariantRow[]>;
   /** 整份取代某商品的規格：options 相同的沿用原本的列（id 不變、只更新價格／SKU／庫存），其餘新增，多出的刪除 */
-  replaceVariants(tenantId: string, productId: string, rows: Omit<VariantRow, "id" | "tenant_id" | "product_id" | "created_at">[]): Promise<VariantRow[]>;
+  /**
+   * 整份取代規格清單（patch 語意）：stock 沒帶（undefined）的既有規格保留原庫存、新規格為 0；
+   * 帶 expectedStock 時以條件更新（目前庫存 = expectedStock 才寫），不符丟 ServiceError(conflict)。
+   */
+  replaceVariants(tenantId: string, productId: string, rows: VariantWrite[]): Promise<VariantRow[]>;
+  /** 條件式改商品庫存：目前庫存 = expected 才寫；回傳是否成功 */
+  setProductStockIf(tenantId: string, id: string, expected: number, next: number): Promise<boolean>;
 
   // orders
   /** 原子下單（builder_place_order）：扣庫存＋編號＋寫訂單；庫存不足丟 ServiceError(conflict) 整筆不成立 */
@@ -373,13 +396,15 @@ export interface Store {
   listOrders(tenantId: string, opts: { status?: OrderStatus; memberId?: string; limit: number; offset: number }): Promise<{ rows: OrderRow[]; total: number }>;
   listOrderItems(tenantId: string, orderId: string): Promise<OrderItemRow[]>;
   /** 條件式轉換：只有目前狀態 = from 才更新；回傳更新後的列，沒轉換成功回 null */
-  transitionOrder(tenantId: string, id: string, from: OrderStatus, to: OrderStatus, patch: Partial<Pick<OrderRow, "paid_at" | "fulfilled_at" | "shipping_tracking" | "shipping_method">>): Promise<OrderRow | null>;
+  transitionOrder(tenantId: string, id: string, from: OrderStatus, to: OrderStatus, patch: Partial<Pick<OrderRow, "paid_at" | "fulfilled_at" | "shipping_tracking" | "shipping_method" | "payment_sandbox">>): Promise<OrderRow | null>;
   /** 原子取消＋回補庫存（builder_cancel_order） */
   cancelOrder(tenantId: string, id: string, from: OrderStatus[], reason: string): Promise<{ transitioned: boolean; stockReleased: boolean }>;
   /** 冪等回補（builder_release_order_stock） */
   releaseOrderStock(tenantId: string, id: string): Promise<boolean>;
   /** 逾期未付的訂單（所有租戶；cron 用） */
   listExpiredPendingOrders(nowIso: string, limit: number): Promise<Pick<OrderRow, "id" | "tenant_id">[]>;
+  /** 某租戶含指定商品、已逾期未付的訂單（下單前先釋放逾期保留用） */
+  listExpiredPendingOrdersForProducts(tenantId: string, productIds: string[], nowIso: string, limit: number): Promise<OrderRow[]>;
 
   // payment accounts & payments
   getPaymentAccount(tenantId: string, provider: "pchomepay"): Promise<PaymentAccountRow | null>;
@@ -388,7 +413,11 @@ export interface Store {
   insertPayment(row: Pick<PaymentRow, "tenant_id" | "order_id" | "provider" | "gateway_order_no" | "amount" | "sandbox">): Promise<PaymentRow>;
   getPaymentByGatewayNo(gatewayOrderNo: string): Promise<PaymentRow | null>;
   listPaymentsForOrder(tenantId: string, orderId: string): Promise<PaymentRow[]>;
-  updatePayment(tenantId: string, id: string, patch: Partial<Pick<PaymentRow, "payment_url" | "raw" | "status" | "paid_at">>): Promise<void>;
+  updatePayment(tenantId: string, id: string, patch: Partial<Pick<PaymentRow, "payment_url" | "raw" | "status" | "paid_at" | "query_failures" | "last_query_error">>): Promise<void>;
+  /** 回查失敗次數 +1（原子），回傳新的次數 */
+  bumpPaymentQueryFailure(tenantId: string, id: string, error: string): Promise<number>;
+  /** 條件式標記已警示（alerted_at 由 null 改成 now 的那一次回 true） */
+  markPaymentAlerted(tenantId: string, id: string): Promise<boolean>;
   /** 條件式更新付款狀態（目前狀態 = from 才寫）；回傳是否真的轉換 */
   transitionPayment(tenantId: string, id: string, from: PaymentRow["status"], to: PaymentRow["status"], patch: Partial<Pick<PaymentRow, "raw" | "paid_at">>): Promise<boolean>;
 
@@ -423,6 +452,7 @@ export type CommerceStore = Pick<
   | "updateProduct"
   | "listVariants"
   | "replaceVariants"
+  | "setProductStockIf"
   | "placeOrder"
   | "getOrderById"
   | "getOrderByNo"
@@ -432,6 +462,9 @@ export type CommerceStore = Pick<
   | "cancelOrder"
   | "releaseOrderStock"
   | "listExpiredPendingOrders"
+  | "listExpiredPendingOrdersForProducts"
+  | "bumpPaymentQueryFailure"
+  | "markPaymentAlerted"
   | "getPaymentAccount"
   | "upsertPaymentAccount"
   | "markPaymentAccount"
