@@ -1,0 +1,41 @@
+name: Deploy to Vercel
+
+# push 到 main → 型別檢查＋測試 → 部署正式站。
+# Vercel Hobby 會擋「commit 作者不是 team 成員」的部署（TEAM_ACCESS_REQUIRED），
+# 所以部署前先移除 .git，讓 CLI 不附帶 git 中繼資料（與 README「部署」段的手動做法相同）。
+# DB migration 不在這裡跑：有 DB 變更時先手動 `npm run migrate`，再 push。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Deploy (without git metadata)
+        run: |
+          rm -rf .git
+          npx --yes vercel@54.4.1 deploy --prod --yes --token "${{ secrets.VERCEL_TOKEN }}"

@@ -53,8 +53,10 @@ npm run dev                  # http://localhost:3000
 
 ## 部署
 
-Vercel 專案（Hobby）無法連結組織私有 repo，所以 push 不會自動部署，需手動部署。
-直接在 repo 目錄 `vercel deploy --prod` 會因為 commit 作者不是 Vercel team 成員而被擋（BLOCKED / TEAM_ACCESS_REQUIRED），
+**自動部署**：push 到 main 會觸發 GitHub Actions（`.github/workflows/deploy.yml`）：typecheck → test → 移除 `.git` 後 `vercel deploy --prod`。
+需要的 repo secrets：`VERCEL_TOKEN`、`VERCEL_ORG_ID`、`VERCEL_PROJECT_ID`。
+
+**手動部署（備援）**：直接在 repo 目錄 `vercel deploy --prod` 會因為 commit 作者不是 Vercel team 成員而被擋（BLOCKED / TEAM_ACCESS_REQUIRED），
 所以要從不含 `.git` 的匯出目錄部署：
 
 ```bash
