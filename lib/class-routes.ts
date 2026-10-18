@@ -37,7 +37,7 @@ async function siteFor(slug: string, moduleId: string, store: Store) {
   return site;
 }
 
-async function guard(req: Request, slug: string, moduleId: string, store: Store, bucket: string) {
+export async function guard(req: Request, slug: string, moduleId: string, store: Store, bucket: string) {
   if (!originOk(req)) return { res: new NextResponse("forbidden origin", { status: 403 }) } as const;
   const site = await siteFor(slug, moduleId, store);
   if (!site) return { res: new NextResponse("not found", { status: 404 }) } as const;
@@ -270,5 +270,34 @@ export async function handleCourseProgress(req: Request, rawSlug: string, store:
     return siteRedirect(req, slug, back, { ok: "已標記完成" });
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+/** 第七批：訂閱（會員登入 → 藍新定期定額表單自動送出）；取消訂閱（會員中心） */
+export async function handleSubscribe(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  try {
+    const g = await guard(req, slug, "subscriptions", store, "subscribe");
+    if ("res" in g) return g.res!;
+    const { site, form, member, allowSandbox } = g;
+    const { subscribe } = await import("./services/subscriptions");
+    const r = await subscribe({ store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) }, { tenant: site.tenant, member, allowSandbox, data: { planId: form.planId } });
+    return onlinePaymentResponse(r.form);
+  } catch (e) {
+    return siteRedirect(req, slug, "/account", { err: messageOf(e) });
+  }
+}
+
+export async function handleSubscriptionCancel(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  try {
+    const g = await guard(req, slug, "subscriptions", store, "subscription-cancel");
+    if ("res" in g) return g.res!;
+    const { site, form, member } = g;
+    const { memberCancelSubscription } = await import("./services/subscriptions");
+    const r = await memberCancelSubscription({ store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) }, { tenant: site.tenant, member, subscriptionId: form.subscriptionId ?? "" });
+    return siteRedirect(req, slug, "/account", r.cancelState === "done" ? { ok: r.message } : { err: r.message });
+  } catch (e) {
+    return siteRedirect(req, slug, "/account", { err: messageOf(e) });
   }
 }

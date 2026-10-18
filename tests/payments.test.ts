@@ -208,7 +208,7 @@ describe("MCP 沒有任何能設定或讀出金流 secret 的工具", () => {
     const allProps = j.result.tools.flatMap((t) => Object.keys(t.inputSchema.properties ?? {}));
     expect(allProps.filter((p) => /secret|app_?id|password|hash_?key|hash_?iv|merchant_?id|channel|cust_?id/i.test(p))).toEqual([]);
     // 第七批：refund_order、cancel_subscription 都要 confirm（工具 schema 有 confirm 參數）
-    for (const n of ["refund_order"]) expect(Object.keys(j.result.tools.find((t) => t.name === n)!.inputSchema.properties ?? {})).toContain("confirm");
+    for (const n of ["refund_order", "cancel_subscription"]) expect(Object.keys(j.result.tools.find((t) => t.name === n)!.inputSchema.properties ?? {})).toContain("confirm");
   });
 });
 

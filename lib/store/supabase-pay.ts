@@ -81,7 +81,7 @@ export function createSupabasePayStore(db: SupabaseClient): PayStore {
     },
     async updateSubscriptionIf(tenantId, id, where, patch) {
       let q = db.from("builder_subscriptions").update({ ...patch, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id);
-      for (const [k, v] of Object.entries(where)) q = q.eq(k, v as string);
+      for (const [k, v] of Object.entries(where)) q = v === null ? q.is(k, null) : q.eq(k, v as string);
       return must(await q.select("*").maybeSingle(), "updateSubscriptionIf") as SubscriptionRow | null;
     },
     async recordSubscriptionCharge(tenantId, i) {

@@ -756,6 +756,14 @@ export async function verifyProviderAccount(ctx: ServiceContext, input: { site: 
   if (r.ok) await ctx.store.markPaymentAccount(tenant.id, input.provider, { status: "verified", verified_at: new Date().toISOString(), last_error: null });
   else await ctx.store.markPaymentAccount(tenant.id, input.provider, { status: "unverified", verified_at: null, last_error: r.message.slice(0, 300) });
   await syncShopModuleStatus(ctx.store, tenant.id);
+  if (input.provider === "newebpay") {
+    // subscriptions 模組：藍新憑證驗證後才 enabled
+    const row = (await ctx.store.listTenantModules(tenant.id)).find((m) => m.module_id === "subscriptions");
+    if (row && row.status !== "disabled") {
+      const want = r.ok ? "enabled" : "pending_setup";
+      if (row.status !== want) await ctx.store.upsertTenantModule({ ...row, status: want });
+    }
+  }
   await audit(ctx, tenant.id, "payment_account.verify", { provider: input.provider, ok: r.ok, sandbox: acct.sandbox });
   if (!r.ok) throw new ServiceError("invalid", `驗證失敗：${r.message}`);
   return { verified: true, sandbox: acct.sandbox, note: r.note };

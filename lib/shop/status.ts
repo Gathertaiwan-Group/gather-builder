@@ -16,6 +16,11 @@ export async function adjustModuleStatus(store: Store, tenantId: string, moduleI
     const acct = await store.getInvoiceAccount(tenantId);
     return acct?.status === "verified" ? "enabled" : "pending_setup";
   }
+  if (moduleId === "subscriptions") {
+    // 第七批：需要已驗證的藍新憑證（信用卡定期定額）
+    const acct = await store.getPaymentAccount(tenantId, "newebpay");
+    return acct?.status === "verified" ? "enabled" : "pending_setup";
+  }
   if (moduleId === "ai-chat") return process.env.GEMINI_API_KEY ? "enabled" : "pending_setup";
   return status;
 }

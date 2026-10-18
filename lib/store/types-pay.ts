@@ -130,7 +130,7 @@ export interface PayStore {
   /** 條件式狀態轉換（目前狀態 ∈ from 才寫）；沒轉換回 null */
   transitionSubscription(tenantId: string, id: string, from: SubscriptionStatus[], to: SubscriptionStatus, patch?: SubscriptionPatch): Promise<SubscriptionRow | null>;
   /** 不改狀態的欄位更新；where 可加條件（例如 entitlement_state = 'none' 才寫） */
-  updateSubscriptionIf(tenantId: string, id: string, where: Partial<Pick<SubscriptionRow, "entitlement_state" | "cancel_state" | "status">>, patch: SubscriptionPatch): Promise<SubscriptionRow | null>;
+  updateSubscriptionIf(tenantId: string, id: string, where: Partial<Pick<SubscriptionRow, "entitlement_state" | "cancel_state" | "status" | "alerted_at">>, patch: SubscriptionPatch): Promise<SubscriptionRow | null>;
   /** builder_record_subscription_charge：同一交易插入扣款（同期同結果只一次）＋轉換狀態 */
   recordSubscriptionCharge(
     tenantId: string,

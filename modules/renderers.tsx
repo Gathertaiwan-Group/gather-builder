@@ -18,6 +18,7 @@ import { DownloadsList } from "./downloads/sections";
 import { CertificateLookup } from "./certificates/sections";
 import { ProductReviews } from "./reviews/sections";
 import { AnnouncementsBar, AnnouncementsList } from "./announcements/sections";
+import { SubscriptionPlans } from "./subscriptions/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -50,4 +51,5 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   product_reviews: ProductReviews,
   announcements_bar: AnnouncementsBar,
   announcements_list: AnnouncementsList,
+  subscription_plans: SubscriptionPlans,
 };

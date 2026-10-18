@@ -340,7 +340,7 @@ export interface EnrollmentRow {
   course_id: string;
   member_id: string;
   status: "active" | "revoked";
-  source: "order" | "manual" | "free";
+  source: "order" | "manual" | "free" | "subscription";
   order_id: string | null;
   granted_at: string;
   granted_by: string | null;

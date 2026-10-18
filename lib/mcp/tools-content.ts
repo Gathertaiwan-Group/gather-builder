@@ -9,6 +9,7 @@ import * as downloads from "../services/downloads";
 import * as certificates from "../services/certificates";
 import * as reviews from "../services/reviews";
 import * as announcements from "../services/announcements";
+import * as subscriptions from "../services/subscriptions";
 import { getFileStorage } from "../storage/files";
 
 /**
@@ -416,6 +417,73 @@ export function registerContentTools(server: McpServer, ctx: ServiceContext, wra
       annotations: RO,
     },
     wrap(async (a) => announcements.listAnnouncementAcks(ctx, { ...a, reveal: false })),
+  );
+
+  /* ------------------------------------------------------------ 訂閱制（subscriptions，第七批） */
+
+  server.registerTool(
+    "create_subscription_plan",
+    {
+      description:
+        "建立訂閱方案（藍新信用卡定期定額；網站要先在後台設定並驗證藍新憑證）。amount 每期金額（≥30）、interval month／year、trialDays 試用天數（0–28；>0 時先做 NT$10 驗證、試用期後才扣第一期）、totalPeriods 期數上限（≤99）、entitlement 權益（{kind:\"none\"} 純月費，或 {kind:\"course\",courseId} 訂閱期間開通課程）。status active 會立即上架，需要 publish ＋ confirm: true。需要 commerce:write。",
+      inputSchema: {
+        site,
+        name: z.string(),
+        amount: z.number().int(),
+        interval: z.enum(["month", "year"]),
+        trialDays: z.number().int().optional(),
+        totalPeriods: z.number().int().optional(),
+        entitlement: z.object({ kind: z.enum(["none", "course"]), courseId: z.string().optional() }).optional(),
+        description: z.string().optional(),
+        status: z.enum(["draft", "active", "archived"]).optional(),
+        confirm,
+      },
+      annotations: WRITE,
+    },
+    wrap(async (a) => {
+      const ent = a.entitlement ? (a.entitlement.kind === "course" ? { kind: "course" as const, courseId: a.entitlement.courseId ?? "" } : { kind: "none" as const }) : undefined;
+      return subscriptions.createSubscriptionPlan(ctx, { ...a, entitlement: ent });
+    }),
+  );
+
+  server.registerTool(
+    "update_subscription_plan",
+    {
+      description: "修改訂閱方案名稱、說明或上下架（金額與週期不能改：請建新方案；既有訂閱不受影響）。改已上架或上架需要 publish ＋ confirm: true。需要 commerce:write。",
+      inputSchema: { site, planId: z.string(), name: z.string().optional(), description: z.string().optional(), status: z.enum(["draft", "active", "archived"]).optional(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => subscriptions.updateSubscriptionPlan(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_subscription_plans",
+    {
+      description: "列出訂閱方案（含草稿、下架）。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => subscriptions.listSubscriptionPlans(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_subscriptions",
+    {
+      description: "列出訂閱（狀態 pending／active／past_due／cancelled／expired、目前期間、寬限期、取消進度、權益狀態；會員 email 遮罩）。需要 members:read。",
+      inputSchema: { site, status: z.enum(["pending", "active", "past_due", "cancelled", "expired"]).optional(), planId: z.string().optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => subscriptions.listSubscriptions(ctx, a)),
+  );
+
+  server.registerTool(
+    "cancel_subscription",
+    {
+      description: "取消訂閱：終止藍新定期定額委託（終止後無法再啟用），之後不再扣款，會員權益保留到已付期間結束。終止失敗會記錄並每日自動重試。🔴 必須先讓使用者確認，再帶 confirm: true。需要 members:write。",
+      inputSchema: { site, subscriptionId: z.string(), confirm },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    wrap(async (a) => subscriptions.cancelSubscription(ctx, a)),
   );
 }
 

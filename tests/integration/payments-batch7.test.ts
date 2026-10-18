@@ -80,4 +80,32 @@ describe.skipIf(!enabled)("第七批金流（整合）", () => {
     expect(del.error?.code).toBe("42501");
     expect((await store.listRefundsForOrder(t.id, orderId)).length).toBe(2);
   });
+
+  it("訂閱：每期扣款併發 6 次只入帳 1 筆；失敗→past_due、成功→active（SQL 同交易）；扣款紀錄只增不改（42501）；enrollment 接受 subscription 來源", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const m = (await store.insertMember({ tenant_id: t.id, email: `sub-${ts}@example.com`, password_hash: "x", name: "訂閱", phone: null }))!;
+    const plan = await store.insertSubscriptionPlan({ tenant_id: t.id, name: "月費", amount: 299, interval: "month", trial_days: 0, total_periods: 12, entitlement: { kind: "none" }, provider: "newebpay", status: "active", description: "" });
+    const sub = await store.insertSubscription({ tenant_id: t.id, plan_id: plan.id, member_id: m.id, provider: "newebpay", sandbox: true, merchant_order_no: `SBIT${ts}`.toUpperCase(), amount: 299, interval: "month", total_periods: 12 });
+    // 同會員同方案第二筆進行中 → conflict
+    await expect(store.insertSubscription({ tenant_id: t.id, plan_id: plan.id, member_id: m.id, provider: "newebpay", sandbox: true, merchant_order_no: `SBIT2${ts}`.toUpperCase(), amount: 299, interval: "month", total_periods: 12 })).rejects.toMatchObject({ code: "conflict" });
+    const end = new Date(Date.now() + 32 * 86400_000).toISOString();
+    const grace = new Date(Date.now() + 7 * 86400_000).toISOString();
+    const r = await Promise.all(Array.from({ length: 6 }, () => store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 1, amount: 299, status: "paid", tradeNo: "T1", raw: {}, periodEnd: end, graceUntil: grace })));
+    expect(r.filter((x) => x.inserted)).toHaveLength(1);
+    expect((await store.getSubscription(t.id, sub.id))!.status).toBe("active");
+    expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 2, amount: 299, status: "failed", tradeNo: null, raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("past_due");
+    expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 3, amount: 299, status: "paid", tradeNo: "T3", raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("active");
+    // 條件式轉換：expired 之後不能回 active
+    expect(await store.transitionSubscription(t.id, sub.id, ["active"], "expired", { ended_at: new Date().toISOString() })).toMatchObject({ status: "expired" });
+    expect(await store.transitionSubscription(t.id, sub.id, ["past_due"], "active")).toBeNull();
+    expect((await store.recordSubscriptionCharge(t.id, { subscriptionId: sub.id, periodIndex: 4, amount: 299, status: "paid", tradeNo: "T4", raw: {}, periodEnd: end, graceUntil: grace })).status).toBe("expired");
+    const up = await db.from("builder_subscription_charges").update({ amount: 1 }).eq("tenant_id", t.id);
+    expect(up.error?.code).toBe("42501");
+    const del = await db.from("builder_subscription_charges").delete().eq("tenant_id", t.id);
+    expect(del.error?.code).toBe("42501");
+    expect((await store.listSubscriptionCharges(t.id, sub.id)).length).toBe(4);
+    const chk = await db.rpc("builder_grant_enrollment", { p_tenant: t.id, p_course: "00000000-0000-0000-0000-000000000000", p_member: m.id, p_source: "subscription", p_order: null, p_by: "itest" });
+    // 課程不存在 → FK 錯（23503），不是 check 錯（23514）：代表 source 'subscription' 已被接受
+    expect(chk.error?.code).toBe("23503");
+  });
 });
