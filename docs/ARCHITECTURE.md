@@ -73,7 +73,7 @@
 - **訂單成立信**：線下匯款下單即寄；線上付款要等金流建單成功才寄（建單失敗的訂單會被取消）。
 - **訂單頁存取**：`/s/<slug>/orders/<編號>?k=<存取金鑰>`（DB 只存 sha256），或下單會員本人登入後直接看。頁面 `noindex`、`no-referrer`。
 
-## 金流（PChomePay，每個租戶自己的商家帳號）
+## 金流（PChomePay，每個租戶自己的商家帳號；其他家見「金流 provider（第七批）」）
 
 - **憑證**：`builder_payment_accounts`，secret 以 AES-256-GCM 加密（`lib/secretbox.ts`，金鑰 env `PAYMENT_ENC_KEY` 32 bytes；密文格式 `v1.<kid>.<iv>.<tag>.<ct>`，AAD 綁 tenant_id，複製到別的租戶解不開）。**只能從平台後台「金流設定」表單輸入**（服務層檢查 `actor.kind === "admin"`）；MCP 沒有任何設定或讀出 secret／app_id 的工具，`get_payment_setup_status` 只回狀態與遮罩後的 app_id。按「驗證」用該組憑證打 `/v1/token`（sandbox 憑證打 sandbox 端點）。
 - **token 快取**以租戶為鍵（並比對 app_id／環境），過期前 60 秒重換，API 回 401 清快取重換一次。
@@ -89,6 +89,38 @@
 - **線下匯款**：訂單 pending_payment，店主在後台或 MCP `mark_order_paid`（`orders:write`＋confirm）；PChomePay 訂單不能手動標記。
 - **🔴 sandbox 憑證（H1）**：sandbox 憑證只在「帶有效預覽簽章」的結帳可用（結帳頁在 `?preview=` 模式會把簽章帶進表單，`handleCheckout` 驗簽後才允許）；已發布網站的一般訪客看不到線上付款。sandbox 付款成功的訂單標記 `builder_orders.payment_sandbox`，店主信寫「請勿出貨」，`fulfill_order` 一律拒絕；後台訂單列表顯示 sandbox 標記；「測試環境」勾選框預設不勾。
 - 🔴 規則：正式金鑰不准拿來測試；`scripts/e2e-pchomepay-sandbox.mjs` 只允許 localhost＋sandbox，且不跟隨付款頁。notify 用單元／整合測試模擬（mock 回查結果）。
+
+## 金流 provider（第七批：藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi）
+
+- **介面** `lib/pay/types.ts` `PaymentProvider`：`createPayment`（回導轉網址或自動送出的表單）、`verifyCallback`（驗簽、只取查詢鍵）、`queryPayment`（**權威回查**，回 paid／failed／pending／unknown＋毛額）、`verifyCredentials`（無副作用）、可選 `refund`。各家實作在 `lib/pay/<provider>.ts`，從 DB 憑證建立在 `lib/pay/registry.ts`（葉節點，不 import services；PChomePay 也包成同一介面，`handlePchomepayNotify` 與既有測試行為不變）。
+- **憑證**：`builder_payment_accounts`（每租戶每家一列；`app_id`＝商店代號，其餘金鑰 JSON 以 secretbox 加密、AAD 綁租戶）。只能從後台「金流設定」輸入（`saveProviderAccount`，admin actor）；MCP 只有 `get_payment_setup_status`（狀態＋遮罩代號）。按「驗證」用該組憑證做無副作用檢查：綠界／藍新／PAYUNi 查一筆不存在的訂單（回應簽章驗得過＝金鑰正確；藍新回 TRA10021、PAYUNi 回 QUERY03001、綠界 stage 實測回 TradeStatus 10200047）、LINE Pay 查不存在的 orderId（1150）、黑貓只換 token（不建單）。
+- **結帳**：`paymentAvailability().online` 列出已驗證、店家沒停用（shop 設定 `disabledProviders`）的金流；sandbox／測試環境憑證只在帶預覽簽章的結帳出現（H1 規則沿用），sandbox 付款的訂單標 `payment_sandbox`、不能出貨、不開通、不入帳。線上付款一律信用卡（ATM 只有 PChomePay），保留 `onlinePaymentHoldMinutes`，最低 NT$30。
+- **callback 網址**：`/api/pay/<provider>/notify/<tenantId>?p=<付款 id>&t=<HMAC>`（`lib/pay/notify-token.ts`，HMAC(PREVIEW_SECRET)）。token 只是額外一道門（黑貓的 checksum 不含祕密），判定一律是驗簽＋權威回查。瀏覽器導回：藍新／PAYUNi 的 POST 導回經 `/api/pay/<provider>/return/…` 只 303 到訂單頁；綠界 `ClientBackURL`、黑貓 `success_url` 直接是訂單頁；**導回不改任何狀態**。
+- **共同不變式**（`handleProviderNotify`／`expireIfDue`／`settlePaid`）：① 先驗簽（常數時間）→ 付款紀錄的 tenant、provider、id 必須等於網址 → 一律用該租戶憑證權威回查，且回查環境必須等於建單環境（L1）。② 權威毛額＝付款紀錄＝訂單總額才標記（黑貓見下）。③ 條件式轉換 `pending_payment → paid`，只有真正轉換那次跑副作用；重複／遲到通知回 already；已取消後才付款 → `paid_after_cancel`＋警示店主（一次）；先前回查為失敗的付款，只有權威回查為已付才重新打開。④ 無法辨識 → 不標記、要求重送、警示店主；回查失敗 → 要求重送、連續 3 次警示。⑤ 逾期取消前先回查（每一家都一樣；回查失敗或無法辨識就不取消）。
+
+| provider | 簽章／加密 | 權威回查 | callback 回應（官方） | 退款 |
+|---|---|---|---|---|
+| 綠界 ECPay | CheckMacValue＝SHA256（A→Z、HashKey／HashIV 包頭尾、.NET URL encode、小寫、大寫輸出）；`MerchantID` 也要相符 | `Cashier/QueryTradeInfo/V5`，**回應的 CheckMacValue 也驗**；TradeStatus 1 已付／0 未付／10200095 失敗／10200047 查無（stage 實測）；SimulatePaid 一律不算 | 純文字 `1|OK`（https://developers.ecpay.com.tw/2878/）；要求重送回 `0|…` | 不串（CreditDetail/DoAction 只有正式環境、無法在 stage 測）→ 提示到綠界後台 |
+| 藍新 NewebPay | TradeInfo＝hex(AES-256-CBC/PKCS7)、TradeSha＝SHA256("HashKey=…&TradeInfo&HashIV=…")；解密後 MerchantID 相符 | `API/QueryTradeInfo`（Version 1.3，CheckValue 請求、**CheckCode 驗回應**）；TradeStatus 1 已付／0 未付／2、3 失敗／6 退款→unknown；TRA10021 查無 | 只認 HTTP 200（未收到會重送）；我們回 200 `SUCCESS`、要求重送回 500（NDNF-1.2.6 FAQ） | 先查 CloseStatus：0／1 → `CreditCard/Cancel`；3 → `CreditCard/Close` CloseType=2；2 → 稍後再試 |
+| LINE Pay | HMAC-SHA256(channelSecret, secret＋uri＋body｜query＋nonce)；transactionId 19 位數一律字串 | 沒有 server 通知。導回 confirmUrl（無簽章）→ 驗 token、orderId、transactionId 必須等於付款紀錄 → **以 DB 金額 server confirm**（`claimPaymentConfirm` 條件式宣告：同一筆只 confirm 一次）；非 0000 或逾時 → Check API（0123 已完成、0110 已授權未 confirm、0121／0122 失敗、0000 未授權）＋Payment Details 取實付；訂單已取消就不 confirm（授權自動失效） | confirmUrl 303 到訂單頁 | `/refund`（0000 成功；1165 等→失敗可重申請） |
+| 黑貓 PAY | APN checksum＝MD5(api_id:trans_id:amount:status:nonce)——🔴 **不含祕密、可偽造**，只當雜訊過濾；`api_id` 相符；網址 token 是必要的第二道門 | `CocsOrderQuery` 的 `process_code`：15／20／21／22 已付、13／14 未完成、5／6／16／17／27 失敗、23 與未知→unknown。🔴 **實收金額只用 APN 的 `payment_detail.pay_amount`**；回查的 `order_amount` 只是念回送出的金額（必須等於付款紀錄）、`grant_amount` 是扣手續費淨額，**絕不比對** | 純文字 `OK`（否則每 15 分鐘重送、同狀態最多 3 次） | 有設退刷密碼才提供：先查 process_code，15 → `CocsOrderCancel`、22 → `CocsOrderRefund`、20／21 → 請款中稍後再試（`cust_password` 欄位名依規格範例推得，未經真實退款驗證） |
+| PAYUNi | EncryptInfo＝hex(base64(AES-256-GCM)＋":::"＋base64(tag))、HashInfo＝SHA256(Key＋EncryptInfo＋IV) 大寫；先驗 Hash 再解密；MerID 相符 | `api/trade/query`（Version 2.0）：**回應也驗 HashInfo＋解密**；TradeStatus 1＋DataSource A 才算已付、B＝處理中不可判失敗；QUERY03001 查無 | 文件未規定（103 頁查無）；回 200 `OK`、要求重送回 500 | 已請款（CloseStatus 2）→ `trade/close` CloseType=2；未請款（9）→ `trade/cancel`；其他稍後再試 |
+
+- **沒有查單 API 的 provider**：五家都有權威查單 API，沒有「只能靠簽章」的情況。唯一例外是黑貓 PAY 的**實收金額**：回查不回實收金額，只能用 APN 的 `pay_amount`（已列已知風險）。
+- **退款** `refund_order`（後台訂單頁「退款」、MCP；orders:write＋confirm）：全額（＝該筆線上付款金額，不超過已付）；`builder_refunds` partial unique index 保證每筆付款只能有一筆 requested／succeeded／unknown（真 DB 併發 5 次只成立 1 筆）；**先退錢、成功才改狀態**：provider 成功 → succeeded → 已付款訂單 `cancelOrderWithHooks`（回補庫存、撤銷課程…）；確定失敗 → failed（可重申請）；逾時／看不懂 → unknown（不自動重送，請到金流後台確認）。退款紀錄不可刪（service_role 沒有 delete／truncate）。部分退款本版不做。
+- 官方來源：藍新 NDNF-1.2.6／NDNP-1.0.8（https://www.newebpay.com/website/Page/content/download_api）、綠界 https://developers.ecpay.com.tw/2856/（測試特店）／2878／2890／2902、LINE Pay https://developers-pay.line.me/online-api-v3 、PAYUNi https://docs.payuni.com.tw/web/#/7/24 、黑貓 PAY「多元支付平台-WEBAPI介面規格 V1.28.2」（簽約後取得，無公開網址）。各家簽章演算法的官方範例向量測試在 `tests/pay-vectors.test.ts`（LINE Pay 官方沒有範例向量，用 Tinna 正式站收錄、openssl 驗算的向量交叉驗證）。
+- **綠界官方測試特店實測**（2026-10-19，`scripts/e2e-ecpay-payment-stage.mts`）：3002607 驗證通過（錯 HashKey 被拒）、AioCheckOut 表單實際 POST 到 stage 回付款頁（不跟隨、不付款）、stage QueryTradeInfo 回應 CheckMacValue 驗得過且判讀為未付、以測試金鑰正確簽章的「付款成功」通知被權威回查擋下（訂單不變）、竄改簽章回 `0|CheckMacValueError`、逾期前回查未付才取消。
+
+## 訂閱制（subscriptions 模組，第七批）
+
+- **provider**：藍新信用卡定期定額（NDNP 手冊；需要已驗證的藍新憑證，並向藍新開通定期定額；終止委託 API〔NPA-B051〕藍新為申請制，未開通時回 PER10074 → 取消會記錄失敗並提示店主到藍新後台手動終止）。
+- **方案** `builder_subscription_plans`：金額（≥30）、month／year、試用 0–28 天（PeriodStartType 1＝10 元驗證、試用期後第一次扣款；0 天＝StartType 2 立即扣第一期）、期數 ≤ 99、權益 `{kind:none}` 或 `{kind:course,courseId}`。上架、改已上架要 publish＋confirm；金額與週期不能改（建新方案）。
+- **狀態機**（`SUBSCRIPTION_TRANSITIONS`，所有轉換條件式）：`pending → active | cancelled`、`active → past_due | cancelled | expired`、`past_due → active | cancelled | expired`；cancelled、expired 是終點。同一會員同一方案只能有一筆 pending／active／past_due（partial unique index）。
+- **通知** `/api/subscriptions/newebpay/notify/<tenantId>?s=<訂閱 id>&t=<HMAC>`（建立結果與每期授權都打這裡；ReturnURL 只導回會員中心）：定期定額沒有 TradeSha → 用該租戶 HashKey／IV **嚴格 PKCS7 解密成功**才算藍新送的；MerchantID、委託單號（MerOrderNo）、PeriodNo、金額都要相符。**權威回查**：委託單查詢（NPA-B053：委託狀態 1 扣款中／4 已到期、已授權期數 AlreadyTimes ≥ 本期、每期金額）＋交易查詢（QueryTradeInfo `MerOrderNo_期數`，查得到就必須 TradeStatus 1 且金額相符）。
+- **每期入帳** `builder_record_subscription_charge`（單一交易）：插入 `builder_subscription_charges`（unique(訂閱, 期數, 結果)，只增不改：service_role 只有 select／insert）→ 只有真正插入那次才轉狀態：成功 → active（延長 `current_period_end`＝扣款＋一期＋2 天緩衝、清寬限）、失敗 → past_due（寬限從第一次失敗起算，設定 `graceDays` 預設 7）。真 DB：併發 6 次同一期只入帳 1 筆。已取消／停權後才收到成功扣款 → 不恢復、警示店主退款。
+- **每日 cron**（`sweepSubscriptions`，在 `/api/cron/expire-orders`）：寬限到期 → expired＋收回權益＋通知；active 期間到了沒收到扣款 → past_due（等藍新補送）；最後一期結束 → expired；取消後權益到期 → 收回；終止委託失敗 → 重試（最多 10 次，第 3 次起警示店主）；放棄的 pending（>1 小時）→ cancelled。
+- **權益**（冪等）：`entitlement_state` none／revoked → granted 條件更新只成功一次；course 用 `builder_grant_enrollment`（source `subscription`）；會員原本就有存取權時不記 ref，停權時不會收回他原本的權限。`hasActiveSubscription()` 給其他模組用。
+- **取消**（會員中心、後台、MCP `cancel_subscription` confirm）：先終止藍新委託，**成功才轉 cancelled**（PER10065／10072／10075＝已終止或已到期視同成功），權益保留到已付期間結束；失敗 → `cancel_state=failed`＋錯誤＋次數，狀態不變、cron 重試。
 
 ## 發票（invoice 模組）
 
@@ -258,7 +290,7 @@
 | 所有租戶同源 | `/s/<slug>` 共用一個 origin：cookie 的 path／名稱隔離只防瀏覽器自動帶 cookie，防不了同源 JS。目前租戶無法放自訂程式碼（只允許 G- 格式 GA、Markdown 已消毒）。 | 開放任何自訂 HTML/script/GTM 之前，必須先改子網域或自有網域隔離。 |
 | 登入限流 | 已改為 email＋IP 組合（10 次／15 分）為主、每 IP 30 次；email 單獨超過 100 次／15 分只延遲 1.5 秒不鎖死。分散式大量 IP 仍可慢速猜測。 | 加 CAPTCHA 或裝置指紋。 |
 | 會員信件依賴 Resend | 正式站已設 `RESEND_API_KEY`／`RESEND_FROM`（2026-10-19，寄件者 `noreply@gathertaiwan.com`）。所有租戶共用同一個寄件網域；沒設時驗證／重設連結只寫 server log。 | 長期改成每個租戶自己的寄件網域。 |
-| 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存，會提示需到 PChomePay 後台人工退款。 | 金流退款 API 串接＋退款狀態欄位。 |
+| 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存。第七批起藍新、LINE Pay、PAYUNi、黑貓（有退刷密碼）可用 `refund_order` 全額退款；PChomePay、綠界仍需到商家後台人工退款。 | 部分退款、綠界 DoAction（需正式環境驗證）。 |
 | 逾期取消只靠 lazy＋每日 cron | Hobby cron 只能每日，期間未被讀到的逾期訂單最多佔庫存約一天。 | 升級方案改成每小時，或 Supabase pg_cron。 |
 | 會員密碼重設只寄信 | 沒有「登入中改密碼」頁、沒有 2FA。 | 會員中心加改密碼（需舊密碼）＋ email 變更流程。 |
 | 發票中繼尚未架設 | gather-builder 還沒有自己的固定 IP 中繼；沒設 `AMEGO_RELAY_URL` 時正式 Amego 帳號會被 IP 白名單擋（code 14，標可重試）。 | 架 Railway／固定 IP 中繼（可參考 alice-store/ops/amego-relay），請 Amego 放行，設兩個 env。 |
@@ -284,6 +316,13 @@
 | 證照生日明文 | 生日是比對鍵，DB 存明文（RLS 全關、只有 service_role 讀得到）。 | 存 HMAC（含租戶 salt）比對，不存原文。 |
 | 評價附圖 | 只接受店家白名單網域的 https 網址，不能直接上傳圖片。 | 上傳到 builder- 公開 bucket＋圖片處理。 |
 | 必讀公告只在網站上提示 | 會員登入網站才看得到，不寄信。 | 發布必讀公告時寄信／推播。 |
+| 黑貓 PAY 實收金額只在 APN | 回查（CocsOrderQuery）不回實收金額，已付判定＝回查 process_code 已付＋回查 order_amount＝付款紀錄＋APN `pay_amount`＝付款紀錄。逾期前回查沒有 APN 時不會取消、改警示店主人工確認。APN checksum 不含祕密：防線是網址 token＋權威回查。 | 向黑貓確認回查是否有實收金額欄位。 |
+| 黑貓退款欄位名未驗證 | `cust_password` 是依規格 P70 範例推得，從未真的退過款。 | 第一次真實退款時看回應確認。 |
+| 定期定額每期的交易查詢 | 藍新手冊沒寫每期授權能否用 QueryTradeInfo（`MerOrderNo_期數`）查到：查得到就以它為準；查無時只依「解密成功＋委託單查詢 AlreadyTimes／金額」入帳。 | 向藍新確認每期授權的查詢方式。 |
+| 藍新終止委託是申請制 | NPA-B051 需藍新審核開通（PER10074）、可能限 IP（PER10073）；未開通時會員取消會一直失敗並警示店主手動終止。 | 店家申請開通；或固定 IP 中繼。 |
+| LINE Pay v3 | 官方建議新串接改 v4（電子支付機構法調整）；v3 沒有 server 通知，靠導回 confirm＋逾期前回查補 confirm。 | 評估改 v4。 |
+| PAYUNi notify 回應格式 | 官方文件未規定回應與重送；我們回 200 OK。 | 向 PAYUNi 確認。 |
+| 各家 callback 網址換 PREVIEW_SECRET | notify token 是 HMAC(PREVIEW_SECRET)：換密鑰會讓還沒完成的付款通知被拒（逾期前回查仍會認回已付款）。 | token 改存 DB 或用獨立密鑰。 |
 | CI 不跑 next build | GitHub Actions 只跑 typecheck＋test；2026-10-19 曾因循環 import 的 TDZ 讓租戶首頁 500 約 10–25 分鐘（Vercel 部署成功但執行期失敗），已修（`lib/services/class-common.ts`）。 | CI 加 `next build`（需要建置期 env 的假值）或部署後健康檢查（租戶首頁 200）。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 

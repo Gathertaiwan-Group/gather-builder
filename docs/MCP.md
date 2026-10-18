@@ -77,7 +77,7 @@ claude mcp list          # 確認狀態 ✓ Connected
 6. 「我想看看」→ `preview_changes`（給預覽網址，約 1 小時有效）
 7. 「OK 發布」→ `publish_site { confirm: true, expectedDraftVersion: <preview_changes 回的 draftVersion> }`
 8. 「改壞了，回到上一版」→ `list_revisions` → `rollback { number, confirm: true }`
-9. 「我要開始賣東西」→ `enable_module shop`（members 自動帶入）→ `configure_module shop { offlineTransfer, shippingFee, ownerEmail }` → `create_product`（上架要 confirm）→ `add_section product_grid` → 預覽、發布。線上刷卡要請平台擁有者到後台「金流設定」輸入 PChomePay 金鑰並驗證（`get_payment_setup_status` 可查進度）。
+9. 「我要開始賣東西」→ `enable_module shop`（members 自動帶入）→ `configure_module shop { offlineTransfer, shippingFee, ownerEmail }` → `create_product`（上架要 confirm）→ `add_section product_grid` → 預覽、發布。線上付款要請平台擁有者到後台「金流設定」輸入任一家（PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi）的金鑰並驗證，可同時設多家，結帳只顯示已驗證的（`get_payment_setup_status` 可查進度）。
 10. 「我要開發票」→ `enable_module invoice` → 請平台擁有者在後台「電子發票」輸入 Amego 憑證並驗證（`get_invoice_setup_status` 查進度）→ 付款後 `issue_invoice { orderNo, confirm: true }`（或 `configure_module invoice { issueMode: "auto_on_paid" }` 改成自動）。
 11. 「我要超商取貨」→ `enable_module shipping { methods:[{id:"seven",type:"cvs",provider:"ecpay",subType:"UNIMARTC2C",label:"7-11 取貨",fee:60}], sender:{...} }` → 平台擁有者在後台「物流」輸入綠界憑證 → 發布 → 付款後 `create_shipment { orderNo, confirm: true }`。
 12. 「來辦個活動」→ `enable_module coupons` → `create_coupon { code:"FALL15", kind:"percent", value:15, maxDiscount:200 }`；電子報 `create_broadcast` → `send_test_broadcast` → 使用者確認 → `send_broadcast { confirm: true }`。
@@ -120,8 +120,9 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_orders` / `get_order` | orders:read | 訂單（逾期未付會在讀取時自動取消並回補庫存） |
 | `mark_order_paid` | orders:write | 線下匯款訂單標記已收款（**必須** `confirm: true`；PChomePay 訂單由 notify 回查自動更新，不能手動標） |
 | `fulfill_order` | orders:write | 已付款 → 已出貨（可帶物流單號，`confirm: true`） |
-| `cancel_order` | orders:write | 取消並回補庫存（`confirm: true`）；已付款訂單**不會自動退款**，回傳 note 會提示人工退款 |
-| `get_payment_setup_status` | orders:read | 金流設定狀態（是否已驗證、sandbox／正式、遮罩後的 APP ID）。🔴 **沒有**設定或讀出金鑰的工具：金鑰只能由平台擁有者在後台輸入 |
+| `cancel_order` | orders:write | 取消並回補庫存（`confirm: true`）；已付款訂單**不會自動退款**，回傳 note 會提示用 `refund_order` 或人工退款 |
+| `refund_order` | orders:write | 全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需退刷密碼〕；PChomePay、綠界不支援→提示人工）。金額＝已付金額、每筆付款只能退一次、結果不明不自動重送；成功後已付款訂單自動取消。**必須** `confirm: true` |
+| `get_payment_setup_status` | orders:read | 金流設定狀態：PChomePay 與藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi 各家是否已驗證、測試／正式、遮罩後的商店代號、是否支援後台退款。🔴 **沒有**設定或讀出金鑰的工具：金鑰只能由平台擁有者在後台輸入 |
 | `get_invoice_setup_status` | orders:read | 發票設定狀態（模組、開立時機、憑證是否驗證、是否已設固定 IP 中繼）。🔴 **沒有**設定或讀出 Amego 金鑰的工具 |
 | `list_invoices` / `get_invoice` | orders:read | 發票列表／某訂單發票（狀態、發票號、canVoid） |
 | `issue_invoice` | invoices:write | 為已付款訂單開立發票（**必須** `confirm: true`；同一訂單只會有一張） |
@@ -185,6 +186,11 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `create_announcement` / `update_announcement` | content:write | 公告（置頂、上下架時間、僅會員、必讀確認）；發布或改已發布需 publish ＋ confirm |
 | `list_announcements` | site:read | 公告、是否上線、必讀確認人數 |
 | `list_announcement_acks` | members:read | 必讀確認名單（遮罩） |
+| `create_subscription_plan` | commerce:write | 訂閱方案（金額、month／year、試用 0–28 天、期數 ≤99、權益 none／course）；上架需 publish＋`confirm: true` |
+| `update_subscription_plan` | commerce:write | 改名稱／說明／上下架（金額與週期不可改）；改已上架需 publish＋`confirm: true` |
+| `list_subscription_plans` | site:read | 列出方案 |
+| `list_subscriptions` | members:read | 訂閱列表（狀態、期間、寬限、取消進度、權益；email 遮罩） |
+| `cancel_subscription` | members:write | 終止藍新委託後取消（權益保留到期間結束；終止失敗每日重試）。**必須** `confirm: true` |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

@@ -46,7 +46,7 @@ modules/<id>/
 | id | 依賴 | 固定頁面 | 資料表 | MCP 工具 |
 |---|---|---|---|---|
 | `members` | core | `/account`、`/account/login`、`register`、`forgot`、`reset?token=`、`verify?token=` | `builder_members`、`builder_member_sessions`、`builder_member_tokens` | `list_members`、`get_member`、`disable_member` |
-| `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`get_payment_setup_status` |
+| `shop` | core、members | `/shop`、`/shop/<slug>`、`/checkout`、`/orders/<訂單編號>` | `builder_products`、`builder_product_variants`、`builder_orders`、`builder_order_items`、`builder_order_counters`、`builder_payment_accounts`、`builder_payments`、`builder_refunds` | `create_product`、`update_product`、`list_products`、`list_orders`、`get_order`、`mark_order_paid`、`fulfill_order`、`cancel_order`、`refund_order`、`get_payment_setup_status` |
 
 `shop` 的| `i18n` | core | `/s/<slug>/<lang>/…`（所有頁面）；語言切換；後台「多語」 | `builder_translations`；頁面翻譯在 `content.translations` | `translate_content`、`set_translation`、`list_translations`、`publish_translations` |
 | `search` | core | `/search?q=`；區塊 `search_box` | （函式 `builder_search_content`） | — |
@@ -54,13 +54,14 @@ modules/<id>/
 | `downloads` | core | `/downloads`、`/downloads/<id>`（權限檢查後 302 到 60 秒簽名網址）；區塊 `downloads_list`；後台「文件」 | `builder_documents`；Storage 私有 bucket `builder-downloads` | `create_document_upload`、`complete_document_upload`、`update_document`、`list_documents` |
 | `certificates` | core | `/verify`、`/api/s/<slug>/verify`（JSON）；區塊 `certificate_lookup`；後台「證照」（CSV 匯入） | `builder_certificates`、`builder_cert_lookups`（只增不改） | `import_certificates`、`list_certificates`、`set_certificate_status`、`list_certificate_lookups` |
 | `reviews` | shop、members | 商品頁評價（平均分、列表、評價表單）、`/s/<slug>/api/reviews`；區塊 `product_reviews`；後台「評價」 | `builder_reviews`（unique 訂單×商品） | `list_reviews`、`moderate_review`、`reply_review` |
+| `subscriptions` | members、shop | 區塊 `subscription_plans`、`/s/<slug>/api/subscriptions/subscribe`、`/s/<slug>/api/subscriptions/cancel`、`/api/subscriptions/newebpay/notify/<tenantId>`（＋return）；會員中心「我的訂閱」；後台「訂閱」 | `builder_subscription_plans`、`builder_subscriptions`、`builder_subscription_charges`（只增不改） | `create_subscription_plan`、`update_subscription_plan`、`list_subscription_plans`、`list_subscriptions`、`cancel_subscription` |
 | `announcements` | core | `/announcements`、`/s/<slug>/api/announcements/ack`；外框必讀橫幅；區塊 `announcements_bar`、`announcements_list`；後台「公告」（確認名單） | `builder_announcements`、`builder_announcement_acks`（只增不改） | `create_announcement`、`update_announcement`、`list_announcements`、`list_announcement_acks` |
 | `stored-value` | members、shop | `/wallet`（方案與購買）、`/s/<slug>/api/wallet/topup`；結帳「儲值金」；會員中心「我的儲值金」；區塊 `topup_plans`；後台「會員經營」 | `builder_wallet_ledger`（只增不改）、`builder_topup_plans` | `get_member_balance`、`adjust_balance`、`create_topup_plan`、`update_topup_plan`、`list_topup_plans` |
 | `loyalty` | members、shop | 結帳「點數折抵」；會員中心「我的點數」；區塊 `loyalty_tiers` | `builder_points_ledger`（只增不改）、`builder_member_tiers`；訂單欄位 `tier_discount`／`points_redeemed`／`points_discount`／`wallet_paid` | `get_member_points`、`adjust_points`、`list_tiers`、`update_tiers` |
 
 設定（`configure_module`，進草稿、發布後生效）：`shippingFee`、`freeShippingThreshold`、`ownerEmail`、`orderPrefix`、`orderExpireHours`（預設 72）、`allowGuestCheckout`、`offlineTransfer {enabled, instructions}`、`pchomepay`、`onlinePaymentHoldMinutes`（線上刷卡保留，預設 60）、`pchomepayAtm`（另提供 ATM）、`maxQtyPerItem`（預設 10）。
 **金流金鑰不在模組設定裡**：只能由平台擁有者在後台「金流設定」分頁輸入（見 ARCHITECTURE「金流」）。
-`shop` 的狀態除了 settingsSchema 之外還看金流：沒有已驗證的 PChomePay 憑證 → `pending_setup`（`lib/shop/status.ts`），區塊照常顯示，結帳只提供已開放的線下匯款；兩種付款都沒開則結帳頁顯示「尚未開放結帳」。
+`shop` 的狀態除了 settingsSchema 之外還看金流：沒有任何一家已驗證的金流憑證（PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi）→ `pending_setup`；`subscriptions` 要已驗證的藍新憑證才 `enabled`（`lib/shop/status.ts`），區塊照常顯示，結帳只提供已開放的線下匯款；兩種付款都沒開則結帳頁顯示「尚未開放結帳」。
 
 `invoice`／`shipping`／`coupons`／`referral`／`newsletter`／`ai-chat` 的細節見下表與 ARCHITECTURE「發票」「物流」「行銷」。
 

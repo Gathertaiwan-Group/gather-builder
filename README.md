@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、PChomePay）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋內容與在地（i18n 多語＋AI 翻譯、search、directory、downloads、certificates、reviews、announcements）＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、多家金流：PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi，含退款）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋內容與在地（i18n 多語＋AI 翻譯、search、directory、downloads、certificates、reviews、announcements）＋訂閱制（subscriptions：藍新信用卡定期定額）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。
@@ -78,3 +78,9 @@ D=$(mktemp -d) && git archive HEAD | tar -x -C "$D" && mkdir -p "$D/.vercel" && 
 ```
 
 有 DB 變更時：先 `npm run migrate`，再部署。若變更會讓線上舊版程式壞掉（例如改函式簽章），要先放相容層（參考 migrations 0004/0005）。
+
+## 第七批：多家金流與訂閱
+
+- 金流 provider 介面與各家安全規則：`docs/ARCHITECTURE.md`「金流 provider（第七批）」。
+- 綠界金流官方測試特店 stage 實測：`npx tsx scripts/e2e-ecpay-payment-stage.mts`（只打 payment-stage、不付款、callback 自行簽章模擬）。
+- 訂閱制：`enable_module subscriptions`（需已驗證的藍新憑證並向藍新開通信用卡定期定額）→ `create_subscription_plan` → 區塊 `subscription_plans`。
