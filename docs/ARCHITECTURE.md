@@ -124,6 +124,17 @@
 - **權益**（冪等）：`entitlement_state` none／revoked → granted 條件更新只成功一次；course 用 `builder_grant_enrollment`（source `subscription`）；會員原本就有存取權時不記 ref，停權時不會收回他原本的權限。`hasActiveSubscription()` 給其他模組用。
 - **取消**（會員中心、後台、MCP `cancel_subscription` confirm）：先終止藍新委託，**成功才轉 cancelled**（PER10065／10072／10075＝已終止或已到期視同成功），權益保留到已付期間結束；失敗 → `cancel_state=failed`＋錯誤＋次數，狀態不變、cron 重試。
 
+## 團購（group-buy 模組，第八批）
+
+- **一律走既有結帳**：`placeGroupBuyOrder()` 依 DB 的團購品項組好「團購價覆寫＋團購資料」交給 `shop.placeOrder()`（`groupBuy` 參數）——庫存、優惠券、點數／儲值金、發票、運費（shipping 模組或固定運費）、付款方式（線下匯款＝銀行轉帳、已驗證的線上金流；ATM 沿用 PChomePay `pchomepayAtm`）、保留時間、下單信、金流 notify 權威回查全部不變。前端只送「團購品項 id＋數量」，團購輸入是 strict（多送價格直接拒絕）。到店自取（團購的自取點）運費 0、`shipping_choice.type=pickup`。超商取貨：團購頁先選門市，`builder_cvs_selections.return_path` 讓綠界電子地圖回到團購頁（只接受 `/groupbuy/<slug>`）。
+- **限量（不超賣、避免熱點鎖）**：`builder_place_group_buy_order` 在**同一交易**：`FOR SHARE` 鎖團購列（下單之間不互鎖，結團的 update 會等它們）→ 依品項 id 排序逐項 `update … set sold = sold + qty where sold + qty <= quota`（只鎖那個品項列，跟商品庫存的扣法一樣）→ 呼叫既有 `builder_place_order`（簽章不變）→ 標記 `builder_orders.group_buy_id／group_buy_leader_id` ＋寫 `builder_group_buy_orders`（扣了哪些品項、匯款末五碼、分潤快照）。DB check `sold <= quota` 是最後一道防線（真 DB：8 搶 3 只成立 3 單）。`builder_cancel_order`／`builder_mark_paid_sandbox`（簽章不變）同交易呼叫 `builder_release_group_buy_quota`（`quota_released_at` 冪等；先釋放限量再釋放庫存，鎖順序與下單一致）。
+- **團主（KOL）**：店主 `invite_leader`（＝核准）；同站同 email 一位團主、8 碼代號；每團一筆指派（分潤 % 或每單固定金額）。團購頁 `?leader=<碼>` → 表單隱藏欄位；server 驗證團主啟用、有指派、**不是自己買自己的團**（正規化 email 比對）才記上。分潤 `builder_group_buy_commissions`（只增不改：service_role 只有 select／insert）：付款成功那一次記 earn（基數＝`merchandiseNet`：小計 − 折扣碼 − 等級折扣 − 點數折抵，不含運費；用下單當下的分潤快照）、取消／退款記 reverse，unique(order, kind)。hook 在葉節點 `lib/services/groupbuy-hooks.ts`（orders.ts side-effect import，避免循環 import）。
+- **團主報表** `/s/<slug>/groupbuy/leader?l=<id>&t=<HMAC(PREVIEW_SECRET, gbleader:id:版本)>`：不存原文；`rotateReportLink` 把版本 +1 讓舊連結失效；停用團主也失效。只列這位團主的訂單：訂單號、團購、時間、**遮罩姓名（王＊明）**、件數、商品淨額、分潤、狀態、出貨狀態——沒有 email／電話／地址。頁面 noindex、no-referrer。
+- **結團**：截止後 lazy（讀團購頁、list／get、下單）＋每日 cron `sweepGroupBuys`。成團判斷＝各品項 `sold` 加總（取消的單已在同一交易釋放）≥ `min_qty`（沒設門檻＝一定成團）→ 條件式 `published → closed|failed`（只成功一次）。之後處理（可中斷接續）：未成團 → 每張未取消的訂單 `cancelOrderWithHooks`（`group_buy_failed`；已付款的標需退款，不自動退款）；每張訂單的成團／未成團通知寫 `builder_group_buy_notices`（unique、只增不改）才寄＝只寄一次；全部完成才 `settled_at`（條件式）並寄店主摘要。提早結團 `close_group_buy`（confirm）。
+- **銀行轉帳對帳**：`import_bank_statement` 解析 CSV（RFC 4180；標題「日期、金額、帳號末五碼、備註」；日期必須真實存在；金額正整數；🔴 任何儲存格以 `= + - @`、Tab、CR（含全形）開頭整份拒絕；≤ 2000 列／300KB）→ `builder_bank_lines`（fingerprint＝日期＋金額＋末五碼＋備註＋同檔第幾筆的 sha256，unique → 同一份重複匯入不重複）→ 配對（純函式 `suggestBankMatches`）：候選＝待付款的線下匯款訂單中金額相同，且（末五碼相同，或備註含訂單編號），且匯款日在下單日（台北）～之後 `bankMatchWindowDays` 天；**只有一筆明細剛好一張候選、那張單也只被這筆選到才建議**，多重候選標 ambiguous 交人工；被拒絕過的組合不再建議。🔴 匯入只寫 `builder_bank_matches(status=suggested)`，不改訂單。`builder_bank_matches` 兩個 partial unique index：一筆明細／一張訂單各只能有一筆 suggested／confirmed（真 DB 測）。`confirm_bank_matches`（confirm）呼叫 `builder_confirm_bank_match`：**同一交易**配對 suggested → confirmed＋訂單 pending_payment → paid（只限線下匯款）＋明細 confirmed；訂單不能收款就 raise 整筆回滾，配對轉 rejected。成功的跑 `onOrderPaid`（付款信、分潤、自動發票…）。
+- **出貨匯出** `export_shipping`：已付款（可含已出貨）的團購單 CSV（收件人、電話、地址、超商門市、自取點、品項、團主）；每格 `csvCell`（防 CSV injection、BOM）；匯出前寫 `builder_pii_access_log`（只增不改）＋稽核。`create_group_buy_shipments`（shipping:write＋confirm）逐單沿用 `create_shipment`（同一訂單只能一張有效物流單＝重跑冪等；綠界只用官方測試特店測）。
+- **承載**：團購下單每 IP 每小時 `orderRateLimitPerHour`（預設 20，`builder_rate_hit`），與一般結帳（6／小時）分開計；下單路徑只鎖「團購列 FOR SHARE＋各品項列＋商品列」，不同品項不互鎖。
+
 ## 發票（invoice 模組）
 
 - **供應商介面** `lib/invoice/provider.ts`：`issue`／`void`／`allowance`／`query`／`verify`，結果三態（成功／可重試／永久錯誤）。第一家 `lib/invoice/amego.ts`（官方文件 https://invoice.amego.tw/api_doc/ ：`/json/f0401` 開立、`/json/f0501` 作廢（陣列）、`/json/g0401` 折讓（陣列、未稅＋稅額、AllowanceType 2）、`/json/invoice_query` 反查；`md5(data+time+appKey)`，data 只序列化一次）。另有 `mock`（只限 `is_test` 租戶，e2e 用）。
@@ -328,6 +339,10 @@
 | PAYUNi notify 回應格式 | 官方文件未規定回應與重送；我們回 200 OK。 | 向 PAYUNi 確認。 |
 | 各家 callback 網址換 PREVIEW_SECRET | 短網址（第二輪審查後）不受影響；只有上線前用舊網址建立的付款，換密鑰會讓通知被拒（逾期前回查仍會認回已付款）。 | — |
 | CI 不跑 next build | GitHub Actions 只跑 typecheck＋test；2026-10-19 曾因循環 import 的 TDZ 讓租戶首頁 500 約 10–25 分鐘（Vercel 部署成功但執行期失敗），已修（`lib/services/class-common.ts`）。 | CI 加 `next build`（需要建置期 env 的假值）或部署後健康檢查（租戶首頁 200）。 |
+| 團購結團一次跑完 | 結團時逐張取消／寄通知，訂單上千張時單次 cron 可能跑不完（可接續：通知只寄一次、settled_at 最後才標）。 | 背景佇列分批。 |
+| 團購沒有後台頁面 | 第一版團購的管理全部透過 MCP（建團、團主、對帳、結團、匯出）；平台後台只有一般訂單頁可看團購單。 | 後台「團購」分頁（含 CSV 上傳）。 |
+| 銀行對帳只比金額＋末五碼／訂單號 | 同金額同末五碼的多張單（同一人買兩次）一律多重候選交人工；客人沒回報末五碼、備註也沒寫訂單號的轉帳不會配對。 | 每單產生獨特金額尾數或虛擬帳號（需銀行合作）。 |
+| ATM 虛擬帳號 | 只有 PChomePay 的 ATM（`pchomepayAtm`）；綠界／藍新的 ATM 第七批 adapter 未串。 | 依 adapter 能力加綠界 ATM。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點

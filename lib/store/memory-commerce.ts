@@ -30,6 +30,8 @@ export interface ReservationBridge {
 }
 
 import type { CreditsBridge } from "./memory-content";
+import type { GroupBuyBridge } from "./memory-groupbuy";
+import { BANK_MATCH_NOT_PAYABLE } from "./supabase-groupbuy";
 
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
@@ -38,7 +40,7 @@ const now = () => new Date().toISOString();
  * members／shop 的記憶體實作。語意與 Supabase 實作（含 builder_place_order／cancel／release 函式）一致：
  * 每個方法的讀＋寫都在同一個同步區段完成（JS 單執行緒），等同 DB 的原子條件更新。
  */
-export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: CreditsBridge): CommerceStore & Pick<Store, "placeClassOrder"> {
+export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: CreditsBridge, gb?: GroupBuyBridge): CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch"> {
   const members = new Map<string, MemberRow>();
   const sessions = new Map<string, MemberSessionRow>();
   const mtokens = new Map<string, MemberTokenRow>();
@@ -80,7 +82,18 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
     return true;
   };
 
-  const store: CommerceStore & Pick<Store, "placeClassOrder"> = {
+  const store: CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch"> = {
+    async confirmBankMatch(tenantId, matchId, by) {
+      // 與 builder_confirm_bank_match 同語意：配對 suggested 且訂單可收款才一起改（同步區段＝單一交易）
+      const m = gb?.peekMatchSync(tenantId, matchId);
+      if (!m) return null;
+      const o = orders.get(m.orderId);
+      if (!o || o.tenant_id !== tenantId || o.status !== "pending_payment" || o.payment_method !== "offline") throw new ServiceError("conflict", BANK_MATCH_NOT_PAYABLE);
+      gb!.commitMatchSync(tenantId, matchId, by);
+      const next = { ...o, status: "paid" as const, paid_at: now(), updated_at: now() };
+      orders.set(o.id, next);
+      return clone(next);
+    },
     async insertCoupon(row) {
       if ([...coupons.values()].some((c) => c.tenant_id === row.tenant_id && c.code === row.code)) throw new ServiceError("conflict", "優惠碼已存在，請換一個");
       const c: CouponRow = { ...clone(row), id: randomUUID(), used_count: 0, created_at: now(), updated_at: now() };
@@ -296,6 +309,11 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
         if (coupon!.per_user_limit !== null && uc >= coupon!.per_user_limit) throw new ServiceError("conflict", COUPON_PER_USER);
       }
       credits?.checkSync(tenantId, order.member_id, order);
+      // 第八批：團購限量（與 builder_place_group_buy_order 同語意：先檢查、全部通過才寫）
+      if (order.group_buy) {
+        if (!gb) throw new Error("memory store: 沒有團購實作");
+        gb.checkSync(tenantId, order.group_buy);
+      }
       for (const s of plan) {
         if (!s.track) continue;
         if (s.kind === "v") {
@@ -346,11 +364,15 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
         points_redeemed: order.points_redeemed ?? 0,
         points_discount: order.points_discount ?? 0,
         wallet_paid: order.wallet_paid ?? 0,
+        group_buy_id: order.group_buy?.group_buy_id ?? null,
+        group_buy_leader_id: order.group_buy?.leader_id ?? null,
+        refunded_at: null,
         created_at: now(),
         updated_at: now(),
       };
       if (order.shipping_choice?.label) row.shipping_method = order.shipping_choice.label;
       orders.set(id, row);
+      if (order.group_buy) gb!.applySync(tenantId, id, order.group_buy);
       credits?.postSync(tenantId, id, order.member_id, order);
       if (cp && coupon) {
         coupons.set(cp.id, { ...coupon, used_count: coupon.used_count + 1, updated_at: now() });
@@ -452,7 +474,15 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
     },
     async listOrders(tenantId, opts) {
       const rows = [...orders.values()]
-        .filter((o) => o.tenant_id === tenantId && (!opts.status || o.status === opts.status) && (!opts.memberId || o.member_id === opts.memberId))
+        .filter(
+          (o) =>
+            o.tenant_id === tenantId &&
+            (!opts.status || o.status === opts.status) &&
+            (!opts.memberId || o.member_id === opts.memberId) &&
+            (!opts.groupBuyId || o.group_buy_id === opts.groupBuyId) &&
+            (!opts.leaderId || o.group_buy_leader_id === opts.leaderId) &&
+            (!opts.groupBuyOnly || !!o.group_buy_id),
+        )
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
       return { rows: clone(rows.slice(opts.offset, opts.offset + opts.limit)), total: rows.length };
     },
@@ -472,8 +502,9 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       const next = { ...o, status: "paid" as const, paid_at: paidAt, payment_sandbox: true, updated_at: now() };
       orders.set(id, next);
       bridge?.releaseSync(tenantId, id, "sandbox_payment");
-      // 審查 L1（同 SQL）：退回優惠券次數、點數折抵、儲值金
+      // 審查 L1（同 SQL）：退回優惠券次數、點數折抵、儲值金；第八批：團購限量
       releaseCouponSync(tenantId, id);
+      gb?.releaseSync(tenantId, id);
       credits?.releaseSync(tenantId, next);
       return clone(next);
     },
@@ -492,6 +523,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       const o = orders.get(id);
       if (!o || o.tenant_id !== tenantId || !from.includes(o.status)) return { transitioned: false, stockReleased: false };
       orders.set(id, { ...o, status: "cancelled", cancelled_at: now(), cancel_reason: reason, updated_at: now() });
+      gb?.releaseSync(tenantId, id);
       const stockReleased = releaseSync(tenantId, id);
       releaseCouponSync(tenantId, id);
       bridge?.releaseSync(tenantId, id, reason);

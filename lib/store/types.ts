@@ -4,10 +4,12 @@ import type { ProviderId } from "../pay/types";
 import type { PayStore } from "./types-pay";
 import type { ClassesStore } from "./types-classes";
 import type { ContentStore } from "./types-content";
+import type { GroupBuyOrderInput, GroupBuyStore } from "./types-groupbuy";
 export type * from "./types-ext";
 export type * from "./types-classes";
 export type * from "./types-content";
 export type * from "./types-pay";
+export type * from "./types-groupbuy";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -277,6 +279,9 @@ export interface OrderRow {
   wallet_paid?: number;
   /** 已出貨訂單退款成功的時間（第七批審查 M1；已付款未出貨的退款會直接取消訂單） */
   refunded_at?: string | null;
+  /** 第八批：團購單（group-buy）標記團購與團主 */
+  group_buy_id?: string | null;
+  group_buy_leader_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -353,6 +358,8 @@ export type PlaceOrderInput = {
   referral_code?: string | null;
   invoice_request?: InvoiceRequest | null;
   shipping_choice?: ShippingChoice | null;
+  /** 第八批：團購單——同一交易原子扣團購限量（builder_place_group_buy_order） */
+  group_buy?: GroupBuyOrderInput | null;
 } & OrderCreditsInput;
 
 /** 下單時的等級折扣／點數折抵／儲值金（builder_apply_order_credits 在下單同一交易原子扣用） */
@@ -407,7 +414,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
+export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore, GroupBuyStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;
@@ -499,7 +506,7 @@ export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
   placeOrder(tenantId: string, order: PlaceOrderInput, items: OrderItemInput[], day: string): Promise<{ id: string; order_no: string }>;
   getOrderById(tenantId: string, id: string): Promise<OrderRow | null>;
   getOrderByNo(tenantId: string, orderNo: string): Promise<OrderRow | null>;
-  listOrders(tenantId: string, opts: { status?: OrderStatus; memberId?: string; limit: number; offset: number }): Promise<{ rows: OrderRow[]; total: number }>;
+  listOrders(tenantId: string, opts: { status?: OrderStatus; memberId?: string; groupBuyId?: string; leaderId?: string; groupBuyOnly?: boolean; limit: number; offset: number }): Promise<{ rows: OrderRow[]; total: number }>;
   listOrderItems(tenantId: string, orderId: string): Promise<OrderItemRow[]>;
   /** 條件式轉換：只有目前狀態 = from 才更新；回傳更新後的列，沒轉換成功回 null */
   transitionOrder(tenantId: string, id: string, from: OrderStatus, to: OrderStatus, patch: Partial<Pick<OrderRow, "paid_at" | "fulfilled_at" | "shipping_tracking" | "shipping_method" | "payment_sandbox">>): Promise<OrderRow | null>;

@@ -26,7 +26,7 @@ export const optText = (max: number) => z.string().trim().max(max).optional();
 export const LANG_PREFIXES = ["en", "ja", "ko", "zh-cn", "th", "vi", "id", "fr", "de", "es"];
 
 /** 模組保留的站內路徑（部落格、商店、結帳、會員、訂單、站內 API） */
-export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api", "/events", "/book", "/courses", "/learn", "/wallet", "/search", "/people", "/downloads", "/verify", "/announcements"];
+export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api", "/events", "/book", "/courses", "/learn", "/wallet", "/search", "/people", "/downloads", "/verify", "/announcements", "/groupbuy", "/q", "/brand-report"];
 
 /** 網站內頁路徑：/、/about、/services/web */
 export const pagePath = z

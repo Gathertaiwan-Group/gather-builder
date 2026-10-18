@@ -8,6 +8,7 @@ import { runBookingCron } from "@/lib/services/booking";
 import { runLoyaltyCron } from "@/lib/services/loyalty";
 import { runWalletCron } from "@/lib/services/wallet";
 import { sweepSubscriptions } from "@/lib/services/subscriptions";
+import { sweepGroupBuys } from "@/lib/services/groupbuy";
 import { getMailer } from "@/lib/mail";
 import { baseUrlFrom } from "@/lib/runtime";
 
@@ -41,8 +42,11 @@ export async function GET(req: Request) {
   const subs = await sweepSubscriptions(deps).catch((e) => (console.error("[cron] subscriptions", e), { expired: -1 }));
   // 第七批審查 L2：卡住的退款（requested 超過 15 分鐘）→ 結果不明＋警示店主
   const refunds = await sweepStaleRefunds(deps).catch((e) => (console.error("[cron] refunds", e), { scanned: -1, marked: 0 }));
+  // 第八批：截止的團購自動結團（未達門檻取消訂單並通知；冪等、可接續）
+  const groupBuys = await sweepGroupBuys(deps).catch((e) => (console.error("[cron] group-buy", e), { scanned: -1, settled: 0 }));
+  console.log(`[cron/expire-orders] groupBuys=${JSON.stringify(groupBuys)}`);
   console.log(`[cron/expire-orders] subscriptions=${JSON.stringify(subs)} refunds=${JSON.stringify(refunds)}`);
   console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)} wallet=${JSON.stringify(wallet)}`);
   console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs, refunds });
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs, refunds, groupBuys });
 }

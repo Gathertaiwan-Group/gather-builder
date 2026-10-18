@@ -12,6 +12,8 @@ import "./booking";
 import "./courses";
 // 第五批：點數（賺點／沖回）
 import "./loyalty";
+// 第八批：團主分潤（葉節點）
+import "./groupbuy-hooks";
 import { isTopupOrder, topupReclaimState, topupReversalPreview, topupReversalText } from "./wallet";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { PROVIDER_IDS, PROVIDER_LABEL, REFUND_CAPABLE as refundableProviders, isOnlineMethod, type AuthoritativeResult, type PaymentProvider, type ProviderId } from "../pay/types";

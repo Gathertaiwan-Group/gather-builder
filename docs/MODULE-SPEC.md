@@ -96,6 +96,10 @@ modules/<id>/
 
 模組間的副作用（付款成功、訂單取消）走 `lib/services/order-hooks.ts` 註冊，各 hook 自己冪等、失敗不影響主流程；發票自動開立直接在 `onOrderPaid` 呼叫。
 
+| `group-buy` | shop | `/groupbuy/<slug>`（`?leader=<碼>` 團主連結）、`/groupbuy/leader?l=&t=`（團主簽章報表）、`/s/<slug>/api/groupbuy/order`、`/api/groupbuy/report-transfer`（訂單頁回報匯款末五碼）；區塊 `group_buy_list`、`group_buy_detail` | `builder_group_buys`、`builder_group_buy_items`（限量 sold ≤ quota）、`builder_group_buy_leaders`、`builder_group_buy_leader_assignments`、`builder_group_buy_orders`、`builder_group_buy_commissions`／`builder_group_buy_notices`（只增不改）、`builder_bank_imports`、`builder_bank_lines`、`builder_bank_matches`；訂單欄位 `group_buy_id`／`group_buy_leader_id` | `create_group_buy`、`update_group_buy`、`duplicate_group_buy`、`list_group_buys`、`get_group_buy`、`invite_leader`、`list_group_buy_orders`、`import_bank_statement`、`confirm_bank_matches`、`close_group_buy`、`export_shipping`、`create_group_buy_shipments` |
+
+- `group-buy` 設定：`orderRateLimitPerHour`（團購下單每 IP 每小時，預設 20）、`bankMatchWindowDays`（匯款日期在下單日後幾天內才配對，預設 7）、`paymentNote`。
+
 ### 尚未做
 
 - **退款**：取消已付款訂單仍不會自動退款（PChomePay 需人工）；發票作廢／折讓已可用。

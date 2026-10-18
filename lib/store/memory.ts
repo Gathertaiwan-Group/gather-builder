@@ -5,6 +5,7 @@ import { createMemoryExtStore } from "./memory-ext";
 import { createMemoryClassesStore } from "./memory-classes";
 import { createMemoryContentStore } from "./memory-content";
 import { createMemoryPayStore } from "./memory-pay";
+import { createMemoryGroupBuyStore } from "./memory-groupbuy";
 import type {
   AuditRow,
   DraftRow,
@@ -37,8 +38,10 @@ export function createMemoryStore(): Store {
 
   const classes = createMemoryClassesStore();
   const content = createMemoryContentStore();
+  const groupBuy = createMemoryGroupBuyStore();
   const store: Store = {
-    ...createMemoryCommerceStore(classes.bridge, content.credits),
+    ...groupBuy.store,
+    ...createMemoryCommerceStore(classes.bridge, content.credits, groupBuy.bridge),
     ...createMemoryExtStore(),
     ...classes.store,
     ...content.store,

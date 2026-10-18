@@ -88,6 +88,8 @@ export interface CvsSelectionRow {
   expires_at: string;
   used_at: string | null;
   order_id: string | null;
+  /** 第八批：選完門市要回到的站內頁（只接受 /groupbuy/<slug>；null＝結帳頁） */
+  return_path?: string | null;
   created_at: string;
 }
 
@@ -243,7 +245,7 @@ export interface ExtStore {
   getShippingAccount(tenantId: string): Promise<ShippingAccountRow | null>;
   upsertShippingAccount(row: Pick<ShippingAccountRow, "tenant_id" | "provider" | "merchant_id" | "secret_enc" | "stage" | "kind">): Promise<ShippingAccountRow>;
   markShippingAccount(tenantId: string, patch: Pick<ShippingAccountRow, "status" | "verified_at" | "last_error">): Promise<void>;
-  insertCvsSelection(row: Pick<CvsSelectionRow, "tenant_id" | "trade_no_hash" | "binding_hash" | "sub_type" | "method_id" | "expires_at">): Promise<CvsSelectionRow>;
+  insertCvsSelection(row: Pick<CvsSelectionRow, "tenant_id" | "trade_no_hash" | "binding_hash" | "sub_type" | "method_id" | "expires_at"> & Partial<Pick<CvsSelectionRow, "return_path">>): Promise<CvsSelectionRow>;
   /** 綠界電子地圖 callback 寫回門市：只寫「未使用、未過期、子類型相符」的那一列；回傳是否寫入 */
   setCvsSelectionStore(tradeNoHash: string, subType: string, store: CvsStore, nowIso: string): Promise<CvsSelectionRow | null>;
   getCvsSelection(tenantId: string, id: string): Promise<CvsSelectionRow | null>;

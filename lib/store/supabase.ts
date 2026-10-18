@@ -6,6 +6,7 @@ import { createSupabaseExtStore } from "./supabase-ext";
 import { createSupabaseClassesStore } from "./supabase-classes";
 import { createSupabaseContentStore } from "./supabase-content";
 import { createSupabasePayStore } from "./supabase-pay";
+import { createSupabaseGroupBuyStore } from "./supabase-groupbuy";
 
 /**
  * Supabase 實作。🔴 一律 service role、只在 server 端使用。
@@ -42,6 +43,7 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
     ...createSupabaseClassesStore(db),
     ...createSupabaseContentStore(db),
     ...createSupabasePayStore(db),
+    ...createSupabaseGroupBuyStore(db),
     async getTenantBySlug(slug) {
       return must(await db.from("builder_tenants").select("*").eq("slug", slug).maybeSingle(), "getTenantBySlug");
     },

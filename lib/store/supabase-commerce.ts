@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
 import { normalizeEmail } from "../email-normalize";
 import { mapCreditError } from "./supabase-content";
+import { mapGroupBuyRpcError } from "./supabase-groupbuy";
 import type { CommerceStore, CouponRedemptionRow, CouponRow, MemberRow, OrderRow, PaymentAccountRow, PaymentRow, ProductRow, VariantRow } from "./types";
 
 
@@ -166,8 +167,14 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
 
     /* ---------------------------------------------------------- orders */
     async placeOrder(tenantId, order, items, day) {
-      const r = await db.rpc("builder_place_order", { p_tenant: tenantId, p_order: order, p_items: items, p_day: day });
+      // 第八批：團購單走 builder_place_group_buy_order（同一交易先原子扣團購限量，再呼叫 builder_place_order）
+      const { group_buy: gb, ...rest } = order;
+      const r = gb
+        ? await db.rpc("builder_place_group_buy_order", { p_tenant: tenantId, p_order: rest, p_items: items, p_day: day, p_gb: gb })
+        : await db.rpc("builder_place_order", { p_tenant: tenantId, p_order: rest, p_items: items, p_day: day });
       if (r.error) {
+        const g = mapGroupBuyRpcError(r.error.message);
+        if (g) throw g;
         const m = /insufficient stock: (.*)$/.exec(r.error.message);
         if (m) throw new ServiceError("conflict", `庫存不足或商品已下架：${m[1]}。整筆訂單未成立，請調整數量後再試。`);
         if (/coupon unavailable/.test(r.error.message)) throw new ServiceError("conflict", COUPON_UNAVAILABLE);
@@ -191,6 +198,9 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       let q = db.from("builder_orders").select("*", { count: "exact" }).eq("tenant_id", tenantId);
       if (opts.status) q = q.eq("status", opts.status);
       if (opts.memberId) q = q.eq("member_id", opts.memberId);
+      if (opts.groupBuyId) q = isUuid(opts.groupBuyId) ? q.eq("group_buy_id", opts.groupBuyId) : q.eq("id", "00000000-0000-0000-0000-000000000000");
+      if (opts.leaderId) q = isUuid(opts.leaderId) ? q.eq("group_buy_leader_id", opts.leaderId) : q.eq("id", "00000000-0000-0000-0000-000000000000");
+      if (opts.groupBuyOnly) q = q.not("group_buy_id", "is", null);
       const r = await q.order("created_at", { ascending: false }).range(opts.offset, opts.offset + opts.limit - 1);
       if (r.error) throw new Error(`listOrders: ${r.error.message}`);
       return { rows: (r.data ?? []) as OrderRow[], total: r.count ?? 0 };

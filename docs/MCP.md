@@ -87,6 +87,7 @@ claude mcp list          # 確認狀態 ✓ Connected
 17. 「我要做會員點數」→ `enable_module loyalty`（members、shop 自動帶入）→ `update_tiers { tiers:[{id:"silver",name:"銀卡",minSpend:3000,multiplier:1.5,discountPercent:5}] }` → `add_section loyalty_tiers` → 發布。客訴補點 → `adjust_points { email, amount: 50, reason, confirm: true }`。
 18. 「我要開放儲值」→ `enable_module stored-value` → `create_topup_plan { name:"儲 1000 送 100", payAmount:1000, bonusAmount:100, bonusExpireDays:180, status:"published", confirm:true }` → `add_section topup_plans` → 發布。會員付款後自動入帳，結帳可用儲值金付款。🔴 提醒店家確認履約保證／信託義務。
 19. 「網站要有英文版」→ `enable_module i18n { languages: ["en"] }` → `translate_content { lang:"en", target:{type:"page", path:"/"} }`（每頁一次；導覽 `{type:"nav"}`；文章 `{type:"post", slug}`）→ 看結果、需要時 `set_translation` 修改 → `preview_changes`（預覽網址加 /en 看英文）→ `publish_site` ＋ `publish_translations { confirm:true }`。英文網址 `/s/<slug>/en/…`。
+20. 「我要開團購」→ `enable_module group-buy`（shop 自動帶入）→ `create_group_buy { slug, title, endsAt, minQty?, pickupPoints:[{id:"huashan",name:"小時光華山店",address}], items:[{productId, price:團購價, quota:限量}], status:"published", confirm:true }` → `invite_leader { groupBuyId, name, email, commissionPercent:10 }`（回傳團主專屬連結與報表連結）→ `add_section group_buy_list` → 發布。客人匯款後：`import_bank_statement { csv }`（只產生建議）→ 跟使用者逐筆核對 → `confirm_bank_matches { matchIds, confirm:true }`。截止會自動結團；提早結團 `close_group_buy { confirm:true }` → `export_shipping`（含個資，會記錄）→ 綠界物流 `create_group_buy_shipments { confirm:true }`。下一團 `duplicate_group_buy`。
 16. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
@@ -192,6 +193,17 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_subscription_plans` | site:read | 列出方案 |
 | `list_subscriptions` | members:read | 訂閱列表（狀態、期間、寬限、取消進度、權益；email 遮罩） |
 | `cancel_subscription` | members:write | 終止藍新委託後取消（權益保留到期間結束；終止失敗每日重試）。**必須** `confirm: true` |
+| `create_group_buy` | commerce:write | 建團購（團購價、每品項限量、成團門檻、開團／截止、自取點、允許的運送方式）；直接上架需 publish＋`confirm: true` |
+| `update_group_buy` | commerce:write | 改團購（items 整份取代：已售品項不能移除、限量不能低於已售）；上架／改開團中／下架需 publish＋`confirm: true`；已結團不能改 |
+| `duplicate_group_buy` | commerce:write | 一鍵複製為新草稿（品項、價格、限量、自取點、團主分潤；已售歸零） |
+| `list_group_buys` / `get_group_buy` | site:read | 團購、已售／剩餘、是否成團、訂單統計、團主與專屬連結（截止的先自動結團） |
+| `invite_leader` | marketing:write | 邀請（核准）團主＋這一團的分潤（`commissionPercent` 0–50 或 `commissionFixed` 每單 NT$）；回傳專屬連結與簽章報表連結；`rotateReportLink`、`disable`、`notify` |
+| `list_group_buy_orders` | orders:read | 團購訂單（狀態、金額、品項、運送、團主、分潤、匯款末五碼；只含姓名） |
+| `import_bank_statement` | orders:write | 匯入銀行明細 CSV（日期、金額、帳號末五碼、備註）→ **只產生建議配對**（金額＋末五碼或備註含訂單編號＋時間窗；多重候選不自動配；`= + - @` 開頭整份拒絕；重複匯入不重複） |
+| `confirm_bank_matches` | orders:write | 確認建議配對 → 訂單已付款（單一交易；一筆明細／一張單只能確認一次）＋付款成功流程；`rejectMatchIds` 拒絕。**必須** `confirm: true` |
+| `close_group_buy` | orders:write | 提早結團：達門檻成團通知；未達門檻取消所有訂單並通知（已付款需退款）。**必須** `confirm: true` |
+| `export_shipping` | orders:read | 出貨／物流匯出 CSV（收件人、電話、地址、超商門市、自取點；防 CSV injection；**每次匯出寫個資查看紀錄**） |
+| `create_group_buy_shipments` | shipping:write | 批次建綠界物流單（已付款、選綠界、尚無物流單的團購單；逐單冪等）。**必須** `confirm: true` |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

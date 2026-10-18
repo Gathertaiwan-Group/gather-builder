@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { shopSettings, type ShopSettings } from "@/modules/shop/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
-import type { InvoiceRequest, MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, Store, TenantRow, VariantRow } from "../store/types";
+import type { GroupBuyOrderInput, InvoiceRequest, MemberRow, OrderItemInput, OrderRow, PaymentMethod, ProductRow, ShippingChoice, Store, TenantRow, VariantRow } from "../store/types";
 import { PCHOMEPAY_MIN_AMOUNT, atmExpireDays } from "../pay/pchomepay";
 import { PROVIDER_IDS, PROVIDER_LABEL, isOnlineMethod, type ProviderId } from "../pay/types";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
@@ -375,6 +375,20 @@ export async function paymentAvailability(store: Store, tenant: TenantRow, setti
   };
 }
 
+/**
+ * 第八批：團購單的計價與運送覆寫（由 lib/services/groupbuy.ts 依 DB 組好；前端送的價格一律不採信）。
+ * 其餘（庫存、優惠券、點數／儲值金、發票、付款方式、保留時間、寄信）全部走一般結帳流程。
+ */
+export interface GroupBuyCheckout {
+  /** `${productId}|${variantId ?? ""}` → 團購品項與團購價 */
+  prices: Map<string, { itemId: string; price: number; name: string }>;
+  order: Omit<GroupBuyOrderInput, "lines">;
+  /** 允許的 shipping 模組運送方式（null＝全部） */
+  allowedMethodIds: string[] | null;
+  /** 到店自取（團購自取點）：運費 0 */
+  pickup: ShippingChoice | null;
+}
+
 export interface CheckoutDeps {
   store: Store;
   sendMail?: Mailer;
@@ -387,7 +401,7 @@ export interface CheckoutDeps {
  */
 export async function placeOrder(
   deps: CheckoutDeps,
-  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings; allowSandbox?: boolean; cvsBinding?: string | null },
+  input: { tenant: TenantRow; member: MemberRow | null; data: unknown; settings?: ShopSettings; allowSandbox?: boolean; cvsBinding?: string | null; groupBuy?: GroupBuyCheckout },
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
   const settings = input.settings ?? (await publishedShopSettings(deps.store, tenant));
@@ -397,10 +411,27 @@ export async function placeOrder(
   await releaseExpiredHolds({ store: deps.store, sendMail: deps.sendMail, baseUrl: deps.baseUrl }, tenant.id, [...new Set(d.items.map((i) => i.productId))]);
   const priced = await priceCart(deps.store, tenant.id, d.items, settings);
   if (priced.problems.length || !priced.lines.length) throw new ServiceError("invalid", priced.problems.join("；") || "購物車是空的");
+  // 第八批：團購價（server 依團購品項覆寫單價；不是這個團購的品項直接拒絕）
+  let gbLines: GroupBuyOrderInput["lines"] | null = null;
+  if (input.groupBuy) {
+    gbLines = [];
+    for (const l of priced.lines) {
+      const p = input.groupBuy.prices.get(`${l.product_id}|${l.variant_id ?? ""}`);
+      if (!p) throw new ServiceError("invalid", `「${l.name}」不在這個團購裡`);
+      l.unit_price = p.price;
+      l.line_total = p.price * l.qty;
+      gbLines.push({ item_id: p.itemId, qty: l.qty, name: p.name });
+    }
+    priced.subtotal = priced.lines.reduce((s, l) => s + l.line_total, 0);
+    priced.shippingFee = flatShippingFee(settings, priced.subtotal, true);
+    priced.total = priced.subtotal + priced.shippingFee;
+    const allowed = input.groupBuy.allowedMethodIds;
+    if (!input.groupBuy.pickup && allowed && d.shippingMethodId && !allowed.includes(d.shippingMethodId)) throw new ServiceError("invalid", "這個團購不提供這種運送方式");
+  }
   // 折扣先算（只讀）：M-2 免運門檻用折扣後金額
   const promo = await applyPromotions(deps.store, tenant, { subtotal: priced.subtotal, couponCode: d.couponCode, referralCode: d.referralCode, member, email: d.contact.email });
   // shipping 模組：運費依已發布設定（server 計價），超商要原子消耗選店暫存
-  const ship = await resolveShipping(deps.store, tenant, {
+  const ship = input.groupBuy?.pickup ? { fee: 0, choice: input.groupBuy.pickup, consumedSelectionId: null } : await resolveShipping(deps.store, tenant, {
     methodId: d.shippingMethodId,
     cvsSelectionId: d.cvsSelectionId,
     binding: input.cvsBinding ?? null,
@@ -413,7 +444,7 @@ export async function placeOrder(
     if (ship?.consumedSelectionId) await deps.store.releaseCvsSelection(tenant.id, ship.consumedSelectionId);
   };
   try {
-    return await placeOrderPriced(deps, input, d, settings, priced, ship, promo);
+    return await placeOrderPriced(deps, input, d, settings, priced, ship, promo, input.groupBuy && gbLines ? { ...input.groupBuy.order, lines: gbLines } : null);
   } catch (e) {
     await releaseSelection();
     throw e;
@@ -428,6 +459,7 @@ async function placeOrderPriced(
   priced: PricedCart,
   ship: ShippingResolution | null,
   promo: Awaited<ReturnType<typeof applyPromotions>>,
+  groupBuy: GroupBuyOrderInput | null = null,
 ): Promise<{ order: OrderRow; accessKey: string; orderUrl: string }> {
   const { tenant, member } = input;
   const shippingFee = ship ? ship.fee : flatShippingFee(settings, priced.subtotal - promo.discount);
@@ -469,6 +501,7 @@ async function placeOrderPriced(
       points_redeemed: credits.pointsRedeemed,
       points_discount: credits.pointsDiscount,
       wallet_paid: credits.walletPaid,
+      group_buy: groupBuy,
     },
     priced.lines.map(({ stockAvailable: _s, slug: _g, ...l }) => l),
     taipeiDay(),

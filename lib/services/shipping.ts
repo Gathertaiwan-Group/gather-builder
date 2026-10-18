@@ -74,7 +74,10 @@ export function cvsCookieName(tenantId: string) {
  * 開始選門市：建一筆暫存（MerchantTradeNo 隨機、只存 sha256；另一個瀏覽器秘密只存 sha256 當 binding），
  * 回傳要自動 POST 到綠界的表單與要設在瀏覽器的 binding cookie 值。
  */
-export async function startCvsSelection(store: Store, tenant: TenantRow, input: { methodId: string; baseUrl: string; mobile: boolean; allowStage?: boolean }) {
+/** 第八批：團購頁選店後回到團購頁（只接受 /groupbuy/<slug>） */
+export const CVS_RETURN_PATH = /^\/groupbuy\/[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/;
+
+export async function startCvsSelection(store: Store, tenant: TenantRow, input: { methodId: string; baseUrl: string; mobile: boolean; allowStage?: boolean; returnPath?: string | null }) {
   const settings = await publishedShippingSettings(store, tenant);
   if (!settings) throw new ServiceError("forbidden", "此網站未開放超商取貨");
   const m = (await availableShippingMethods(store, tenant, settings, { allowStage: input.allowStage })).find((x) => x.id === input.methodId);
@@ -90,6 +93,7 @@ export async function startCvsSelection(store: Store, tenant: TenantRow, input: 
     sub_type: m.subType,
     method_id: m.id,
     expires_at: new Date(Date.now() + CVS_SELECTION_TTL_MS).toISOString(),
+    ...(input.returnPath && CVS_RETURN_PATH.test(input.returnPath) ? { return_path: input.returnPath } : {}),
   });
   const form = mapForm(creds, { tradeNo, subType: m.subType, serverReplyUrl: `${input.baseUrl.replace(/\/$/, "")}/api/ship/ecpay/map/${tenant.id}`, mobile: input.mobile });
   return { form, binding, maxAgeSeconds: CVS_SELECTION_TTL_MS / 1000 };
@@ -102,7 +106,7 @@ export async function startCvsSelection(store: Store, tenant: TenantRow, input: 
  * 3. 子類型必須等於當初要求的，暫存未使用、未過期才寫；
  * 4. 下單時還要再出示 binding cookie（consumeCvsSelection），別人的瀏覽器拿不到。
  */
-export async function handleCvsMapCallback(store: Store, tenantId: string, form: Record<string, string>): Promise<{ ok: boolean; slug: string | null; selectionId: string | null; message: string }> {
+export async function handleCvsMapCallback(store: Store, tenantId: string, form: Record<string, string>): Promise<{ ok: boolean; slug: string | null; selectionId: string | null; message: string; returnPath?: string | null }> {
   const tenant = await store.getTenantById(tenantId);
   if (!tenant) return { ok: false, slug: null, selectionId: null, message: "找不到網站" };
   const acct = await store.getShippingAccount(tenantId);
@@ -117,7 +121,7 @@ export async function handleCvsMapCallback(store: Store, tenantId: string, form:
     new Date().toISOString(),
   );
   if (!row || row.tenant_id !== tenantId) return { ok: false, slug: tenant.slug, selectionId: null, message: "選店已逾時或無效，請重新選擇門市" };
-  return { ok: true, slug: tenant.slug, selectionId: row.id, message: "已選擇門市" };
+  return { ok: true, slug: tenant.slug, selectionId: row.id, message: "已選擇門市", returnPath: row.return_path && CVS_RETURN_PATH.test(row.return_path) ? row.return_path : null };
 }
 
 /** 結帳頁：只有持有 binding cookie 的瀏覽器看得到自己選的門市 */

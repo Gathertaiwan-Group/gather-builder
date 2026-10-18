@@ -6,7 +6,7 @@ import { getMailer } from "./mail";
 import { baseUrlFrom } from "./runtime";
 import { verifyPreviewToken } from "./preview";
 import { formObject, messageOf, originOk, siteRedirect } from "./site-request";
-import { cvsCookieName, handleCvsMapCallback, handleLogisticsNotify, startCvsSelection } from "./services/shipping";
+import { CVS_RETURN_PATH, cvsCookieName, handleCvsMapCallback, handleLogisticsNotify, startCvsSelection } from "./services/shipping";
 import { ServiceError } from "./errors";
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -20,10 +20,12 @@ export async function handleCvsStart(req: Request, rawSlug: string, store: Store
   if (!originOk(req)) return new NextResponse("forbidden origin", { status: 403 });
   const tenant = await store.getTenantBySlug(slug);
   if (!tenant || tenant.status === "suspended") return new NextResponse("not found", { status: 404 });
+  let back = "/checkout";
   try {
     const f = await formObject(req);
+    if (f.returnPath && CVS_RETURN_PATH.test(f.returnPath)) back = f.returnPath;
     const allowStage = !!f.preview && verifyPreviewToken(f.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
-    const r = await startCvsSelection(store, tenant, { methodId: f.methodId ?? "", baseUrl: baseUrlFrom(req), mobile: /Mobile|Android|iPhone/i.test(req.headers.get("user-agent") ?? ""), allowStage });
+    const r = await startCvsSelection(store, tenant, { methodId: f.methodId ?? "", baseUrl: baseUrlFrom(req), mobile: /Mobile|Android|iPhone/i.test(req.headers.get("user-agent") ?? ""), allowStage, returnPath: f.returnPath || null });
     const inputs = Object.entries(r.form.fields)
       .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`)
       .join("");
@@ -32,7 +34,7 @@ export async function handleCvsStart(req: Request, rawSlug: string, store: Store
     res.cookies.set(cvsCookieName(tenant.id), r.binding, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: `/s/${slug}`, maxAge: r.maxAgeSeconds });
     return res;
   } catch (e) {
-    return siteRedirect(req, slug, "/checkout", { err: messageOf(e) });
+    return siteRedirect(req, slug, back, { err: messageOf(e) });
   }
 }
 
@@ -41,7 +43,7 @@ export async function handleCvsMapReturn(req: Request, tenantId: string, store: 
   const form = await formObject(req).catch(() => ({}) as Record<string, string>);
   const r = await handleCvsMapCallback(store, tenantId, form);
   if (!r.slug) return new NextResponse("not found", { status: 404 });
-  return siteRedirect(req, r.slug, "/checkout", r.ok ? undefined : { err: r.message }, r.ok && r.selectionId ? { cvs: r.selectionId } : undefined);
+  return siteRedirect(req, r.slug, r.returnPath ?? "/checkout", r.ok ? undefined : { err: r.message }, r.ok && r.selectionId ? { cvs: r.selectionId } : undefined);
 }
 
 /** 綠界物流狀態通知：驗 CheckMacValue，回純文字 1|OK */

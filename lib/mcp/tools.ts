@@ -20,6 +20,7 @@ import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 import { registerClassTools } from "./tools-classes";
 import { registerContentTools } from "./tools-content";
+import { registerGroupBuyTools } from "./tools-groupbuy";
 
 /**
  * MCP 工具層：只做參數宣告與轉送，所有邏輯（權限、隔離、驗證、稽核）都在 lib/services。
@@ -884,6 +885,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
   /* ------------------------------------------------------------ 第五、六批：會員經營、內容與在地 */
 
   registerContentTools(server, ctx, wrap);
+  registerGroupBuyTools(server, ctx, wrap);
 
   /* ------------------------------------------------------------ 發布 */
 

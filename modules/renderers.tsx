@@ -19,6 +19,7 @@ import { CertificateLookup } from "./certificates/sections";
 import { ProductReviews } from "./reviews/sections";
 import { AnnouncementsBar, AnnouncementsList } from "./announcements/sections";
 import { SubscriptionPlans } from "./subscriptions/sections";
+import { GroupBuyDetail, GroupBuyList } from "./group-buy/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -52,4 +53,6 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   announcements_bar: AnnouncementsBar,
   announcements_list: AnnouncementsList,
   subscription_plans: SubscriptionPlans,
+  group_buy_list: GroupBuyList,
+  group_buy_detail: GroupBuyDetail,
 };

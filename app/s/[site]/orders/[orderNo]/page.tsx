@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
 // 網址含訂單存取金鑰：不收錄、不帶 referrer
 export const metadata: Metadata = { title: "訂單狀態", robots: { index: false }, referrer: "no-referrer" };
 
-type Props = { params: Promise<{ site: string; orderNo: string }>; searchParams: Promise<{ k?: string; placed?: string }> };
+type Props = { params: Promise<{ site: string; orderNo: string }>; searchParams: Promise<{ k?: string; placed?: string; ok?: string; err?: string }> };
 
 /**
  * 訂單狀態頁（也是 PChomePay 的 return_url）：只顯示狀態、待付款時輪詢；
@@ -47,10 +47,11 @@ export default async function OrderPage(props: Props) {
   const gate = await store.rateHit(`hook-retry-page:${site.tenant.id}`, found.id, 600, 1).catch(() => ({ allowed: false }));
   if (gate.allowed) await retryOrderHooks({ store, sendMail: getMailer(), baseUrl: baseUrlFrom({ headers: await headers() }) }, { orderId: found.id, countAttempts: false }).catch((e) => console.error("[hooks] lazy", e));
   const order = await expireIfDue(store, found);
-  const [items, invoice, shipment] = await Promise.all([
+  const [items, invoice, shipment, gbo] = await Promise.all([
     store.listOrderItems(site.tenant.id, order.id),
     order.invoice_status ? store.getInvoiceByOrder(site.tenant.id, order.id) : Promise.resolve(null),
     store.getActiveShipmentByOrder(site.tenant.id, order.id),
+    order.group_buy_id ? store.getGroupBuyOrder(site.tenant.id, order.id) : Promise.resolve(null),
   ]);
   const parsed = shopSettingsSchema.safeParse(moduleConfig(site, "shop"));
   const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
@@ -72,6 +73,19 @@ export default async function OrderPage(props: Props) {
               <p className="m-0 mt-2 whitespace-pre-line">{settings.offlineTransfer?.instructions ?? "店家將與你聯繫付款方式。"}</p>
               {order.expires_at && <p className="gb-muted m-0 mt-2">請於 {new Date(order.expires_at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })} 前完成付款。</p>}
             </div>
+          )}
+          {sp.ok && <p className="gb-card mt-4 p-3 text-sm" data-gb="ok">{sp.ok}</p>}
+          {sp.err && <p role="alert" className="mt-4 rounded p-3 text-sm" style={{ background: "#fef2f2", color: "#991b1b" }} data-gb="err">{sp.err}</p>}
+          {pending && order.payment_method === "offline" && gbo && (
+            <form action={`/s/${site.tenant.slug}/api/groupbuy/report-transfer`} method="post" className="gb-card mt-4 flex flex-wrap items-end gap-2 p-4 text-sm" data-gb="report-transfer">
+              <input type="hidden" name="orderNo" value={order.order_no} />
+              {sp.k && <input type="hidden" name="k" value={sp.k} />}
+              <label className="flex flex-col gap-1 font-medium">
+                匯款帳號末五碼{gbo.payer_last5 ? `（已回報：${gbo.payer_last5}）` : ""}
+                <input className="gb-input w-40" name="payerLast5" inputMode="numeric" pattern="\d{5}" maxLength={5} required />
+              </label>
+              <button type="submit" className="gb-btn">回報匯款</button>
+            </form>
           )}
           {pending && isOnlineMethod(order.payment_method) && <p className="gb-muted mt-4 text-sm">等待金流確認付款中，頁面會自動更新。若尚未付款，請重新下單。</p>}
           <ul className="gb-card m-0 mt-4 flex list-none flex-col gap-2 p-4 text-sm" data-gb="order-items">
