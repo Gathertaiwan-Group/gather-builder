@@ -40,7 +40,7 @@ const now = () => new Date().toISOString();
  * members／shop 的記憶體實作。語意與 Supabase 實作（含 builder_place_order／cancel／release 函式）一致：
  * 每個方法的讀＋寫都在同一個同步區段完成（JS 單執行緒），等同 DB 的原子條件更新。
  */
-export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: CreditsBridge, gb?: GroupBuyBridge): CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch"> {
+export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: CreditsBridge, gb?: GroupBuyBridge): CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch" | "brandSales"> {
   const members = new Map<string, MemberRow>();
   const sessions = new Map<string, MemberSessionRow>();
   const mtokens = new Map<string, MemberTokenRow>();
@@ -82,7 +82,21 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
     return true;
   };
 
-  const store: CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch"> = {
+  const store: CommerceStore & Pick<Store, "placeClassOrder" | "confirmBankMatch" | "brandSales"> = {
+    async brandSales(tenantId, productIds, sinceIso) {
+      const out = new Map<string, { product_id: string; qty: number; revenue: number; orders: Set<string> }>();
+      for (const it of orderItems) {
+        if (it.tenant_id !== tenantId || !it.product_id || !productIds.includes(it.product_id)) continue;
+        const o = orders.get(it.order_id);
+        if (!o || (o.status !== "paid" && o.status !== "fulfilled") || o.payment_sandbox || o.refunded_at || !o.paid_at || o.paid_at < sinceIso) continue;
+        const r = out.get(it.product_id) ?? { product_id: it.product_id, qty: 0, revenue: 0, orders: new Set<string>() };
+        r.qty += it.qty;
+        r.revenue += it.line_total;
+        r.orders.add(o.id);
+        out.set(it.product_id, r);
+      }
+      return [...out.values()].map((r) => ({ product_id: r.product_id, qty: r.qty, revenue: r.revenue, orders: r.orders.size }));
+    },
     async confirmBankMatch(tenantId, matchId, by) {
       // 與 builder_confirm_bank_match 同語意：配對 suggested 且訂單可收款才一起改（同步區段＝單一交易）
       const m = gb?.peekMatchSync(tenantId, matchId);
@@ -219,7 +233,7 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       if ([...products.values()].some((p) => p.tenant_id === row.tenant_id && p.slug === row.slug)) {
         throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
       }
-      const p: ProductRow = { ...row, id: randomUUID(), created_at: now(), updated_at: now() };
+      const p: ProductRow = { brand: null, ...row, id: randomUUID(), created_at: now(), updated_at: now() };
       products.set(p.id, p);
       return clone(p);
     },

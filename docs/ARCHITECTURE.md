@@ -135,6 +135,15 @@
 - **出貨匯出** `export_shipping`：已付款（可含已出貨）的團購單 CSV（收件人、電話、地址、超商門市、自取點、品項、團主）；每格 `csvCell`（防 CSV injection、BOM）；匯出前寫 `builder_pii_access_log`（只增不改）＋稽核。`create_group_buy_shipments`（shipping:write＋confirm）逐單沿用 `create_shipment`（同一訂單只能一張有效物流單＝重跑冪等；綠界只用官方測試特店測）。
 - **承載**：團購下單每 IP 每小時 `orderRateLimitPerHour`（預設 20，`builder_rate_hit`），與一般結帳（6／小時）分開計；下單路徑只鎖「團購列 FOR SHARE＋各品項列＋商品列」，不同品項不互鎖。
 
+## 實體門市 QR 多語商品頁（qr-catalog 模組，第八批）
+
+- **短碼與標籤**：每個已上架商品一組 `builder_qr_codes.code`（10 字隨機英數、拒絕取樣、約 59 bits；unique(tenant, code)、unique(tenant, product) → 重印同一組、併發也只一組）。短連結 `/s/<slug>/q/<碼>`。`generate_qr_labels` 回傳短連結、SVG、PNG 網址與 A4 標籤頁 `/api/s/<slug>/qr/labels?c=<碼…>&exp=&t=<HMAC(PREVIEW_SECRET, 租戶:碼:到期)>`（1 小時、3×7＝21 張：商品名、價格、QR、短碼）。QR 由 npm `qrcode`（本機運算、不呼叫外部服務；ECC M），測試以 jsQR 解碼驗證內容＝短連結。
+- **掃碼** `/s/<slug>/q/<碼>`（route handler）：語言＝`pickLang(Accept-Language, 可用語言)`——依 q 值排序；可用語言＝繁中＋網站 i18n 有開、且**這個商品名稱有已發布翻譯**的 en／ja（沒翻譯不切，fallback 繁中）。記一筆 `builder_qr_scans`（時間、商品、語言、國家），🔴 **不存 IP、不存 UA**；國家碼只讀 `x-vercel-ip-country`（兩碼大寫，其他值或缺 → null；Vercel 正式站由平台依來源 IP 覆寫，客戶端改不了）。每 IP 每 10 分鐘最多記 `scanLogLimitPer10Min`（預設 60，只用 IP 雜湊限流、不寫進紀錄；超過照常顯示頁面）。設歸因 cookie `gbqr_<租戶>`（最近 10 次掃描 id＋HMAC、HttpOnly、path /s/<slug>、30 天）→ 303 到 `/s/<slug>/<lang>/q/<碼>/view`（middleware 的語言前綴，所以頁面外框也是該語言）。
+- **落地頁**：多語商品名／說明（`localizeRow`）、新台幣價格、外幣約當（設定 `currencies[{code, rate}]`，Intl 格式化，標示「僅供參考，以新台幣結帳」）、「現場購買請洽店員」、「線上購買」（連到同語言的商品頁）、「寄送到海外（詢價）」表單；可手動切換中／英／日。固定字串有中英日字典。noindex。
+- **轉換**：同一瀏覽器（簽章 cookie）掃過碼、30 天內的線上訂單（一般結帳與團購下單都會記；只記訂單裡有掃過的商品；unique(kind, ref, product)）與海外寄送詢價（寫進既有 `builder_inquiries`，店主回信報價；每 IP 每小時 5 筆）→ `builder_qr_conversions`（只增不改）。第一版不做跨境物流整合。
+- **報表** `get_scan_report`（orders:read）：SQL `builder_qr_scan_report` 依商品 × 國家 × 語言聚合掃描數、訂單數、詢價數、轉換率，另附國家合計。
+- **品牌報表**：商品可標 `brand`（`builder_products.brand`）。`create_brand_report_link`（marketing:write＋confirm；1–365 天到期）→ `/s/<slug>/brand-report/<連結 id>.<HMAC(PREVIEW_SECRET, brandreport:id)>`（不存原文；撤銷 `revoked_at`、到期都 404；noindex、no-referrer）。內容只有該品牌商品的掃描（國家×語言）、轉換數、已付款銷量與金額（SQL `builder_brand_sales`：已付款／已出貨、非 sandbox、未退款）——沒有任何顧客資料。
+
 ## 發票（invoice 模組）
 
 - **供應商介面** `lib/invoice/provider.ts`：`issue`／`void`／`allowance`／`query`／`verify`，結果三態（成功／可重試／永久錯誤）。第一家 `lib/invoice/amego.ts`（官方文件 https://invoice.amego.tw/api_doc/ ：`/json/f0401` 開立、`/json/f0501` 作廢（陣列）、`/json/g0401` 折讓（陣列、未稅＋稅額、AllowanceType 2）、`/json/invoice_query` 反查；`md5(data+time+appKey)`，data 只序列化一次）。另有 `mock`（只限 `is_test` 租戶，e2e 用）。
@@ -339,6 +348,10 @@
 | PAYUNi notify 回應格式 | 官方文件未規定回應與重送；我們回 200 OK。 | 向 PAYUNi 確認。 |
 | 各家 callback 網址換 PREVIEW_SECRET | 短網址（第二輪審查後）不受影響；只有上線前用舊網址建立的付款，換密鑰會讓通知被拒（逾期前回查仍會認回已付款）。 | — |
 | CI 不跑 next build | GitHub Actions 只跑 typecheck＋test；2026-10-19 曾因循環 import 的 TDZ 讓租戶首頁 500 約 10–25 分鐘（Vercel 部署成功但執行期失敗），已修（`lib/services/class-common.ts`）。 | CI 加 `next build`（需要建置期 env 的假值）或部署後健康檢查（租戶首頁 200）。 |
+| QR 國家碼的可信度 | 只在 Vercel 上可信（平台覆寫 `x-vercel-ip-country`）；本機或其他代理前面時客戶端可自填。VPN／漫遊會讓國家失真。 | — |
+| QR 轉換歸因 | 只認同一瀏覽器（cookie）30 天內；客人回國後換裝置下單不會被算到。 | 會員登入綁定、或訂單頁輸入掃碼代號。 |
+| 海外寄送 | 第一版只有詢價（進 inquiries 由店主報價），沒有跨境物流、關稅計算、外幣結帳。 | 串國際物流（例如 DHL／EMS API）與外幣金流。 |
+| QR 標籤版型 | 固定 A4 3×7；沒有自訂尺寸或其他標籤紙規格。 | 版型設定。 |
 | 團購結團一次跑完 | 結團時逐張取消／寄通知，訂單上千張時單次 cron 可能跑不完（可接續：通知只寄一次、settled_at 最後才標）。 | 背景佇列分批。 |
 | 團購沒有後台頁面 | 第一版團購的管理全部透過 MCP（建團、團主、對帳、結團、匯出）；平台後台只有一般訂單頁可看團購單。 | 後台「團購」分頁（含 CSV 上傳）。 |
 | 銀行對帳只比金額＋末五碼／訂單號 | 同金額同末五碼的多張單（同一人買兩次）一律多重候選交人工；客人沒回報末五碼、備註也沒寫訂單號的轉帳不會配對。 | 每單產生獨特金額尾數或虛擬帳號（需銀行合作）。 |

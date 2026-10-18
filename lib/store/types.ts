@@ -5,11 +5,13 @@ import type { PayStore } from "./types-pay";
 import type { ClassesStore } from "./types-classes";
 import type { ContentStore } from "./types-content";
 import type { GroupBuyOrderInput, GroupBuyStore } from "./types-groupbuy";
+import type { QrStore } from "./types-qr";
 export type * from "./types-ext";
 export type * from "./types-classes";
 export type * from "./types-content";
 export type * from "./types-pay";
 export type * from "./types-groupbuy";
+export type * from "./types-qr";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -169,6 +171,8 @@ export interface ProductRow {
   status: "draft" | "published";
   price: number;
   compare_at_price: number | null;
+  /** 第八批：品牌（qr-catalog 品牌報表用；可空） */
+  brand?: string | null;
   sku: string | null;
   track_inventory: boolean;
   stock: number;
@@ -414,7 +418,7 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore, GroupBuyStore {
+export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore, GroupBuyStore, QrStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;

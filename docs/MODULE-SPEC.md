@@ -98,6 +98,9 @@ modules/<id>/
 
 | `group-buy` | shop | `/groupbuy/<slug>`（`?leader=<碼>` 團主連結）、`/groupbuy/leader?l=&t=`（團主簽章報表）、`/s/<slug>/api/groupbuy/order`、`/api/groupbuy/report-transfer`（訂單頁回報匯款末五碼）；區塊 `group_buy_list`、`group_buy_detail` | `builder_group_buys`、`builder_group_buy_items`（限量 sold ≤ quota）、`builder_group_buy_leaders`、`builder_group_buy_leader_assignments`、`builder_group_buy_orders`、`builder_group_buy_commissions`／`builder_group_buy_notices`（只增不改）、`builder_bank_imports`、`builder_bank_lines`、`builder_bank_matches`；訂單欄位 `group_buy_id`／`group_buy_leader_id` | `create_group_buy`、`update_group_buy`、`duplicate_group_buy`、`list_group_buys`、`get_group_buy`、`invite_leader`、`list_group_buy_orders`、`import_bank_statement`、`confirm_bank_matches`、`close_group_buy`、`export_shipping`、`create_group_buy_shipments` |
 
+| `qr-catalog` | shop、i18n | `/q/<碼>`（掃碼短連結，記錄掃描後導到語言頁）、`/<lang>/q/<碼>/view`（落地頁）、`/brand-report/<token>`（品牌唯讀報表）、`/s/<slug>/api/qr/inquiry`（海外寄送詢價）、`/api/s/<slug>/qr/labels`（A4 標籤，簽章網址）、`/api/s/<slug>/qr/img?c=&f=svg\|png` | `builder_qr_codes`、`builder_qr_scans`／`builder_qr_conversions`（只增不改；掃描不存 IP）、`builder_brand_report_links`；商品欄位 `brand` | `generate_qr_labels`、`get_scan_report`、`create_brand_report_link`、`revoke_brand_report_link`、`list_brand_report_links` |
+
+- `qr-catalog` 設定：`currencies[{code, rate}]`（1 新台幣＝rate 外幣，僅供參考）、`ownerEmail`（海外詢價通知）、`inStoreNote`、`scanLogLimitPer10Min`（預設 60）。
 - `group-buy` 設定：`orderRateLimitPerHour`（團購下單每 IP 每小時，預設 20）、`bankMatchWindowDays`（匯款日期在下單日後幾天內才配對，預設 7）、`paymentNote`。
 
 ### 尚未做

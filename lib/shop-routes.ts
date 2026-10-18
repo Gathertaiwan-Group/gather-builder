@@ -21,6 +21,7 @@ import { invoiceRequestFromForm } from "./invoice/validate";
 import { cvsCookieName, resolveShipping } from "./services/shipping";
 import { applyPromotions } from "./services/promotions";
 import { resolveCredits } from "./services/credits";
+import { readScanCookie, recordOrderConversions, scanCookieName } from "./services/qrcatalog";
 
 export const referralCookieName = (tenantId: string) => `gbref_${tenantId.replace(/-/g, "").slice(0, 12)}`;
 
@@ -162,6 +163,8 @@ export async function handleCheckout(req: Request, rawSlug: string, store: Store
     data.referralCode = cookieValue(req, referralCookieName(tenant.id)) || undefined;
     const cvsBinding = cookieValue(req, cvsCookieName(tenant.id)) ?? null;
     const { order, accessKey } = await placeOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, data, settings: s.settings, allowSandbox, cvsBinding });
+    // 第八批 qr-catalog：同一瀏覽器掃過碼（簽章 cookie）→ 記錄轉換（best-effort，不影響下單）
+    await recordOrderConversions(store, tenant, order, readScanCookie(tenant.id, cookieValue(req, scanCookieName(tenant.id)))).catch((e) => console.error("[qr] conversion", e));
     if (isOnlineMethod(order.payment_method)) {
       try {
         const pay = await startOnlinePayment({ store, baseUrl, clientFactory, providerFactory }, { tenant, order, accessKey });

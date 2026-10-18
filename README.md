@@ -1,6 +1,6 @@
 # gather-builder
 
-給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、多家金流：PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi，含退款）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋內容與在地（i18n 多語＋AI 翻譯、search、directory、downloads、certificates、reviews、announcements）＋訂閱制（subscriptions：藍新信用卡定期定額）＋團購（group-buy：團主分潤、銀行明細對帳、結團、出貨匯出）＋MCP server。
+給樂數位（Gather）的多租戶、模組化建站平台：骨架＋形象站模組＋會員（members）＋電商核心（shop：商品、購物車、結帳、訂單、多家金流：PChomePay、藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi，含退款）＋電子發票（invoice）、物流（shipping）、行銷（coupons、referral、newsletter、ai-chat）＋課程類（events 活動報名、booking 時段預約、courses 線上課程）＋會員經營（loyalty 點數＋等級、stored-value 儲值金）＋內容與在地（i18n 多語＋AI 翻譯、search、directory、downloads、certificates、reviews、announcements）＋訂閱制（subscriptions：藍新信用卡定期定額）＋團購（group-buy：團主分潤、銀行明細對帳、結團、出貨匯出）＋實體門市 QR 多語商品頁（qr-catalog：掃碼分析、品牌報表）＋MCP server。
 
 - 網站內容存成結構化 JSON（頁面 → 區塊 → props），agent 只能改區塊與內容、不能改程式碼。
 - 一層服務函式（`lib/services/`）、兩個入口：後台（`/admin`）與 MCP（`/api/mcp`）。
@@ -81,7 +81,7 @@ D=$(mktemp -d) && git archive HEAD | tar -x -C "$D" && mkdir -p "$D/.vercel" && 
 
 ## 第八批：團購與 QR 多語商品頁
 
-- 團購（group-buy）：`docs/ARCHITECTURE.md`「團購」。端到端：`node --env-file=.env.local scripts/e2e-groupbuy.mjs http://localhost:3240`（`--no-qr` 只跑團購；`--quick` 正式站精簡版）。
+- 團購（group-buy）：`docs/ARCHITECTURE.md`「團購」。QR 多語商品頁（qr-catalog）：`docs/ARCHITECTURE.md`「實體門市 QR 多語商品頁」。端到端：`node --env-file=.env.local scripts/e2e-groupbuy.mjs http://localhost:3240`（含 qr-catalog；`--no-qr` 只跑團購；`--quick` 略過複製團購）。
 
 ## 第七批：多家金流與訂閱
 

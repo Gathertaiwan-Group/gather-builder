@@ -7,6 +7,7 @@ import { createSupabaseClassesStore } from "./supabase-classes";
 import { createSupabaseContentStore } from "./supabase-content";
 import { createSupabasePayStore } from "./supabase-pay";
 import { createSupabaseGroupBuyStore } from "./supabase-groupbuy";
+import { createSupabaseQrStore } from "./supabase-qr";
 
 /**
  * Supabase 實作。🔴 一律 service role、只在 server 端使用。
@@ -44,6 +45,7 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
     ...createSupabaseContentStore(db),
     ...createSupabasePayStore(db),
     ...createSupabaseGroupBuyStore(db),
+    ...createSupabaseQrStore(db),
     async getTenantBySlug(slug) {
       return must(await db.from("builder_tenants").select("*").eq("slug", slug).maybeSingle(), "getTenantBySlug");
     },

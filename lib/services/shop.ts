@@ -74,6 +74,8 @@ export const productInput = z
     images: z.array(imageUrl).max(10).default([]),
     price: z.number().int().min(0).max(10_000_000),
     compareAtPrice: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    /** 第八批：品牌（qr-catalog 品牌報表；可空） */
+    brand: z.string().trim().min(1).max(80).nullable().optional(),
     sku: optText(64),
     trackInventory: z.boolean().default(false),
     stock: z.number().int().min(0).max(1_000_000).default(0),
@@ -91,6 +93,7 @@ function productSummary(p: ProductRow, variants: VariantRow[] = []) {
     status: p.status,
     price: p.price,
     compareAtPrice: p.compare_at_price,
+    brand: p.brand ?? null,
     sku: p.sku,
     trackInventory: p.track_inventory,
     stock: p.stock,
@@ -117,6 +120,7 @@ export async function createProduct(ctx: ServiceContext, input: { site?: string 
     status: d.status,
     price: d.price,
     compare_at_price: d.compareAtPrice ?? null,
+    ...(d.brand ? { brand: d.brand } : {}),
     sku: d.sku ?? null,
     track_inventory: d.trackInventory,
     stock: d.stock,
@@ -171,6 +175,7 @@ export async function updateProduct(
   if (given.images !== undefined) patch.images = p.images;
   if (given.price !== undefined) patch.price = p.price;
   if (given.compareAtPrice !== undefined) patch.compare_at_price = p.compareAtPrice ?? null;
+  if (given.brand !== undefined) patch.brand = p.brand ?? null;
   if (given.sku !== undefined) patch.sku = p.sku ?? null;
   if (given.trackInventory !== undefined) patch.track_inventory = p.trackInventory;
   if (given.sort !== undefined) patch.sort = p.sort;

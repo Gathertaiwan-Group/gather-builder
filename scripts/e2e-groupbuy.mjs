@@ -147,7 +147,7 @@ if (!noQr) {
   const qrCookie = scan.setCookie.split(";")[0];
   const land = await get(new URL(scan.location, base).pathname, { cookie: qrCookie });
   check(land.status === 200 && land.body.includes("高山烏龍茶ギフトボックス") && /<html lang="ja"/.test(land.body), "落地頁：日文商品名、html lang=ja", String(land.status));
-  check(land.body.includes("¥") && /参考/.test(land.body), "落地頁：外幣約當（僅供參考）");
+  check(/[¥￥]/.test(land.body) && /参考/.test(land.body), "落地頁：外幣約當（僅供參考）");
   const inq = await post(`/s/${slug}/api/qr/inquiry`, { code, lang: "ja", name: "山田太郎", email: `yamada-${ts}@example.com`, country: "JP", address: "東京都千代田区1-1", message: "日本に送ってほしい" }, { cookie: qrCookie });
   check(inq.status === 303 && !!flash(inq.location).ok, "海外寄送詢價送出", flash(inq.location).err ?? inq.location);
   const rep = await site.call("get_scan_report", {});

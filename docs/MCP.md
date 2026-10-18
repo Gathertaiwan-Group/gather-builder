@@ -88,6 +88,7 @@ claude mcp list          # 確認狀態 ✓ Connected
 18. 「我要開放儲值」→ `enable_module stored-value` → `create_topup_plan { name:"儲 1000 送 100", payAmount:1000, bonusAmount:100, bonusExpireDays:180, status:"published", confirm:true }` → `add_section topup_plans` → 發布。會員付款後自動入帳，結帳可用儲值金付款。🔴 提醒店家確認履約保證／信託義務。
 19. 「網站要有英文版」→ `enable_module i18n { languages: ["en"] }` → `translate_content { lang:"en", target:{type:"page", path:"/"} }`（每頁一次；導覽 `{type:"nav"}`；文章 `{type:"post", slug}`）→ 看結果、需要時 `set_translation` 修改 → `preview_changes`（預覽網址加 /en 看英文）→ `publish_site` ＋ `publish_translations { confirm:true }`。英文網址 `/s/<slug>/en/…`。
 20. 「我要開團購」→ `enable_module group-buy`（shop 自動帶入）→ `create_group_buy { slug, title, endsAt, minQty?, pickupPoints:[{id:"huashan",name:"小時光華山店",address}], items:[{productId, price:團購價, quota:限量}], status:"published", confirm:true }` → `invite_leader { groupBuyId, name, email, commissionPercent:10 }`（回傳團主專屬連結與報表連結）→ `add_section group_buy_list` → 發布。客人匯款後：`import_bank_statement { csv }`（只產生建議）→ 跟使用者逐筆核對 → `confirm_bank_matches { matchIds, confirm:true }`。截止會自動結團；提早結團 `close_group_buy { confirm:true }` → `export_shipping`（含個資，會記錄）→ 綠界物流 `create_group_buy_shipments { confirm:true }`。下一團 `duplicate_group_buy`。
+21. 「門市要放 QR 給外國客人掃」→ `enable_module qr-catalog`（shop、i18n 自動帶入）→ `configure_module i18n { languages:["en","ja"] }`＋`configure_module qr-catalog { currencies:[{code:"JPY",rate:4.7},{code:"USD",rate:0.031}] }` → 商品翻譯（`translate_content { lang:"ja", target:{type:"product", id} }` 或 `set_translation`）→ `publish_translations`＋`publish_site` → `generate_qr_labels`（開 labelsUrl 列印）。之後 `get_scan_report` 看哪國客人喜歡哪個商品；給品牌看 → `update_product { patch:{brand:"…"} }` → `create_brand_report_link { brand, expiresInDays:30, confirm:true }`。
 16. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
@@ -204,6 +205,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `close_group_buy` | orders:write | 提早結團：達門檻成團通知；未達門檻取消所有訂單並通知（已付款需退款）。**必須** `confirm: true` |
 | `export_shipping` | orders:read | 出貨／物流匯出 CSV（收件人、電話、地址、超商門市、自取點；防 CSV injection；**每次匯出寫個資查看紀錄**） |
 | `create_group_buy_shipments` | shipping:write | 批次建綠界物流單（已付款、選綠界、尚無物流單的團購單；逐單冪等）。**必須** `confirm: true` |
+| `generate_qr_labels` | commerce:write | 已上架商品的 QR（隨機 10 字短碼、短連結 `/s/<slug>/q/<碼>`、SVG／PNG）＋ A4 標籤頁網址（1 小時有效）；可用 `brand` 篩選 |
+| `get_scan_report` | orders:read | 掃描報表：商品 × 國家 × 語言的掃描、線上訂單、海外詢價與轉換率（國家只來自 Vercel geo、不存 IP） |
+| `create_brand_report_link` | marketing:write | 品牌唯讀報表連結（簽章、1–365 天到期、不含顧客資料）。**必須** `confirm: true` |
+| `revoke_brand_report_link` / `list_brand_report_links` | marketing:write | 撤銷（之後 404）／列出品牌報表連結 |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

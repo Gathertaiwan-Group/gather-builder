@@ -21,6 +21,7 @@ import { TENANT_SCOPES } from "../scopes";
 import { registerClassTools } from "./tools-classes";
 import { registerContentTools } from "./tools-content";
 import { registerGroupBuyTools } from "./tools-groupbuy";
+import { registerQrTools } from "./tools-qr";
 
 /**
  * MCP 工具層：只做參數宣告與轉送，所有邏輯（權限、隔離、驗證、稽核）都在 lib/services。
@@ -480,6 +481,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
         name: z.string(),
         price: z.number().int().describe("售價（NT$ 整數）"),
         compareAtPrice: z.number().int().optional().describe("原價（劃線價）"),
+        brand: z.string().optional().describe("品牌（qr-catalog 的品牌報表用；寄售／代銷時填廠商品牌）"),
         descriptionMd: z.string().optional(),
         images: z.array(z.string()).optional().describe("圖片 https 網址，第一張為主圖"),
         sku: z.string().optional(),
@@ -510,6 +512,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
             name: z.string().optional(),
             price: z.number().int().optional(),
             compareAtPrice: z.number().int().nullable().optional(),
+            brand: z.string().nullable().optional(),
             descriptionMd: z.string().optional(),
             images: z.array(z.string()).optional(),
             sku: z.string().optional(),
@@ -886,6 +889,7 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
 
   registerContentTools(server, ctx, wrap);
   registerGroupBuyTools(server, ctx, wrap);
+  registerQrTools(server, ctx, wrap);
 
   /* ------------------------------------------------------------ 發布 */
 

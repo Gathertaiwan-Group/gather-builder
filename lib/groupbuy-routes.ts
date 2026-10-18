@@ -19,6 +19,7 @@ import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect }
 import { verifyPreviewToken } from "./preview";
 import { cvsCookieName } from "./services/shipping";
 import { cookieValue } from "./shop-routes";
+import { readScanCookie, recordOrderConversions, scanCookieName } from "./services/qrcatalog";
 
 /** 團購頁表單欄位 → 團購下單輸入（品項 qty_<團購品項 id>；運送 ship=pickup:<id>｜method:<id>） */
 export function groupBuyOrderFromForm(f: Record<string, string>) {
@@ -67,7 +68,9 @@ export async function handleGroupBuyOrder(req: Request, rawSlug: string, store: 
     const settings = (parsed.success ? parsed.data : {}) as ShopSettings;
     const member = (await getSessionMember(store, tenant, memberTokenFromRequest(req, tenant)))?.member ?? null;
     const allowSandbox = !!form.preview && verifyPreviewToken(form.preview, tenant.id, requireSecret("PREVIEW_SECRET")).ok;
-    const { order, accessKey } = await placeGroupBuyOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, slug: gbSlug, data: groupBuyOrderFromForm(form), allowSandbox, cvsBinding: cookieValue(req, cvsCookieName(tenant.id)) ?? null });
+    const placed = await placeGroupBuyOrder({ store, sendMail: getMailer(), baseUrl }, { tenant, member, slug: gbSlug, data: groupBuyOrderFromForm(form), allowSandbox, cvsBinding: cookieValue(req, cvsCookieName(tenant.id)) ?? null });
+    const { order, accessKey } = placed;
+    await recordOrderConversions(store, tenant, order, readScanCookie(tenant.id, cookieValue(req, scanCookieName(tenant.id)))).catch((e) => console.error("[qr] conversion", e));
     if (isOnlineMethod(order.payment_method)) {
       try {
         const pay = await startOnlinePayment({ store, baseUrl, clientFactory, providerFactory }, { tenant, order, accessKey });
