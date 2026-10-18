@@ -4,7 +4,7 @@ import type { ReviewsSettings } from "@/modules/reviews/manifest";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
-import { maskName } from "./class-orders";
+import { maskName } from "./class-common";
 
 export async function reviewsActive(store: Store, tenantId: string) {
   return activeModuleIds(await moduleStates({ store }, tenantId)).has("reviews");

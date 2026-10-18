@@ -12,7 +12,6 @@ import { getMailer } from "../mail";
 import {
   checkinCode,
   checkinHash,
-  classContactInput,
   fmtTaipei,
   maskContact,
   placeClassOrder,
@@ -23,6 +22,7 @@ import {
   taipeiDate,
   taipeiAt,
 } from "./class-orders";
+import { classContactInput } from "./class-common";
 import { normalizeEmail } from "../email-normalize";
 
 /* ================================================================== 共用 */

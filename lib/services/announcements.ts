@@ -3,7 +3,7 @@ import type { AnnouncementRow, MemberRow, Store, TenantRow } from "../store/type
 import { text } from "../validators";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
-import { maskEmail, maskName } from "./class-orders";
+import { maskEmail, maskName } from "./class-common";
 
 export async function announcementsActive(store: Store, tenantId: string) {
   return activeModuleIds(await moduleStates({ store }, tenantId)).has("announcements");

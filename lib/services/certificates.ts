@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CertificateRow, Store, TenantRow } from "../store/types";
 import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
-import { maskName } from "./class-orders";
+import { maskName } from "./class-common";
 
 /* ================================================================== 正規化 */
 

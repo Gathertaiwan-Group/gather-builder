@@ -1,3 +1,5 @@
+export { classContactInput, maskName, maskEmail, maskPhone, maskContact, type ClassContact } from "./class-common";
+import { classContactInput, type ClassContact } from "./class-common";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { ClassOrderItem, ClassReservation, MemberRow, OrderRow, PaymentMethod, Store, TenantRow } from "../store/types";
@@ -15,15 +17,6 @@ import { applyPromotions } from "./promotions";
  * 差別只在品項沒有商品庫存，改在 builder_place_class_order 同一交易內做名額預留。
  * 付款成功／取消／逾期的副作用全部走既有 onOrderPaid／cancel hooks（見各模組的 registerOrderHooks）。
  */
-
-export const classContactInput = z
-  .object({
-    name: text(80),
-    email: emailSchema,
-    phone: z.string().trim().min(6, { message: "請填寫電話" }).max(40),
-  })
-  .strict();
-export type ClassContact = z.output<typeof classContactInput>;
 
 /** 課程類訂單不寄送實體商品：shipping 欄位存聯絡人（訂單表 shipping 不可為空） */
 export const NO_SHIPPING_ADDRESS = "（活動／預約／線上課程，無需寄送）";
@@ -134,24 +127,6 @@ export function checkinCode(registrationId: string): string {
 export const checkinHash = (code: string) => sha256(`checkin:${code.trim().toUpperCase()}`);
 
 /* ================================================================== 個資遮罩與 CSV */
-
-export function maskName(n: string): string {
-  const c = [...n.trim()];
-  if (c.length <= 1) return "＊";
-  if (c.length === 2) return `${c[0]}＊`;
-  return `${c[0]}${"＊".repeat(Math.min(3, c.length - 2))}${c[c.length - 1]}`;
-}
-export function maskEmail(e: string): string {
-  const [local, domain] = e.split("@");
-  if (!domain) return "＊＊＊";
-  return `${(local ?? "").slice(0, 2)}＊＊＊@${domain}`;
-}
-export function maskPhone(p: string): string {
-  const d = p.replace(/\s/g, "");
-  if (d.length <= 6) return "＊＊＊";
-  return `${d.slice(0, 4)}＊＊＊${d.slice(-3)}`;
-}
-export const maskContact = (c: { name: string; email: string; phone: string }) => ({ name: maskName(c.name), email: maskEmail(c.email), phone: maskPhone(c.phone) });
 
 /**
  * CSV 儲存格：🔴 防 CSV injection——以 = + - @ 開頭（以及 Tab、CR）的值前面加單引號，Excel／Sheets 不會當公式執行；
