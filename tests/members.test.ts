@@ -17,6 +17,7 @@ import {
   resetPassword,
   setMemberStatus,
   sha256,
+  emailKey,
   verifyEmail,
   type MemberDeps,
 } from "@/lib/services/members";
@@ -250,10 +251,9 @@ describe("限流", () => {
     const t = await site(store, "rate-email2");
     await registerMember(deps, { tenant: t, ip: "1.1.1.1", data: { email: "victim@example.com", password: "real-password" } });
     const key = "victim@example.com";
-    // 模擬大量來自不同 IP 的猜測（直接打滿 email 桶）
-    for (let i = 0; i < RATE.loginEmail.limit; i++) {
-      await loginMember(d, { tenant: t, ip: `10.1.${Math.floor(i / 250)}.${i % 250}`, email: key, password: "guess" }).catch(() => undefined);
-    }
+    // 模擬大量來自不同 IP 的猜測：直接打滿 email 單獨的桶（不跑 100 次 scrypt，CI 才不會逾時）
+    for (let i = 0; i < RATE.loginEmail.limit; i++) await store.rateHit(`member-login-email:${t.id}`, emailKey(key, deps.ipSecret), RATE.loginEmail.window, RATE.loginEmail.limit);
+    await loginMember(d, { tenant: t, ip: "10.1.0.1", email: key, password: "guess" }).catch(() => undefined); // 第 101 次：被延遲但仍回「密碼錯誤」而非鎖住
     const started = Date.now();
     await expect(loginMember(d, { tenant: t, ip: "10.200.0.1", email: key, password: "real-password" })).resolves.toBeTruthy();
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);

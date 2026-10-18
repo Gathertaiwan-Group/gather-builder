@@ -65,7 +65,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const newRawToken = () => randomBytes(32).toString("base64url");
-const emailKey = (email: string, secret: string) => createHmac("sha256", secret).update(`email:${email}`).digest("hex").slice(0, 32);
+export const emailKey = (email: string, secret: string) => createHmac("sha256", secret).update(`email:${email}`).digest("hex").slice(0, 32);
 
 /** cookie 名含租戶識別（tenant id 前 12 碼），path 限定 /s/<slug> */
 export function memberCookieName(tenantId: string): string {
