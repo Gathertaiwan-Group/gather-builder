@@ -14,6 +14,7 @@ import * as invoices from "../services/invoices";
 import * as shipping from "../services/shipping";
 import * as coupons from "../services/coupons";
 import * as referral from "../services/referral";
+import * as newsletter from "../services/newsletter";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -784,6 +785,59 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: WRITE,
     },
     wrap(async (a) => referral.setReferralKol(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 電子報（newsletter） */
+
+  server.registerTool(
+    "list_subscribers",
+    {
+      description: "電子報訂閱者（email 為個資）：各狀態人數（confirmed 已確認／pending 待確認／unsubscribed 已退訂）與列表。需要 newsletter:read。",
+      inputSchema: { site, status: z.enum(["pending", "confirmed", "unsubscribed"]).optional(), limit: z.number().int().optional(), offset: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => newsletter.listSubscribers(ctx, a)),
+  );
+
+  server.registerTool(
+    "create_broadcast",
+    {
+      description: "建立電子報草稿（主旨＋Markdown 內容，寄出時轉成純文字並自動附退訂連結）。不會寄出任何信。需要 newsletter:write。",
+      inputSchema: { site, subject: z.string(), bodyMd: z.string() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => newsletter.createBroadcast(ctx, a)),
+  );
+
+  server.registerTool(
+    "send_test_broadcast",
+    {
+      description: "把草稿寄一封測試信到「指定的一個信箱」（例如網站主自己），不會寄給任何訂閱者。群發前先用這個確認內容。需要 newsletter:write。",
+      inputSchema: { site, broadcastId: z.string(), to: z.string().describe("測試收件信箱") },
+      annotations: WRITE,
+    },
+    wrap(async (a) => newsletter.sendTestBroadcast(ctx, a)),
+  );
+
+  server.registerTool(
+    "send_broadcast",
+    {
+      description:
+        "群發電子報給「已確認且未退訂」的訂閱者（寄出無法收回）。同一份只能群發一次；一次最多寄 50 封，回傳 remaining > 0 時再呼叫一次會接續（不會重寄）。必須先讓使用者看過測試信並確認，再帶 confirm: true。需要 newsletter:write。",
+      inputSchema: { site, broadcastId: z.string(), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => newsletter.sendBroadcast(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_broadcasts",
+    {
+      description: "電子報群發紀錄與寄送統計（成功／失敗／略過／待寄）。需要 newsletter:read。",
+      inputSchema: { site, limit: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => newsletter.listBroadcasts(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

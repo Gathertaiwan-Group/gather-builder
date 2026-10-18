@@ -6,6 +6,7 @@ import { ContactForm } from "./contact-form/sections";
 import { LineButton } from "./line/sections";
 import { AccountCta } from "./members/sections";
 import { ProductDetail, ProductGrid } from "./shop/sections";
+import { NewsletterSignup } from "./newsletter/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -23,4 +24,5 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   account_cta: AccountCta,
   product_grid: ProductGrid,
   product_detail: ProductDetail,
+  newsletter_signup: NewsletterSignup,
 };

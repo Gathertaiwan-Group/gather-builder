@@ -145,4 +145,27 @@ describe.skipIf(!enabled)("第三批模組 Supabase 實作（整合）", () => {
     const b = await store.insertReferral({ tenant_id: t.id, referrer_member_id: m!.id, referee_key: "email:x@example.com", referee_member_id: null, order_id: order.id });
     expect(!!a && !b).toBe(true);
   });
+
+  it("電子報：真 DB 群發只建已確認者的寄送列（重複排隊不重複）、開始群發條件式只成功一次、退訂 token 一次性", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    await enableModule(ctx, { site: slug, moduleId: "newsletter" });
+    for (const [i, st] of ["confirmed", "confirmed", "pending"].entries()) {
+      await store.upsertPendingSubscriber({ tenant_id: t.id, email: `nl${i}-${ts}@example.org`, confirm_token_hash: `nl-${ts}-${i}`, confirm_expires_at: new Date(Date.now() + 60_000).toISOString() });
+      if (st === "confirmed") expect(await store.confirmSubscriber(t.id, `nl-${ts}-${i}`, new Date().toISOString())).not.toBeNull();
+    }
+    expect(await store.confirmSubscriber(t.id, `nl-${ts}-0`, new Date().toISOString())).toBeNull(); // 確認 token 一次性
+    const b = await store.insertBroadcast({ tenant_id: t.id, subject: "it", body_md: "x" });
+    const starts = await Promise.all([store.updateBroadcast(t.id, b.id, ["draft"], { status: "sending" }), store.updateBroadcast(t.id, b.id, ["draft"], { status: "sending" })]);
+    expect(starts.filter(Boolean)).toHaveLength(1);
+    const tok = (sid: string) => `hash-${b.id}-${sid}`;
+    expect(await store.queueDeliveries(t.id, b.id, tok)).toBe(2);
+    expect(await store.queueDeliveries(t.id, b.id, tok)).toBe(0);
+    const q = await store.listQueuedDeliveries(t.id, b.id, 10);
+    expect(q).toHaveLength(2);
+    const fin = await Promise.all([store.finishDelivery(t.id, q[0]!.id, { status: "sent", error: null, sent_at: new Date().toISOString() }), store.finishDelivery(t.id, q[0]!.id, { status: "sent", error: null, sent_at: new Date().toISOString() })]);
+    expect(fin.filter(Boolean)).toHaveLength(1);
+    const un = await Promise.all([store.consumeUnsubToken(t.id, q[1]!.unsub_token_hash), store.consumeUnsubToken(t.id, q[1]!.unsub_token_hash)]);
+    expect(un.filter(Boolean)).toHaveLength(1);
+    expect(await store.deliveryStats(t.id, b.id)).toEqual({ queued: 1, sent: 1, failed: 0, skipped: 0 });
+  });
 });

@@ -23,7 +23,7 @@ export const text = (max: number) => z.string().trim().min(1).max(max);
 export const optText = (max: number) => z.string().trim().max(max).optional();
 
 /** 模組保留的站內路徑（部落格、商店、結帳、會員、訂單、站內 API） */
-export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/api"];
+export const RESERVED_PATHS = ["/blog", "/shop", "/checkout", "/account", "/orders", "/newsletter", "/api"];
 
 /** 網站內頁路徑：/、/about、/services/web */
 export const pagePath = z
