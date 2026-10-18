@@ -16,6 +16,7 @@ import { baseUrlFrom } from "@/lib/runtime";
 import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 import { memberRegistrations } from "@/lib/services/events";
 import { manageUrl, memberBookings } from "@/lib/services/booking";
+import { memberCourses } from "@/lib/services/courses";
 import { fmtTaipei } from "@/lib/services/class-orders";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +45,7 @@ export default async function AccountPage(props: Props) {
   );
   const action = (p: string) => `/s/${site.tenant.slug}/api/account/${p}`;
   const myRegs = moduleActive(site, "events") ? await memberRegistrations(store, site.tenant, member) : [];
+  const myCourses = moduleActive(site, "courses") ? await memberCourses(store, site.tenant, member) : [];
   const myBookings = moduleActive(site, "booking") ? await memberBookings(store, site.tenant, member) : [];
   const myCode = moduleActive(site, "referral") ? await getOrCreateReferralCode(store, site.tenant, member) : null;
   return (
@@ -93,6 +95,29 @@ export default async function AccountPage(props: Props) {
                     </li>
                   );
                 })}
+              </ul>
+            )}
+          </div>
+        )}
+        {moduleActive(site, "courses") && (
+          <div className="gb-card mb-6 p-5" data-gb="my-courses">
+            <h2 className="m-0 mb-3 text-lg font-bold">我的課程</h2>
+            {myCourses.length === 0 ? (
+              <p className="gb-muted m-0 text-sm">
+                還沒有課程。<a href={siteHref(ctx, "/courses")}>看看課程</a>
+              </p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
+                {myCourses.map((c) => (
+                  <li key={c.course.id} className="flex flex-wrap justify-between gap-2 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
+                    <a href={siteHref(ctx, c.first ? `/learn/${c.course.slug}/${c.first}` : `/courses/${c.course.slug}`)} data-gb="my-course-link">
+                      {c.course.title}
+                    </a>
+                    <span>
+                      進度 {c.done}/{c.total}
+                    </span>
+                  </li>
+                ))}
               </ul>
             )}
           </div>

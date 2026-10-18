@@ -67,7 +67,10 @@ modules/<id>/
 
 | `booking` | core（線上收訂金／全額需 shop） | `/book`（`?service=&from=&slot=`）、`/book/manage?b=&t=`（自助取消／改期）、`/book/ics?b=&t=`；`/s/<slug>/api/booking/book`、`/api/booking/manage`；會員中心「我的預約」；後台「預約」週曆 | `builder_booking_providers`、`builder_booking_services`、`builder_booking_hours`、`builder_booking_overrides`、`builder_bookings` | `create_service`、`update_service`、`list_services`、`set_weekly_hours`、`add_date_override`、`get_booking_availability`、`list_bookings`、`cancel_booking` |
 
+| `courses` | core、members（付費課程需 shop） | `/courses`、`/courses/<slug>`、`/learn/<課程>/<單元>`；`/s/<slug>/api/courses/buy`、`/api/courses/progress`；會員中心「我的課程」；後台「課程」（手動開通／撤銷、學員） | `builder_courses`、`builder_course_lessons`、`builder_course_enrollments`、`builder_course_progress` | `create_course`、`update_course`、`add_lesson`、`update_lesson`、`list_courses`、`grant_course`、`revoke_course`、`list_enrollments` |
+
 設定（`configure_module`，進草稿、發布後生效）：
+- `courses`：`ownerEmail`。區塊 `courses_list`、`course_detail`。
 - `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`。區塊 `booking_widget`。
 - `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）。區塊 `events_list`、`event_detail`。
 - `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。

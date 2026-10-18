@@ -16,6 +16,7 @@ import { verifyPreviewToken } from "./preview";
 import { cookieValue, referralCookieName } from "./shop-routes";
 import { joinWaitlist, registerEvent } from "./services/events";
 import { bookSlot, selfCancelBooking, selfRescheduleBooking } from "./services/booking";
+import { buyCourse, markLessonComplete } from "./services/courses";
 import type { OrderRow } from "./store/types";
 
 /**
@@ -180,5 +181,53 @@ export async function handleBookingManage(req: Request, rawSlug: string, store: 
     throw new ServiceError("invalid", "未知動作");
   } catch (e) {
     return siteRedirect(req, slug, "/book/manage", { err: messageOf(e) }, extra);
+  }
+}
+
+export async function handleCourseBuy(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  let back = "/courses";
+  try {
+    const g = await guard(req, slug, "courses", store, "course-buy");
+    if ("res" in g) return g.res!;
+    const { site, form, member, allowSandbox } = g;
+    const c = await store.getCourseById(site.tenant.id, form.courseId ?? "");
+    if (c) back = `/courses/${c.slug}`;
+    const r = await buyCourse(
+      { store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) },
+      {
+        tenant: site.tenant,
+        member,
+        allowSandbox,
+        data: {
+          courseId: form.courseId,
+          contact: { name: form.name ?? "", phone: form.phone ?? "" },
+          paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined,
+          couponCode: form.couponCode?.trim() || undefined,
+          referralCode: cookieValue(req, referralCookieName(site.tenant.id)) || undefined,
+        },
+      },
+    );
+    if (r.kind === "enrolled") return siteRedirect(req, slug, back, { ok: "已加入課程，可以開始上課了！" });
+    return afterClassOrder(req, store, site.tenant, r, clientFactory);
+  } catch (e) {
+    return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+export async function handleCourseProgress(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  let back = "/courses";
+  try {
+    if (!originOk(req)) return new NextResponse("forbidden origin", { status: 403 });
+    const site = await siteFor(slug, "courses", store);
+    if (!site) return new NextResponse("not found", { status: 404 });
+    const form = await formObject(req);
+    back = `/learn/${encodeURIComponent(form.course ?? "")}/${encodeURIComponent(form.lesson ?? "")}`;
+    const member = (await getSessionMember(store, site.tenant, memberTokenFromRequest(req, site.tenant)))?.member ?? null;
+    await markLessonComplete(store, site.tenant, member, form.course ?? "", form.lesson ?? "");
+    return siteRedirect(req, slug, back, { ok: "已標記完成" });
+  } catch (e) {
+    return siteRedirect(req, slug, back, { err: messageOf(e) });
   }
 }

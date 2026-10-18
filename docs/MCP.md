@@ -76,7 +76,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 12. 「來辦個活動」→ `enable_module coupons` → `create_coupon { code:"FALL15", kind:"percent", value:15, maxDiscount:200 }`；電子報 `create_broadcast` → `send_test_broadcast` → 使用者確認 → `send_broadcast { confirm: true }`。
 13. 「我要開陶藝工作坊，12/7 下午一場 8 人，一人 1200」→ `enable_module events`（付費要 shop）→ `create_event` → `create_session { capacity: 8 }` → `create_ticket_type { price: 1200 }` → `update_event { patch:{status:"published"}, confirm:true }` → `add_section events_list` → 發布。報名後 `list_registrations`、當天 `check_in`。
 14. 「我要開放一對一諮詢，60 分鐘 1500、收 500 訂金，平日 10–18 點」→ `enable_module booking`（訂金要 shop）→ `create_service { durationMin:60, price:1500, paymentMode:"deposit", depositAmount:500, status:"published", confirm:true }` → `set_weekly_hours { hours:[{weekday:1,start:"10:00",end:"18:00"}…], confirm:true }` → `add_section booking_widget` → 發布。「下週三休假」→ `add_date_override { date, kind:"closed", confirm:true }`。
-15. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
+15. 「我要賣線上課」→ `enable_module courses`（付費要 shop）→ `create_course { price }` → `add_lesson`（YouTube 未公開連結；第一課 `isPreview: true`）→ `update_course { patch:{status:"published"}, confirm:true }` → `add_section courses_list` → 發布。學員付款（`mark_order_paid` 或 PChomePay）後自動開通；送課給某人 → `grant_course { email, confirm:true }`。
+16. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
 
@@ -140,6 +141,11 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `get_booking_availability` | site:read | 某服務接下來幾天的可預約時段 |
 | `list_bookings` | attendees:read | 預約列表（聯絡資料遮罩） |
 | `cancel_booking` | attendees:write | 店家取消預約並通知客人（附取消 .ics）；已付款標待退款（`confirm: true`） |
+| `create_course` / `update_course` | classes:write | 線上課程（價格 0＝免費）；上架或改已上架課程需 publish ＋ confirm |
+| `add_lesson` / `update_lesson` | classes:write | 單元（影片只接受 YouTube／Vimeo、Markdown、附件、免費試看）；課程已上架時需 publish ＋ confirm |
+| `list_courses` | site:read | 課程、單元、開通人數 |
+| `grant_course` / `revoke_course` | attendees:write | 手動開通／撤銷會員的課程存取權（`confirm: true`；撤銷不退款） |
+| `list_enrollments` | attendees:read | 學員（email 遮罩、來源、完成單元數） |
 | `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |

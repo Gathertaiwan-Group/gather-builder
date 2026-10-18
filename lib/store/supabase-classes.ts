@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
 import { COUPON_PER_USER, COUPON_UNAVAILABLE } from "./supabase-commerce";
 import { createSupabaseBookingStore } from "./supabase-booking";
+import { createSupabaseCoursesStore } from "./supabase-courses";
 import type {
   ClassesStore,
   EventRow,
@@ -47,6 +48,7 @@ export function createSupabaseClassesStore(db: SupabaseClient): ClassesStore {
   };
   return {
     ...createSupabaseBookingStore(db),
+    ...createSupabaseCoursesStore(db),
     /* -------------------------------------------------------- events */
     async insertEvent(row) {
       return must(await db.from("builder_events").insert(row).select("*").single(), "insertEvent") as EventRow;

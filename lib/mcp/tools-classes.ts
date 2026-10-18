@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ServiceContext } from "../services/context";
 import * as events from "../services/events";
 import * as booking from "../services/booking";
+import * as courses from "../services/courses";
 
 /**
  * 第四批 MCP 工具（events／booking／courses）：只做參數宣告與轉送，邏輯全在 lib/services。
@@ -231,5 +232,108 @@ export function registerClassTools(server: McpServer, ctx: ServiceContext, wrap:
       annotations: DESTRUCTIVE,
     },
     wrap(async (a) => booking.cancelBooking(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 線上課程（courses） */
+
+  const courseFields = {
+    slug: z.string().describe("課程代稱（小寫英數與連字號），頁面在 /courses/<slug>"),
+    title: z.string(),
+    summary: z.string().optional(),
+    bodyMd: z.string().optional().describe("課程介紹 Markdown"),
+    coverUrl: z.string().optional(),
+    price: z.number().int().optional().describe("NT$；0＝免費（登入會員可直接加入）；付費需要 shop"),
+    status: z.enum(["draft", "published"]).optional().describe("published 需要 publish scope＋confirm"),
+    sort: z.number().int().optional(),
+  };
+  const lessonFields = {
+    slug: z.string(),
+    title: z.string(),
+    videoUrl: z.string().optional().describe("YouTube（含未公開連結）或 Vimeo 的 https 網址；其他網域會被拒"),
+    bodyMd: z.string().optional(),
+    attachments: z.array(z.object({ name: z.string(), url: z.string() })).optional().describe("附件下載（https）"),
+    isPreview: z.boolean().optional().describe("免費試看：未購買也看得到"),
+    status: z.enum(["draft", "published"]).optional(),
+    sort: z.number().int().optional(),
+  };
+
+  server.registerTool(
+    "create_course",
+    {
+      description: "建立線上課程（預設草稿）。接著 add_lesson 加單元，再 update_course 上架（publish＋confirm）。購買走既有訂單＋付款，付款成功才自動開通。需要 classes:write。",
+      inputSchema: { site, confirm, ...courseFields },
+      annotations: WRITE,
+    },
+    wrap(async (a) => courses.createCourse(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_course",
+    {
+      description: "修改課程（標題、介紹、封面、價格、上架／下架）。改已上架課程或上架／下架需要 publish＋confirm。已開通的學員不受價格調整影響。需要 classes:write。",
+      inputSchema: { site, courseId: z.string().optional(), slug: z.string().optional(), confirm, patch: z.object(courseFields).partial() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => courses.updateCourse(ctx, a)),
+  );
+
+  server.registerTool(
+    "add_lesson",
+    {
+      description: "為課程新增單元（影片＋文字＋附件，可設免費試看）。未開通者在伺服器端就拿不到付費單元的影片網址與內容。課程已上架時新增公開單元需要 publish＋confirm。需要 classes:write。",
+      inputSchema: { site, courseId: z.string().optional(), courseSlug: z.string().optional(), confirm, ...lessonFields },
+      annotations: WRITE,
+    },
+    wrap(async (a) => courses.addLesson(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_lesson",
+    {
+      description: "修改單元（標題、影片、內容、附件、試看、上下架、排序）。課程已上架時需要 publish＋confirm。需要 classes:write。",
+      inputSchema: { site, lessonId: z.string(), confirm, patch: z.object(lessonFields).partial() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => courses.updateLesson(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_courses",
+    {
+      description: "列出課程、單元（是否有影片、試看）與開通人數。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => courses.listCourses(ctx, a)),
+  );
+
+  server.registerTool(
+    "grant_course",
+    {
+      description: "手動為會員開通課程（不經過付款，例如線下收款、贈送）。會員要先註冊。同一人重複開通不會重複。必須 confirm: true。需要 attendees:write。",
+      inputSchema: { site, courseId: z.string().optional(), courseSlug: z.string().optional(), memberId: z.string().optional(), email: z.string().optional(), confirm },
+      annotations: WRITE,
+    },
+    wrap(async (a) => courses.grantCourse(ctx, a)),
+  );
+
+  server.registerTool(
+    "revoke_course",
+    {
+      description: "撤銷會員的課程存取權（不會自動退款）。必須 confirm: true。需要 attendees:write。",
+      inputSchema: { site, courseId: z.string().optional(), courseSlug: z.string().optional(), memberId: z.string().optional(), email: z.string().optional(), reason: z.string().optional(), confirm },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => courses.revokeCourse(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_enrollments",
+    {
+      description: "課程學員（email 遮罩）：狀態 active／revoked、來源 order／manual／free、訂單、完成單元數。需要 attendees:read。",
+      inputSchema: { site, courseId: z.string().optional(), courseSlug: z.string().optional(), status: z.enum(["active", "revoked"]).optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => courses.listEnrollments(ctx, a)),
   );
 }

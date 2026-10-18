@@ -149,6 +149,15 @@
 - 店主：後台「預約」週曆（7 欄，手機橫向捲動）、查看完整資料（留紀錄）、取消（confirm）。每日 cron 寄「現在到明天結束」的提醒，`reminder_sent_at` 條件式只寄一次。
 - 營業時間、例外日、服務上架都會立即改變線上可預約時段 → 需要 `publish` scope ＋ `confirm`（同 publish_site 門檻）。休假不會自動取消既有預約（回傳會提示）。
 
+### courses（線上課程）
+
+- 課程（價格 0＝免費，登入即可加入）→ 單元（影片、Markdown、附件、免費試看、草稿）。**影片網址白名單**（`lib/courses/video.ts`）：只接受 https 的 YouTube（含未公開、shorts、embed，轉成 `youtube-nocookie.com/embed/ID`）與 Vimeo（含未公開 hash），其他網域一律拒絕。
+- 購買必須登入會員（存取權綁會員；同一 email 在不同網站是不同會員）。已擁有或已有未逾期的待付款訂單時拒絕再買。品項 `item_kind=course`，沒有名額預留。
+- **開通只在付款成功那一次**：`onOrderPaid` 的 hook（`onCourseOrderPaid`）——線下匯款 `mark_order_paid`、PChomePay notify 權威回查已付（條件式轉換只成功一次）。**sandbox 付款不跑 hook → 不開通**。`builder_grant_enrollment`：unique (tenant, course, member)，已開通不動、已撤銷才重新開通（真 DB：併發 6 次 hook、5 次 grant 只有 1 筆真的開通）。
+- **撤銷**：訂單取消／逾期（cancel hook）撤銷「由這張訂單開通」的存取權（只動 active，冪等）；手動開通的不受影響。店主 `grant_course`／`revoke_course`（attendees:write＋confirm）。
+- **權限在伺服器端**：上課頁只用 `lessonForViewer()` 的結果渲染；未開通且不是試看單元時，回傳物件根本沒有 videoUrl／內容／附件，所以付費影片網址不會出現在 HTML（e2e 以實際 HTML 驗證）。課程介紹頁只列單元標題。上課頁 no-referrer、不載入 GA。
+- 進度：`builder_course_progress` (member, lesson) 主鍵，冪等；會員中心「我的課程」顯示完成數。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。
@@ -181,6 +190,12 @@
 | 每人折扣碼次數以正規化 email 區分 | 同一人用不同信箱（不是 +tag／gmail 加點）仍可再用一次；推薦回饋同理（另有每月上限）。 | 限定會員才能用、或加手機驗證。 |
 | 電子報分批靠人觸發 | 每次 `send_broadcast` 寄 50 封，名單大時要多次呼叫。 | 背景佇列／cron 接續。 |
 | AI 客服知識是即時組的 | 每則訊息都重組知識（商品最多 60 個、全文 30k 字），大型網站會變慢。 | 快取知識或改 RAG。 |
+| 課程類退款 | 取消已付款的報名／預約／課程只標待退款或撤銷存取權，不會自動退款。 | 金流退款 API。 |
+| 課程類不支援 ATM | 活動票／預約／課程只提供線下匯款與線上刷卡（保留時間不晚於開始時間，ATM 期限難以保證）。 | 依開始時間動態計算 ATM 期限。 |
+| sandbox 付款的報名／預約停在 held | sandbox 付款不跑付款 hook，名額會一直保留到店主取消該訂單（只發生在帶預覽簽章的測試）。 | 後台一鍵清除測試訂單。 |
+| 簽到沒有 QR 圖 | 簽到碼 10 碼（確認信、會員中心），後台輸入；沒有內建 QR 產生。 | 加 QR 產生器（不依賴外部服務）。 |
+| 每日 cron 才遞補／提醒 | Hobby cron 只能每日：候補保留過期後最晚約一天才換下一位（另有讀取時 lazy 處理）；提醒是「明天的活動／預約」。 | 升級每小時 cron 或 pg_cron。 |
+| 預約一個提供者 | 第一版前台自動用第一位啟用的提供者（資料結構與 API 都支援多位）。 | 前台選人、每位各自的時段。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點

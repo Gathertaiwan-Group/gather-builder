@@ -186,5 +186,41 @@ check(lb.bookings?.length === 1 && lb.bookings[0].status === "confirmed" && lb.b
 const acctA = await get(`/s/${slug}/account`, cookieA);
 check(acctA.body.includes("我的預約") && acctA.body.includes("一對一諮詢"), "A 的會員中心：我的預約");
 
+/* ---------------------------------------------------------------- courses */
+const ecr = await site.call("enable_module", { moduleId: "courses" });
+check(ecr.changed?.some((c) => c.id === "courses" && c.status === "enabled"), "enable_module courses", ecr.__error ?? JSON.stringify(ecr.changed));
+const crs = await site.call("create_course", { slug: "tarot", title: `E2E 塔羅入門 ${ts}`, price: 1800, summary: "從零開始" });
+check(crs.id && crs.status === "draft", "create_course（NT$1800 草稿）", crs.__error ?? "");
+const PAID_ID = `PAID${ts}`.replace(/[^A-Za-z0-9]/g, "").padEnd(11, "x").slice(0, 11);
+const l1 = await site.call("add_lesson", { courseSlug: "tarot", slug: "intro", title: "第一課（試看）", videoUrl: "https://youtu.be/FREEvid0001", isPreview: true, bodyMd: "歡迎" });
+const l2 = await site.call("add_lesson", { courseSlug: "tarot", slug: "major", title: "大阿爾克那", videoUrl: `https://www.youtube.com/watch?v=${PAID_ID}`, bodyMd: "付費內容 SECRET-BODY", attachments: [{ name: "講義", url: "https://example.com/e2e-handout.pdf" }] });
+check(l1.id && l2.videoEmbed === `https://www.youtube-nocookie.com/embed/${PAID_ID}`, "add_lesson ×2（試看＋付費，影片轉 embed）", l2.__error ?? l2.videoEmbed);
+const badVid = await site.call("add_lesson", { courseSlug: "tarot", slug: "bad", title: "x", videoUrl: "https://evil.example/v.mp4" });
+check(badVid.__error?.startsWith("[invalid]"), "白名單以外的影片網址被拒");
+const pubC = await site.call("update_course", { slug: "tarot", patch: { status: "published" }, confirm: true });
+check(pubC.status === "published", "update_course 上架（confirm）", pubC.__error ?? "");
+const buyC = await post(`/s/${slug}/api/courses/buy`, { courseId: crs.id, name: "王小明", phone: "0912000111", paymentMethod: "offline" }, cookieA);
+check(buyC.status === 303 && /\/orders\/CLS-/.test(buyC.location), "A 購買課程（線下匯款）→ 訂單頁", buyC.location.slice(0, 80) || flash(buyC.location).err);
+const orderNoC = decodeURIComponent(/\/orders\/([^?]+)/.exec(buyC.location)?.[1] ?? "");
+const lockedPage = await get(`/s/${slug}/learn/tarot/major`, cookieA);
+check(lockedPage.status === 200 && lockedPage.body.includes('data-gb="locked"'), "未付款：付費單元顯示鎖定");
+check(!lockedPage.body.includes(PAID_ID) && !lockedPage.body.includes("SECRET-BODY") && !lockedPage.body.includes("e2e-handout.pdf"), "未付款：HTML 不含付費影片網址、內容、附件");
+const detailPage = await get(`/s/${slug}/courses/tarot`, cookieA);
+check(detailPage.status === 200 && !detailPage.body.includes(PAID_ID), "課程介紹頁 HTML 不含付費影片網址");
+const previewPage = await get(`/s/${slug}/learn/tarot/intro`);
+check(previewPage.body.includes("youtube-nocookie.com/embed/FREEvid0001"), "試看單元：未登入也看得到影片");
+const paidC = await site.call("mark_order_paid", { orderNo: orderNoC, confirm: true });
+check(paidC.status === "paid", "mark_order_paid（課程）", paidC.__error ?? "");
+const acctC = await get(`/s/${slug}/account`, cookieA);
+check(acctC.body.includes("我的課程") && acctC.body.includes(`E2E 塔羅入門 ${ts}`) && acctC.body.includes('data-gb="my-course-link"'), "會員中心看得到課程");
+const openPage = await get(`/s/${slug}/learn/tarot/major`, cookieA);
+check(openPage.body.includes(`youtube-nocookie.com/embed/${PAID_ID}`) && openPage.body.includes("SECRET-BODY") && openPage.body.includes('data-gb="mark-done"'), "付款後可以上課（影片、內容、標記完成）");
+const markDone = await post(`/s/${slug}/api/courses/progress`, { course: "tarot", lesson: "major" }, cookieA);
+check(/已標記完成/.test(flash(markDone.location).ok ?? ""), "標記完成", flash(markDone.location).ok ?? flash(markDone.location).err);
+const otherPage = await get(`/s/${slug}/learn/tarot/major`, cookieB);
+check(!otherPage.body.includes(PAID_ID), "沒買的 B 仍看不到付費影片網址");
+const enr = await site.call("list_enrollments", { courseSlug: "tarot" });
+check(enr.enrollments?.length === 1 && enr.enrollments[0].source === "order" && enr.enrollments[0].lessonsCompleted === 1 && enr.enrollments[0].member.includes("＊"), "list_enrollments：1 位（訂單開通、完成 1、email 遮罩）", enr.__error ?? JSON.stringify(enr.enrollments?.[0]));
+
 await site.close();
 done();

@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import type { ReservationBridge } from "./memory-commerce";
 import type {
+  CourseRow,
+  EnrollmentRow,
+  LessonRow,
   BookingReservation,
   BookingRow,
   HoursRow,
@@ -42,6 +45,10 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
   let hours: HoursRow[] = [];
   const overrides = new Map<string, OverrideRow>();
   const bookings = new Map<string, BookingRow>();
+  const courses = new Map<string, CourseRow>();
+  const lessons = new Map<string, LessonRow>();
+  const enrollments = new Map<string, EnrollmentRow>();
+  const progress = new Map<string, { tenant_id: string; course_id: string; lesson_id: string; member_id: string; completed_at: string }>();
   const liveBooking = (b: BookingRow) => b.status === "held" || b.status === "confirmed";
   const clash = (providerId: string, startMs: number, blockMs: number, exceptId?: string) =>
     [...bookings.values()].some((b) => b.provider_id === providerId && b.id !== exceptId && liveBooking(b) && new Date(b.starts_at).getTime() < blockMs && startMs < new Date(b.block_until).getTime());
@@ -453,6 +460,91 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
     },
     async listBookingsStartingBetween(fromIso, toIso, limit) {
       return clone([...bookings.values()].filter((b) => b.status === "confirmed" && b.starts_at >= fromIso && b.starts_at < toIso).slice(0, limit));
+    },
+
+    /* ------------------------------------------------ courses */
+    async insertCourse(row) {
+      if ([...courses.values()].some((c) => c.tenant_id === row.tenant_id && c.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      const r: CourseRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      courses.set(r.id, r);
+      return clone(r);
+    },
+    async updateCourse(tenantId, id, patch) {
+      const c = own(courses, tenantId, id);
+      if (!c) return null;
+      const next = { ...c, ...clone(patch), updated_at: now() };
+      courses.set(id, next);
+      return clone(next);
+    },
+    async getCourseById(tenantId, id) {
+      return clone(own(courses, tenantId, id) ?? null);
+    },
+    async getCourseBySlug(tenantId, slug) {
+      return clone([...courses.values()].find((c) => c.tenant_id === tenantId && c.slug === slug) ?? null);
+    },
+    async listCourses(tenantId, opts) {
+      return clone([...courses.values()].filter((c) => c.tenant_id === tenantId && (!opts.status || c.status === opts.status)).sort((a, b) => a.sort - b.sort || a.created_at.localeCompare(b.created_at)));
+    },
+    async insertLesson(row) {
+      if ([...lessons.values()].some((l) => l.course_id === row.course_id && l.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      const r: LessonRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      lessons.set(r.id, r);
+      return clone(r);
+    },
+    async updateLesson(tenantId, id, patch) {
+      const l = own(lessons, tenantId, id);
+      if (!l) return null;
+      const next = { ...l, ...clone(patch), updated_at: now() };
+      lessons.set(id, next);
+      return clone(next);
+    },
+    async getLesson(tenantId, id) {
+      return clone(own(lessons, tenantId, id) ?? null);
+    },
+    async getLessonBySlug(tenantId, courseId, slug) {
+      return clone([...lessons.values()].find((l) => l.tenant_id === tenantId && l.course_id === courseId && l.slug === slug) ?? null);
+    },
+    async listLessons(tenantId, courseIds) {
+      return clone([...lessons.values()].filter((l) => l.tenant_id === tenantId && courseIds.includes(l.course_id)).sort((a, b) => a.sort - b.sort || a.created_at.localeCompare(b.created_at)));
+    },
+    async grantEnrollment(tenantId, input) {
+      const hit = [...enrollments.values()].find((e) => e.tenant_id === tenantId && e.course_id === input.courseId && e.member_id === input.memberId);
+      if (hit && hit.status === "active") return { id: hit.id, granted: false };
+      const base = hit ?? { id: randomUUID(), tenant_id: tenantId, course_id: input.courseId, member_id: input.memberId, created_at: now() };
+      const row: EnrollmentRow = { ...base, status: "active", source: input.source, order_id: input.orderId, granted_at: now(), granted_by: input.by, revoked_at: null, revoked_by: null, revoke_reason: null, updated_at: now() } as EnrollmentRow;
+      enrollments.set(row.id, row);
+      return { id: row.id, granted: true };
+    },
+    async revokeEnrollment(tenantId, where, patch) {
+      const out: EnrollmentRow[] = [];
+      for (const e of enrollments.values()) {
+        if (e.tenant_id !== tenantId || e.status !== "active") continue;
+        if (where.id && e.id !== where.id) continue;
+        if (where.orderId && e.order_id !== where.orderId) continue;
+        if (where.courseId && e.course_id !== where.courseId) continue;
+        if (where.memberId && e.member_id !== where.memberId) continue;
+        if (!where.id && !where.orderId && !(where.courseId && where.memberId)) continue;
+        const next: EnrollmentRow = { ...e, status: "revoked", revoked_at: now(), revoked_by: patch.by, revoke_reason: patch.reason, updated_at: now() };
+        enrollments.set(e.id, next);
+        out.push(clone(next));
+      }
+      return out;
+    },
+    async getEnrollment(tenantId, courseId, memberId) {
+      return clone([...enrollments.values()].find((e) => e.tenant_id === tenantId && e.course_id === courseId && e.member_id === memberId) ?? null);
+    },
+    async listEnrollments(tenantId, opts) {
+      const rows = [...enrollments.values()]
+        .filter((e) => e.tenant_id === tenantId && (!opts.courseId || e.course_id === opts.courseId) && (!opts.memberId || e.member_id === opts.memberId) && (!opts.status || e.status === opts.status))
+        .sort((a, b) => b.granted_at.localeCompare(a.granted_at));
+      return page(rows, opts.limit, opts.offset);
+    },
+    async markLessonDone(row) {
+      const k = `${row.member_id}|${row.lesson_id}`;
+      if (!progress.has(k)) progress.set(k, { ...row, completed_at: now() });
+    },
+    async listProgress(tenantId, memberId, courseId) {
+      return [...progress.values()].filter((p) => p.tenant_id === tenantId && p.member_id === memberId && p.course_id === courseId).map((p) => ({ lesson_id: p.lesson_id, completed_at: p.completed_at }));
     },
 
     async insertPiiLog(row) {

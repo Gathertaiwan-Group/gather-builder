@@ -9,6 +9,7 @@ import { ProductDetail, ProductGrid } from "./shop/sections";
 import { NewsletterSignup } from "./newsletter/sections";
 import { EventDetail, EventsList } from "./events/sections";
 import { BookingWidget } from "./booking/sections";
+import { CourseDetail, CoursesList } from "./courses/sections";
 
 /** 區塊類型 → 渲染元件。新增區塊類型時在這裡註冊（tests 會檢查與 manifest 一致）。 */
 export const SECTION_RENDERERS: Record<string, SectionComponent> = {
@@ -30,4 +31,6 @@ export const SECTION_RENDERERS: Record<string, SectionComponent> = {
   events_list: EventsList,
   event_detail: EventDetail,
   booking_widget: BookingWidget,
+  courses_list: CoursesList,
+  course_detail: CourseDetail,
 };

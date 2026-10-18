@@ -11,6 +11,7 @@ const TABS = [
   { path: "/ai-chat", label: "AI 客服" },
   { path: "/events", label: "活動" },
   { path: "/booking", label: "預約" },
+  { path: "/courses", label: "課程" },
 ];
 
 export function TenantTabs({ slug, active, name }: { slug: string; active: string; name?: string }) {

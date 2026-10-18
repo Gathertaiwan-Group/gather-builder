@@ -265,6 +265,61 @@ export interface BookingRow {
   updated_at: string;
 }
 
+/* ------------------------------------------------------------------ courses */
+
+export interface CourseRow {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  title: string;
+  summary: string | null;
+  body_md: string;
+  cover_url: string | null;
+  price: number;
+  status: "draft" | "published";
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LessonAttachment {
+  name: string;
+  url: string;
+}
+
+export interface LessonRow {
+  id: string;
+  tenant_id: string;
+  course_id: string;
+  slug: string;
+  title: string;
+  video_url: string | null;
+  body_md: string;
+  attachments: LessonAttachment[];
+  is_preview: boolean;
+  status: "draft" | "published";
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EnrollmentRow {
+  id: string;
+  tenant_id: string;
+  course_id: string;
+  member_id: string;
+  status: "active" | "revoked";
+  source: "order" | "manual" | "free";
+  order_id: string | null;
+  granted_at: string;
+  granted_by: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  revoke_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /* ------------------------------------------------------------------ Store 方法 */
 
 export interface ClassesStore {
@@ -332,6 +387,27 @@ export interface ClassesStore {
   listExpiredHeldOrderIdsForProvider(tenantId: string, providerId: string, nowIso: string): Promise<string[]>;
   /** 所有租戶：開始時間在 [fromIso, toIso) 的已確認預約（提醒 cron） */
   listBookingsStartingBetween(fromIso: string, toIso: string, limit: number): Promise<BookingRow[]>;
+
+  // courses
+  insertCourse(row: Omit<CourseRow, "id" | "created_at" | "updated_at">): Promise<CourseRow>;
+  updateCourse(tenantId: string, id: string, patch: Partial<Omit<CourseRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<CourseRow | null>;
+  getCourseById(tenantId: string, id: string): Promise<CourseRow | null>;
+  getCourseBySlug(tenantId: string, slug: string): Promise<CourseRow | null>;
+  listCourses(tenantId: string, opts: { status?: CourseRow["status"] }): Promise<CourseRow[]>;
+  insertLesson(row: Omit<LessonRow, "id" | "created_at" | "updated_at">): Promise<LessonRow>;
+  updateLesson(tenantId: string, id: string, patch: Partial<Omit<LessonRow, "id" | "tenant_id" | "course_id" | "created_at" | "updated_at">>): Promise<LessonRow | null>;
+  getLesson(tenantId: string, id: string): Promise<LessonRow | null>;
+  getLessonBySlug(tenantId: string, courseId: string, slug: string): Promise<LessonRow | null>;
+  listLessons(tenantId: string, courseIds: string[]): Promise<LessonRow[]>;
+  /** builder_grant_enrollment：冪等開通（已開通回 granted=false；已撤銷會重新開通） */
+  grantEnrollment(tenantId: string, input: { courseId: string; memberId: string; source: EnrollmentRow["source"]; orderId: string | null; by: string }): Promise<{ id: string; granted: boolean }>;
+  /** 條件式撤銷（active → revoked）；可限定 orderId（訂單取消只撤銷「由這張訂單開通」的） */
+  revokeEnrollment(tenantId: string, where: { id?: string; orderId?: string; courseId?: string; memberId?: string }, patch: { by: string; reason: string }): Promise<EnrollmentRow[]>;
+  getEnrollment(tenantId: string, courseId: string, memberId: string): Promise<EnrollmentRow | null>;
+  listEnrollments(tenantId: string, opts: { courseId?: string; memberId?: string; status?: EnrollmentRow["status"]; limit: number; offset: number }): Promise<{ rows: EnrollmentRow[]; total: number }>;
+  /** 完成單元（冪等：同一會員同一單元只一列） */
+  markLessonDone(row: { tenant_id: string; course_id: string; lesson_id: string; member_id: string }): Promise<void>;
+  listProgress(tenantId: string, memberId: string, courseId: string): Promise<{ lesson_id: string; completed_at: string }[]>;
 
   // 課程類訂單（活動票／預約／課程）
   /** builder_place_class_order：訂單＋品項＋優惠券＋名額預留在同一交易；任一失敗整筆不成立 */

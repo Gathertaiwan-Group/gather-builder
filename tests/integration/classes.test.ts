@@ -10,6 +10,7 @@ import { publishSite } from "@/lib/services/publish";
 import { cancelOrder, expireIfDue, markOrderPaid } from "@/lib/services/orders";
 import { createEvent, createSession, createTicketType, joinWaitlist, registerEvent } from "@/lib/services/events";
 import { bookSlot, createService, setWeeklyHours } from "@/lib/services/booking";
+import { addLesson, buyCourse, createCourse, lessonForViewer, onCourseOrderPaid, updateCourse } from "@/lib/services/courses";
 import { addDays, taipeiDateOf } from "@/lib/booking/availability";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
@@ -36,7 +37,7 @@ describe.skipIf(!enabled)("第四批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（events＋shop，is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["events", "shop", "booking"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["events", "shop", "booking", "courses"], test: true });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "IC" } });
     await publishSite(ctx, { site: slug, confirm: true });
     await createEvent(ctx, { site: slug, slug: "race", title: "搶位", status: "published", confirm: true });
@@ -136,5 +137,37 @@ describe.skipIf(!enabled)("第四批 Supabase 實作（整合）", () => {
     await cancelOrder(ctx, { site: slug, orderNo: r.order.order_no, confirm: true });
     expect((await store.getBooking(t.id, r.bookingId!))!.status).toBe("cancelled");
     await expect(bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("09:00"), contact: who("pay2"), paymentMethod: "offline" } })).resolves.toMatchObject({ kind: "order" });
+  });
+
+  it("courses：付款成功才開通；併發 6 次觸發付款 hook 只開通 1 次；取消訂單撤銷；未開通拿不到影片網址", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    await createCourse(ctx, { site: slug, slug: "itc", title: "整合課", price: 900 });
+    await addLesson(ctx, { site: slug, courseSlug: "itc", slug: "l1", title: "付費單元", videoUrl: "https://youtu.be/ITpaidVID01" });
+    await updateCourse(ctx, { site: slug, slug: "itc", patch: { status: "published" }, confirm: true });
+    const m = (await store.insertMember({ tenant_id: t.id, email: `stu-${ts}@example.com`, password_hash: "x", name: "學生", phone: null }))!;
+    const c = (await store.getCourseBySlug(t.id, "itc"))!;
+    const r = await buyCourse(deps, { tenant: t, member: m, data: { courseId: c.id, contact: { name: "學生", phone: "0912345678" }, paymentMethod: "offline" } });
+    if (r.kind !== "order") throw new Error("expected order");
+    const locked = (await lessonForViewer(store, t, "itc", "l1", m))!;
+    expect(JSON.stringify(locked)).not.toContain("ITpaidVID01");
+    await markOrderPaid(ctx, { site: slug, orderNo: r.order.order_no, confirm: true });
+    const paid = (await store.getOrderById(t.id, r.order.id))!;
+    await Promise.all(Array.from({ length: 6 }, () => onCourseOrderPaid({ store, baseUrl: "http://itest" }, t, paid)));
+    const db = createServiceClient();
+    const rows = await db.from("builder_course_enrollments").select("id, status, source, order_id").eq("tenant_id", t.id).eq("member_id", m.id);
+    expect(rows.data).toHaveLength(1);
+    expect(rows.data![0]).toMatchObject({ status: "active", source: "order", order_id: r.order.id });
+    // 併發 grant 也只有一筆「真的開通」
+    const g = await Promise.all(Array.from({ length: 5 }, () => store.grantEnrollment(t.id, { courseId: c.id, memberId: m.id, source: "order", orderId: r.order.id, by: "it" })));
+    expect(g.filter((x) => x.granted)).toHaveLength(0);
+    // 撤銷後併發重新開通：只有一筆 granted=true
+    await store.revokeEnrollment(t.id, { courseId: c.id, memberId: m.id }, { by: "it", reason: "race" });
+    const g2 = await Promise.all(Array.from({ length: 5 }, () => store.grantEnrollment(t.id, { courseId: c.id, memberId: m.id, source: "order", orderId: r.order.id, by: "it" })));
+    expect(g2.filter((x) => x.granted)).toHaveLength(1);
+    expect((await lessonForViewer(store, t, "itc", "l1", m))!.lesson.videoUrl).toContain("ITpaidVID01");
+    await cancelOrder(ctx, { site: slug, orderNo: r.order.order_no, confirm: true });
+    expect((await store.getEnrollment(t.id, c.id, m.id))!.status).toBe("revoked");
+    expect((await lessonForViewer(store, t, "itc", "l1", m))!.allowed).toBe(false);
+    expect(await store.revokeEnrollment(t.id, { orderId: r.order.id }, { by: "it", reason: "again" })).toEqual([]);
   });
 });
