@@ -13,6 +13,7 @@ import type { InvoiceSettings } from "@/modules/invoice/manifest";
 import { releaseExpiredHolds } from "./orders";
 import { resolveShipping, type ShippingResolution } from "./shipping";
 import { applyPromotions } from "./promotions";
+import type { Mailer } from "../mail";
 
 /* ================================================================== 共用 */
 
@@ -359,7 +360,7 @@ export async function paymentAvailability(store: Store, tenant: TenantRow, setti
 
 export interface CheckoutDeps {
   store: Store;
-  sendMail?: (to: string, subject: string, text: string) => Promise<void>;
+  sendMail?: Mailer;
   baseUrl: string;
 }
 
@@ -493,13 +494,13 @@ export function orderPageUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, o
   return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/orders/${encodeURIComponent(orderNo)}${accessKey ? `?k=${encodeURIComponent(accessKey)}` : ""}`;
 }
 
-export async function mailSafe(deps: { sendMail?: CheckoutDeps["sendMail"] }, to: string, subject: string, body: string) {
+export async function mailSafe(deps: { sendMail?: CheckoutDeps["sendMail"] }, to: string, subject: string, body: string, attachments?: Parameters<Mailer>[3]) {
   if (!deps.sendMail) {
     console.log(`[shop] RESEND_API_KEY 未設定，未寄出「${subject}」`);
     return;
   }
   try {
-    await deps.sendMail(to, subject, body);
+    await (attachments?.length ? deps.sendMail(to, subject, body, attachments) : deps.sendMail(to, subject, body));
   } catch (e) {
     console.error("[shop] 寄信失敗", subject, e instanceof Error ? e.message : e);
   }

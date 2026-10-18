@@ -9,6 +9,8 @@ import { configureModule } from "@/lib/services/modules";
 import { publishSite } from "@/lib/services/publish";
 import { cancelOrder, expireIfDue, markOrderPaid } from "@/lib/services/orders";
 import { createEvent, createSession, createTicketType, joinWaitlist, registerEvent } from "@/lib/services/events";
+import { bookSlot, createService, setWeeklyHours } from "@/lib/services/booking";
+import { addDays, taipeiDateOf } from "@/lib/booking/availability";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
 
@@ -34,7 +36,7 @@ describe.skipIf(!enabled)("第四批 Supabase 實作（整合）", () => {
 
   it("建立測試網站（events＋shop，is_test）", async () => {
     process.env.PREVIEW_SECRET ??= "itest-preview-secret-xxxx";
-    await createSite(ctx, { slug, name: slug, modules: ["events", "shop"], test: true });
+    await createSite(ctx, { slug, name: slug, modules: ["events", "shop", "booking"], test: true });
     await configureModule(ctx, { site: slug, moduleId: "shop", config: { offlineTransfer: { enabled: true, instructions: "test" }, orderPrefix: "IC" } });
     await publishSite(ctx, { site: slug, confirm: true });
     await createEvent(ctx, { site: slug, slug: "race", title: "搶位", status: "published", confirm: true });
@@ -101,5 +103,38 @@ describe.skipIf(!enabled)("第四批 Supabase 實作（整合）", () => {
     expect((await store.cancelOrder(t.id, r.order.id, ["paid", "pending_payment"], "x")).transitioned).toBe(false);
     const db = createServiceClient();
     expect(Number((await db.rpc("builder_release_order_reservations", { p_tenant: t.id, p_order: r.order.id })).data)).toBe(0);
+  });
+
+  it("booking：併發 6 筆搶同一時段（不收費）→ 只成功 1 筆；DB 第二道防線（partial unique）也擋得住", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const sv = await createService(ctx, { site: slug, slug: "race", name: "搶時段", durationMin: 60, bufferMin: 10, status: "published", confirm: true });
+    await setWeeklyHours(ctx, { site: slug, hours: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, start: "09:00", end: "18:00" })), confirm: true });
+    const date = addDays(taipeiDateOf(new Date()), 4);
+    const at = (hm: string) => new Date(`${date}T${hm}:00+08:00`).toISOString();
+    const r = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("10:00"), contact: who(`b${i}`) } })));
+    expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    for (const f of r.filter((x) => x.status === "rejected")) expect(String((f as PromiseRejectedResult).reason.message)).toMatch(/預約走了|無法預約/);
+    // 部分重疊（10:30 與 10:00–11:10 重疊）在 DB 層也擋
+    const p = (await store.listProviders(t.id))[0]!;
+    await expect(store.reserveBookingFree(t.id, { provider_id: p.id, service_id: sv.id, starts_at: at("10:30"), ends_at: at("11:30"), block_until: at("11:40"), price: 0, amount_due: 0, contact: who("x"), member_id: null, note: null })).rejects.toThrow(/預約走了/);
+    // 併發改期到同一個空時段 → 只成功一筆
+    const b1 = await bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("13:00"), contact: who("m1") } });
+    const b2 = await bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("15:00"), contact: who("m2") } });
+    if (b1.kind !== "confirmed" || b2.kind !== "confirmed") throw new Error("expected confirmed");
+    const mv = await Promise.allSettled([store.rescheduleBooking(t.id, b1.booking.id, at("16:30"), at("17:30"), at("17:40")), store.rescheduleBooking(t.id, b2.booking.id, at("16:30"), at("17:30"), at("17:40"))]);
+    expect(mv.filter((x) => x.status === "fulfilled" && x.value === true)).toHaveLength(1);
+  });
+
+  it("booking：付費（全額）預約的保留在取消訂單時同交易釋放", async () => {
+    const t = (await store.getTenantBySlug(slug))!;
+    const sv = await createService(ctx, { site: slug, slug: "paid", name: "付費", durationMin: 30, price: 800, paymentMode: "full", status: "published", confirm: true });
+    const date = addDays(taipeiDateOf(new Date()), 5);
+    const at = (hm: string) => new Date(`${date}T${hm}:00+08:00`).toISOString();
+    const r = await bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("09:00"), contact: who("pay"), paymentMethod: "offline" } });
+    if (r.kind !== "order") throw new Error("expected order");
+    expect((await store.getBooking(t.id, r.bookingId!))!.status).toBe("held");
+    await cancelOrder(ctx, { site: slug, orderNo: r.order.order_no, confirm: true });
+    expect((await store.getBooking(t.id, r.bookingId!))!.status).toBe("cancelled");
+    await expect(bookSlot(deps, { tenant: t, member: null, data: { serviceId: sv.id, startsAt: at("09:00"), contact: who("pay2"), paymentMethod: "offline" } })).resolves.toMatchObject({ kind: "order" });
   });
 });

@@ -8,6 +8,7 @@ import { runCancelHooks, runPaidHooks } from "./order-hooks";
 import "./referral";
 // 第四批：活動報名（付款確認報名、取消後候補遞補）
 import "./events";
+import "./booking";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";

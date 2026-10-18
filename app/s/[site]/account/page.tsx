@@ -15,6 +15,7 @@ import { headers } from "next/headers";
 import { baseUrlFrom } from "@/lib/runtime";
 import { INVOICE_LABEL, SHIPMENT_LABEL } from "@/lib/order-labels";
 import { memberRegistrations } from "@/lib/services/events";
+import { manageUrl, memberBookings } from "@/lib/services/booking";
 import { fmtTaipei } from "@/lib/services/class-orders";
 
 export const dynamic = "force-dynamic";
@@ -43,6 +44,7 @@ export default async function AccountPage(props: Props) {
   );
   const action = (p: string) => `/s/${site.tenant.slug}/api/account/${p}`;
   const myRegs = moduleActive(site, "events") ? await memberRegistrations(store, site.tenant, member) : [];
+  const myBookings = moduleActive(site, "booking") ? await memberBookings(store, site.tenant, member) : [];
   const myCode = moduleActive(site, "referral") ? await getOrCreateReferralCode(store, site.tenant, member) : null;
   return (
     <SiteShell ctx={ctx}>
@@ -110,6 +112,30 @@ export default async function AccountPage(props: Props) {
                       {session.status === "cancelled" ? "（場次已取消）" : ""}
                     </span>
                     {code && <span className="gb-muted w-full text-xs">簽到碼 <span data-gb="checkin-code">{code}</span></span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        {moduleActive(site, "booking") && (
+          <div className="gb-card mb-6 p-5" data-gb="my-bookings">
+            <h2 className="m-0 mb-3 text-lg font-bold">我的預約</h2>
+            {myBookings.length === 0 ? (
+              <p className="gb-muted m-0 text-sm">還沒有預約。</p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
+                {myBookings.map(({ booking: b, service }) => (
+                  <li key={b.id} className="flex flex-wrap justify-between gap-2 border-t pt-2" style={{ borderColor: "color-mix(in srgb, var(--gb-text) 10%, transparent)" }}>
+                    <span>{service?.name ?? "預約"}</span>
+                    <span>
+                      {fmtTaipei(b.starts_at)} · {b.status === "confirmed" ? "已確認" : b.status === "held" ? "待付款" : "已取消"}
+                    </span>
+                    {(b.status === "confirmed" || b.status === "held") && (
+                      <a className="w-full text-xs" href={manageUrl(baseUrl, site.tenant, b)}>
+                        管理（取消／改期）
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>

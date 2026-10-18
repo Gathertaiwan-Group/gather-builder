@@ -138,6 +138,17 @@
 - 提醒：每日 cron（`/api/cron/expire-orders`，台北 03:17）寄「現在到明天結束」之間開始的場次；`reminder_sent_at` 條件式更新，cron 重跑或併發都只寄一次。
 - 取消場次（`cancel_session` confirm）：未付款保留 → 取消訂單；已付款 → 報名取消並標 `refund_required`（不自動退款）；免費／候補 → 取消；全部寄通知。
 
+### booking（時段預約）
+
+- 服務（時長、緩衝、價格、`payment_mode` none 現場付／deposit 訂金／full 全額）→ 服務提供者（第一版自動建「店主」一人；表與 API 都帶 provider_id，可多位）→ 每週時段（台北分鐘數，一天可多段）＋例外日（closed 休假蓋掉當天、open 加開；同日 closed＋open＝只開加開）。
+- **可預約時段是純函式** `lib/booking/availability.ts`（`computeAvailability`／`isBookable`）：時段格子＝每段營業時間從開始每 `slotStepMinutes` 一格且服務本身在營業時間內；扣掉 `now + minLeadMinutes` 之前、`maxAdvanceDays` 之後；`[start, start+時長+緩衝)` 不可與既有有效預約的 `[starts_at, block_until)` 重疊（block_until＝結束＋該筆緩衝，所以跨午夜的預約與前一筆的緩衝都會擋到）。單元測試在 TZ=America/Los_Angeles／Asia/Tokyo 都跑過（與伺服器時區無關）。
+- **同時段只能一筆（DB 保證）**：`builder_reserve_booking` 在交易內 `for update` 鎖提供者列，再用內建 `tstzrange(...) && tstzrange(...)` 判斷重疊（不需要 btree_gist extension，不動專案層級設定）；另有 `(provider_id, starts_at)` partial unique index 當第二道防線。真 DB 測：6 筆併發搶同時段只成功 1 筆、部分重疊也擋、併發改期到同一空時段只成功 1 筆。
+- 建立：先釋放該提供者逾期未付的保留（`expireIfDue`，線上付款單先權威回查）→ 用純函式確認時段可約 → 不收費就直接 confirmed，收訂金／全額走 `placeClassOrder`（金額＝訂金或全額，保留不晚於開始時間），付款成功 hook 才 confirmed。
+- 確認信附 `.ics`（`lib/booking/ics.ts`：RFC 5545、UTC 時間、跳脫、75 octets 折行、CRLF；取消時 METHOD:CANCEL 同 UID）；`mail.ts` 的 Mailer 第 4 個參數支援附件（Resend attachments，base64）。另提供 `/s/<slug>/book/ics?b=&t=`（簽章連結）下載。
+- 自助管理：`/s/<slug>/book/manage?b=<id>&t=HMAC`（不存原文；頁面 no-referrer、不載入 GA）。開始前 `cancelDeadlineHours`（預設 24）以前可取消／改期；已付款取消 → 標 `refund_required`（不自動退款），未付款保留 → 取消訂單。改期用 `builder_reschedule_booking`（鎖提供者、排除自己判斷重疊），會重置提醒。
+- 店主：後台「預約」週曆（7 欄，手機橫向捲動）、查看完整資料（留紀錄）、取消（confirm）。每日 cron 寄「現在到明天結束」的提醒，`reminder_sent_at` 條件式只寄一次。
+- 營業時間、例外日、服務上架都會立即改變線上可預約時段 → 需要 `publish` scope ＋ `confirm`（同 publish_site 門檻）。休假不會自動取消既有預約（回傳會提示）。
+
 ## 公開 POST 端點
 
 - JSON 端點（電子報訂閱、AI 客服、聯絡表單、LINE 點擊、購物車試算）一律經 `guardJsonPost()`（`lib/public-post.ts`）：同源 Origin、`Content-Type: application/json`（拒絕 text/plain／form 等不需 CORS 預檢的簡單請求）、長度上限（2026-10 審查 H-2／M-5）。

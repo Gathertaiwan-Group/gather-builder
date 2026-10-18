@@ -65,7 +65,10 @@ modules/<id>/
 
 | `events` | core（付費票需 shop；會員選用） | `/events`、`/events/<slug>`（`?offer=&t=` 候補遞補）；`/s/<slug>/api/events/register`、`/api/events/waitlist`；會員中心「我的報名」；後台「活動」（名單遮罩、查看、CSV、簽到、取消場次） | `builder_events`、`builder_event_sessions`、`builder_event_ticket_types`、`builder_event_registrations`、`builder_event_waitlist`、`builder_pii_access_log` | `create_event`、`update_event`、`create_session`、`create_ticket_type`、`list_events`、`list_registrations`、`check_in`、`cancel_session` |
 
+| `booking` | core（線上收訂金／全額需 shop） | `/book`（`?service=&from=&slot=`）、`/book/manage?b=&t=`（自助取消／改期）、`/book/ics?b=&t=`；`/s/<slug>/api/booking/book`、`/api/booking/manage`；會員中心「我的預約」；後台「預約」週曆 | `builder_booking_providers`、`builder_booking_services`、`builder_booking_hours`、`builder_booking_overrides`、`builder_bookings` | `create_service`、`update_service`、`list_services`、`set_weekly_hours`、`add_date_override`、`get_booking_availability`、`list_bookings`、`cancel_booking` |
+
 設定（`configure_module`，進草稿、發布後生效）：
+- `booking`：`minLeadMinutes`（預設 120）、`maxAdvanceDays`（60）、`slotStepMinutes`（30）、`cancelDeadlineHours`（24）、`location`、`ownerEmail`、`allowGuest`、`reminders`。區塊 `booking_widget`。
 - `events`：`waitlistOfferHours`（1–72，預設 24）、`reminders`（預設 true）、`ownerEmail`（不填用 shop 的）、`allowGuest`（預設 true）。區塊 `events_list`、`event_detail`。
 - `invoice`：`issueMode`（`manual` 預設／`auto_on_paid`）、`allowMobileBarcode`、`allowCertificate`、`allowDonation`、`allowB2B`、`defaultLoveCode`。憑證不在設定裡。沒有已驗證憑證 → `pending_setup`。
 - `shipping`：`methods[]`（`id`、`type` cvs／home／pickup／manual、`provider` ecpay／manual、`subType`、`label`、`fee`、`freeThreshold`、`instructions`）、`sender`（使用綠界時必填）、`goodsName`。`methods` 至少一種，否則 `pending_setup`。

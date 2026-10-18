@@ -1,3 +1,4 @@
+import type { Mailer } from "../mail";
 import type { Store, TenantRow, TenantModuleRow } from "../store/types";
 import type { Actor } from "../tokens";
 import type { Scope } from "../scopes";
@@ -14,7 +15,7 @@ export interface ServiceContext {
   baseUrl: string;
   previewSecret: string;
   /** 寄信（Resend）；沒設 RESEND_API_KEY 時為 undefined，呼叫端略過不報錯 */
-  sendMail?: (to: string, subject: string, text: string) => Promise<void>;
+  sendMail?: Mailer;
 }
 
 export { ServiceError, type ServiceErrorCode } from "../errors";

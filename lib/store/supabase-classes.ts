@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ServiceError, type ServiceErrorCode } from "../errors";
+import { ServiceError } from "../errors";
 import { COUPON_PER_USER, COUPON_UNAVAILABLE } from "./supabase-commerce";
+import { createSupabaseBookingStore } from "./supabase-booking";
 import type {
   ClassesStore,
   EventRow,
@@ -13,23 +14,8 @@ import type {
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 
-/** SQL raise 'builder: <key>' → 給客人／agent 看的訊息（memory store 共用同一份） */
-export const RESERVE_ERRORS: Record<string, { code: ServiceErrorCode; message: string }> = {
-  "session not found": { code: "not_found", message: "找不到這個場次" },
-  "session closed": { code: "invalid", message: "這個場次目前不開放報名" },
-  "session started": { code: "invalid", message: "活動已開始，無法報名" },
-  "ticket unavailable": { code: "invalid", message: "這個票種目前不提供" },
-  "ticket not on sale": { code: "invalid", message: "這個票種不在販售期間" },
-  "qty limit": { code: "invalid", message: "超過每筆報名的張數上限" },
-  "price changed": { code: "conflict", message: "票價已變更，請重新整理頁面再報名" },
-  "sold out": { code: "conflict", message: "名額已滿，報名未成立（可以登記候補）" },
-  "ticket sold out": { code: "conflict", message: "這個票種已售完，報名未成立" },
-  "offer invalid": { code: "conflict", message: "候補保留已過期或無效，請重新登記候補" },
-  "slot taken": { code: "conflict", message: "這個時段剛被預約走了，請選擇其他時段" },
-  "provider unavailable": { code: "invalid", message: "這位服務人員目前不開放預約" },
-  "service unavailable": { code: "invalid", message: "這個服務目前不開放預約" },
-  "booking not found": { code: "not_found", message: "找不到這筆預約" },
-};
+export { RESERVE_ERRORS } from "./reserve-errors";
+import { RESERVE_ERRORS } from "./reserve-errors";
 
 function raiseMapped(message: string, what: string): never {
   const m = /builder: ([a-z -]+)/.exec(message);
@@ -60,6 +46,7 @@ export function createSupabaseClassesStore(db: SupabaseClient): ClassesStore {
     return { rows: (r.data ?? []) as T[], total: r.count ?? 0 };
   };
   return {
+    ...createSupabaseBookingStore(db),
     /* -------------------------------------------------------- events */
     async insertEvent(row) {
       return must(await db.from("builder_events").insert(row).select("*").single(), "insertEvent") as EventRow;

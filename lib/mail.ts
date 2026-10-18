@@ -14,20 +14,30 @@ export function isReservedTestAddress(to: string): boolean {
   );
 }
 
+/** 附件（例如預約的 .ics）：content 為原文字串，寄出時轉 base64 */
+export interface MailAttachment {
+  filename: string;
+  content: string;
+  contentType?: string;
+}
+/** 第 4 個參數（附件）可省略；舊的 3 參數呼叫照常 */
+export type Mailer = (to: string, subject: string, text: string, attachments?: MailAttachment[]) => Promise<void>;
+
 /** Resend 寄信；沒設 RESEND_API_KEY 回 undefined（呼叫端直接略過，不報錯） */
-export function getMailer(): ((to: string, subject: string, text: string) => Promise<void>) | undefined {
+export function getMailer(): Mailer | undefined {
   const key = process.env.RESEND_API_KEY;
   if (!key) return undefined;
   const from = process.env.RESEND_FROM ?? "Gather Builder <onboarding@resend.dev>";
-  return async (to, subject, text) => {
+  return async (to, subject, text, attachments) => {
     if (isReservedTestAddress(to)) {
       console.log(`[mail] 測試保留網域，不寄出「${subject.slice(0, 60)}」`);
       return;
     }
+    const files = attachments?.length ? attachments.map((a) => ({ filename: a.filename, content: Buffer.from(a.content, "utf8").toString("base64"), ...(a.contentType ? { content_type: a.contentType } : {}) })) : undefined;
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify({ from, to: [to], subject, text }),
+      body: JSON.stringify({ from, to: [to], subject, text, ...(files ? { attachments: files } : {}) }),
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`Resend ${res.status}: ${(await res.text()).slice(0, 200)}`);

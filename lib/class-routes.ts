@@ -15,6 +15,7 @@ import { formObject, memberTokenFromRequest, messageOf, originOk, siteRedirect }
 import { verifyPreviewToken } from "./preview";
 import { cookieValue, referralCookieName } from "./shop-routes";
 import { joinWaitlist, registerEvent } from "./services/events";
+import { bookSlot, selfCancelBooking, selfRescheduleBooking } from "./services/booking";
 import type { OrderRow } from "./store/types";
 
 /**
@@ -118,5 +119,66 @@ export async function handleEventWaitlist(req: Request, rawSlug: string, store: 
     return siteRedirect(req, slug, back, { ok: r.position > 0 ? `已登記候補（目前第 ${r.position} 位）。有名額時會寄信通知你。` : "剛好有名額釋出，已寄出遞補通知信，請到信箱點連結完成報名。" });
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+export async function handleBook(req: Request, rawSlug: string, store: Store = getStore(), clientFactory = pchomepayClientFor): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  let back = "/book";
+  try {
+    const g = await guard(req, slug, "booking", store, "booking-book");
+    if ("res" in g) return g.res!;
+    const { site, form, member, allowSandbox } = g;
+    const sv = await store.getServiceById(site.tenant.id, form.serviceId ?? "");
+    if (sv) back = `/book?service=${sv.slug}`;
+    const r = await bookSlot(
+      { store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) },
+      {
+        tenant: site.tenant,
+        member,
+        allowSandbox,
+        data: {
+          serviceId: form.serviceId,
+          providerId: form.providerId || undefined,
+          startsAt: form.startsAt,
+          contact: contactFromForm(form),
+          paymentMethod: form.paymentMethod === "pchomepay" ? "pchomepay" : form.paymentMethod === "offline" ? "offline" : undefined,
+          couponCode: form.couponCode?.trim() || undefined,
+          referralCode: cookieValue(req, referralCookieName(site.tenant.id)) || undefined,
+          note: form.note?.trim() || undefined,
+        },
+      },
+    );
+    if (r.kind === "confirmed") {
+      const u = new URL(r.manageUrl);
+      return siteRedirect(req, slug, "/book/manage", { ok: `預約成功！確認信（含行事曆檔）已寄到 ${r.booking.contact.email}` }, { b: u.searchParams.get("b")!, t: u.searchParams.get("t")! });
+    }
+    return afterClassOrder(req, store, site.tenant, r, clientFactory);
+  } catch (e) {
+    return siteRedirect(req, slug, back, { err: messageOf(e) });
+  }
+}
+
+export async function handleBookingManage(req: Request, rawSlug: string, store: Store = getStore()): Promise<Response> {
+  const slug = rawSlug.toLowerCase();
+  let extra: Record<string, string> = {};
+  try {
+    const g = await guard(req, slug, "booking", store, "booking-manage");
+    if ("res" in g) return g.res!;
+    const { site, form } = g;
+    extra = { b: form.b ?? "", t: form.t ?? "" };
+    const deps = { store, sendMail: getMailer(), baseUrl: baseUrlFrom(req) };
+    if (form.action === "cancel") {
+      if (form.confirm !== "on") throw new ServiceError("confirm_required", "請勾選確認後再取消");
+      const r = await selfCancelBooking(deps, { tenant: site.tenant, bookingId: form.b, token: form.t });
+      return siteRedirect(req, slug, "/book/manage", { ok: r.refundRequired ? "預約已取消，店家會與你聯繫退款。" : "預約已取消。" }, extra);
+    }
+    if (form.action === "reschedule") {
+      await selfRescheduleBooking(deps, { tenant: site.tenant, bookingId: form.b, token: form.t, startsAt: form.startsAt });
+      return siteRedirect(req, slug, "/book/manage", { ok: "已改期，新的確認信（含行事曆檔）已寄出。" }, extra);
+    }
+    throw new ServiceError("invalid", "未知動作");
+  } catch (e) {
+    return siteRedirect(req, slug, "/book/manage", { err: messageOf(e) }, extra);
   }
 }

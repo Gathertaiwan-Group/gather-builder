@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import type { ReservationBridge } from "./memory-commerce";
 import type {
+  BookingReservation,
+  BookingRow,
+  HoursRow,
+  OverrideRow,
+  ProviderRow,
+  ServiceRow,
   ClassesStore,
   ClassReservation,
   EventReservation,
@@ -13,7 +19,7 @@ import type {
   TicketTypeRow,
   WaitlistRow,
 } from "./types";
-import { RESERVE_ERRORS } from "./supabase-classes";
+import { RESERVE_ERRORS } from "./reserve-errors";
 
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
@@ -31,6 +37,51 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
   const regs = new Map<string, RegistrationRow>();
   const waitlist = new Map<string, WaitlistRow>();
   const pii: PiiAccessRow[] = [];
+  const providers = new Map<string, ProviderRow>();
+  const services = new Map<string, ServiceRow>();
+  let hours: HoursRow[] = [];
+  const overrides = new Map<string, OverrideRow>();
+  const bookings = new Map<string, BookingRow>();
+  const liveBooking = (b: BookingRow) => b.status === "held" || b.status === "confirmed";
+  const clash = (providerId: string, startMs: number, blockMs: number, exceptId?: string) =>
+    [...bookings.values()].some((b) => b.provider_id === providerId && b.id !== exceptId && liveBooking(b) && new Date(b.starts_at).getTime() < blockMs && startMs < new Date(b.block_until).getTime());
+
+  /** 同 builder_reserve_booking：提供者啟用、服務上架、未來時間、[starts, block) 不重疊 */
+  function reserveBookingSync(tenantId: string, orderId: string | null, res: BookingReservation): string {
+    const p = providers.get(res.provider_id);
+    if (!p || p.tenant_id !== tenantId || !p.active) fail("provider unavailable");
+    const sv = services.get(res.service_id);
+    if (!sv || sv.tenant_id !== tenantId || sv.status !== "published") fail("service unavailable");
+    const st = new Date(res.starts_at).getTime();
+    if (st <= Date.now()) fail("slot taken");
+    if (clash(res.provider_id, st, new Date(res.block_until).getTime())) fail("slot taken");
+    const id = randomUUID();
+    bookings.set(id, {
+      id,
+      tenant_id: tenantId,
+      provider_id: res.provider_id,
+      service_id: res.service_id,
+      order_id: orderId,
+      member_id: res.member_id || null,
+      contact: clone(res.contact),
+      starts_at: new Date(res.starts_at).toISOString(),
+      ends_at: new Date(res.ends_at).toISOString(),
+      block_until: new Date(res.block_until).toISOString(),
+      status: orderId ? "held" : "confirmed",
+      price: res.price,
+      amount_due: res.amount_due,
+      note: res.note || null,
+      reminder_sent_at: null,
+      refund_required: false,
+      cancelled_at: null,
+      cancel_reason: null,
+      cancelled_by: null,
+      rescheduled_at: null,
+      created_at: now(),
+      updated_at: now(),
+    });
+    return id;
+  }
   let root: Store | null = null;
 
   const fail = (code: string): never => {
@@ -114,11 +165,18 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
   };
 
   /** booking 模組的記憶體實作在載入時接上（見 memory-booking.ts） */
-  const bookingBridge: { reserve: (tenantId: string, orderId: string, res: NonNullable<ClassReservation>) => string; release: (tenantId: string, orderId: string, reason: string) => void } = {
-    reserve: () => {
-      throw new Error("builder: unknown reservation kind");
+  const bookingBridge = {
+    reserve: (tenantId: string, orderId: string, res: NonNullable<ClassReservation>): string => {
+      if (res.kind !== "booking") throw new Error("builder: unknown reservation kind");
+      return reserveBookingSync(tenantId, orderId, res.data);
     },
-    release: () => undefined,
+    release: (tenantId: string, orderId: string, reason: string) => {
+      for (const b of bookings.values()) {
+        if (b.tenant_id === tenantId && b.order_id === orderId && liveBooking(b)) {
+          bookings.set(b.id, { ...b, status: reason === "expired" ? "expired" : "cancelled", cancelled_at: now(), cancel_reason: reason || "order_cancelled", cancelled_by: "order", updated_at: now() });
+        }
+      }
+    },
   };
 
   const page = <T>(rows: T[], limit: number, offset: number) => ({ rows: clone(rows.slice(offset, offset + limit)), total: rows.length });
@@ -291,6 +349,112 @@ export function createMemoryClassesStore(): { store: MemoryClasses; bridge: Rese
       }
       return out;
     },
+    /* ------------------------------------------------ booking */
+    async insertProvider(row) {
+      const r: ProviderRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      providers.set(r.id, r);
+      return clone(r);
+    },
+    async listProviders(tenantId) {
+      return clone([...providers.values()].filter((p) => p.tenant_id === tenantId).sort((a, b) => a.sort - b.sort || a.created_at.localeCompare(b.created_at)));
+    },
+    async getProvider(tenantId, id) {
+      return clone(own(providers, tenantId, id) ?? null);
+    },
+    async insertService(row) {
+      if ([...services.values()].some((x) => x.tenant_id === row.tenant_id && x.slug === row.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
+      const r: ServiceRow = { ...clone(row), id: randomUUID(), created_at: now(), updated_at: now() };
+      services.set(r.id, r);
+      return clone(r);
+    },
+    async updateService(tenantId, id, patch) {
+      const x = own(services, tenantId, id);
+      if (!x) return null;
+      const next = { ...x, ...clone(patch), updated_at: now() };
+      services.set(id, next);
+      return clone(next);
+    },
+    async getServiceById(tenantId, id) {
+      return clone(own(services, tenantId, id) ?? null);
+    },
+    async getServiceBySlug(tenantId, slug) {
+      return clone([...services.values()].find((x) => x.tenant_id === tenantId && x.slug === slug) ?? null);
+    },
+    async listServices(tenantId, opts) {
+      return clone([...services.values()].filter((x) => x.tenant_id === tenantId && (!opts.status || x.status === opts.status)).sort((a, b) => a.sort - b.sort || a.created_at.localeCompare(b.created_at)));
+    },
+    async replaceWeeklyHours(tenantId, providerId, rows) {
+      hours = hours.filter((h) => !(h.tenant_id === tenantId && h.provider_id === providerId));
+      const added = rows.map((r) => ({ ...r, id: randomUUID(), tenant_id: tenantId, provider_id: providerId }));
+      hours.push(...added);
+      return clone(added);
+    },
+    async listWeeklyHours(tenantId, providerId) {
+      return clone(hours.filter((h) => h.tenant_id === tenantId && h.provider_id === providerId).sort((a, b) => a.weekday - b.weekday || a.start_min - b.start_min));
+    },
+    async insertOverride(row) {
+      const r: OverrideRow = { ...clone(row), id: randomUUID(), created_at: now() };
+      overrides.set(r.id, r);
+      return clone(r);
+    },
+    async listOverrides(tenantId, providerId, fromDate, toDate) {
+      return clone([...overrides.values()].filter((o) => o.tenant_id === tenantId && o.provider_id === providerId && o.date >= fromDate && o.date <= toDate).sort((a, b) => a.date.localeCompare(b.date)));
+    },
+    async reserveBookingFree(tenantId, res) {
+      return reserveBookingSync(tenantId, null, res);
+    },
+    async getBooking(tenantId, id) {
+      return clone(own(bookings, tenantId, id) ?? null);
+    },
+    async listBookings(tenantId, opts) {
+      const rows = [...bookings.values()]
+        .filter(
+          (b) =>
+            b.tenant_id === tenantId &&
+            (!opts.providerId || b.provider_id === opts.providerId) &&
+            (!opts.fromIso || b.starts_at >= opts.fromIso) &&
+            (!opts.toIso || b.starts_at < opts.toIso) &&
+            (!opts.status || opts.status.includes(b.status)) &&
+            (!opts.orderId || b.order_id === opts.orderId) &&
+            (!opts.memberId || b.member_id === opts.memberId),
+        )
+        .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+      return page(rows, opts.limit, opts.offset);
+    },
+    async busyIntervals(tenantId, providerId, fromIso, toIso) {
+      return clone([...bookings.values()].filter((b) => b.tenant_id === tenantId && b.provider_id === providerId && liveBooking(b) && b.block_until > fromIso && b.starts_at < toIso).map((b) => ({ starts_at: b.starts_at, block_until: b.block_until })));
+    },
+    async updateBooking(tenantId, id, from, patch, opts) {
+      const b = own(bookings, tenantId, id);
+      if (!b || !from.includes(b.status)) return null;
+      for (const k of opts?.requireNull ?? []) if (b[k] !== null) return null;
+      const next = { ...b, ...patch, updated_at: now() };
+      bookings.set(id, next);
+      return clone(next);
+    },
+    async rescheduleBooking(tenantId, id, startIso, endIso, blockIso) {
+      const b = own(bookings, tenantId, id);
+      if (!b) fail("booking not found");
+      if (!liveBooking(b!)) return false;
+      const st = new Date(startIso).getTime();
+      if (st <= Date.now()) fail("slot taken");
+      if (clash(b!.provider_id, st, new Date(blockIso).getTime(), b!.id)) fail("slot taken");
+      bookings.set(id, { ...b!, starts_at: new Date(startIso).toISOString(), ends_at: new Date(endIso).toISOString(), block_until: new Date(blockIso).toISOString(), reminder_sent_at: null, rescheduled_at: now(), updated_at: now() });
+      return true;
+    },
+    async listExpiredHeldOrderIdsForProvider(tenantId, providerId, nowIso) {
+      const ids = [...new Set([...bookings.values()].filter((b) => b.tenant_id === tenantId && b.provider_id === providerId && b.status === "held" && b.order_id).map((b) => b.order_id!))];
+      const out: string[] = [];
+      for (const id of ids) {
+        const o = await root?.getOrderById(tenantId, id);
+        if (o && o.status === "pending_payment" && o.expires_at && o.expires_at < nowIso) out.push(id);
+      }
+      return out;
+    },
+    async listBookingsStartingBetween(fromIso, toIso, limit) {
+      return clone([...bookings.values()].filter((b) => b.status === "confirmed" && b.starts_at >= fromIso && b.starts_at < toIso).slice(0, limit));
+    },
+
     async insertPiiLog(row) {
       pii.push({ ...clone(row), id: pii.length + 1, at: now() });
     },

@@ -187,6 +187,84 @@ export interface BookingReservation {
   note: string | null;
 }
 
+export interface ProviderRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  email: string | null;
+  active: boolean;
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PaymentMode = "none" | "deposit" | "full";
+
+export interface ServiceRow {
+  id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  description_md: string;
+  duration_min: number;
+  buffer_min: number;
+  price: number;
+  payment_mode: PaymentMode;
+  deposit_amount: number | null;
+  status: "draft" | "published";
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HoursRow {
+  id: string;
+  tenant_id: string;
+  provider_id: string;
+  weekday: number;
+  start_min: number;
+  end_min: number;
+}
+
+export interface OverrideRow {
+  id: string;
+  tenant_id: string;
+  provider_id: string;
+  date: string;
+  kind: "closed" | "open";
+  start_min: number | null;
+  end_min: number | null;
+  note: string | null;
+  created_at: string;
+}
+
+export type BookingStatus = "held" | "confirmed" | "cancelled" | "expired";
+
+export interface BookingRow {
+  id: string;
+  tenant_id: string;
+  provider_id: string;
+  service_id: string;
+  order_id: string | null;
+  member_id: string | null;
+  contact: OrderContact;
+  starts_at: string;
+  ends_at: string;
+  block_until: string;
+  status: BookingStatus;
+  price: number;
+  amount_due: number;
+  note: string | null;
+  reminder_sent_at: string | null;
+  refund_required: boolean;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  cancelled_by: string | null;
+  rescheduled_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /* ------------------------------------------------------------------ Store 方法 */
 
 export interface ClassesStore {
@@ -227,6 +305,33 @@ export interface ClassesStore {
   offerWaitlist(tenantId: string, sessionId: string, hours: number): Promise<WaitlistRow[]>;
   insertPiiLog(row: Omit<PiiAccessRow, "id" | "at">): Promise<void>;
   listPiiLog(tenantId: string, limit: number): Promise<PiiAccessRow[]>;
+
+  // booking
+  insertProvider(row: Pick<ProviderRow, "tenant_id" | "name" | "email" | "active" | "sort">): Promise<ProviderRow>;
+  listProviders(tenantId: string): Promise<ProviderRow[]>;
+  getProvider(tenantId: string, id: string): Promise<ProviderRow | null>;
+  insertService(row: Omit<ServiceRow, "id" | "created_at" | "updated_at">): Promise<ServiceRow>;
+  updateService(tenantId: string, id: string, patch: Partial<Omit<ServiceRow, "id" | "tenant_id" | "created_at" | "updated_at">>): Promise<ServiceRow | null>;
+  getServiceById(tenantId: string, id: string): Promise<ServiceRow | null>;
+  getServiceBySlug(tenantId: string, slug: string): Promise<ServiceRow | null>;
+  listServices(tenantId: string, opts: { status?: ServiceRow["status"] }): Promise<ServiceRow[]>;
+  /** 整份取代某提供者的每週時段 */
+  replaceWeeklyHours(tenantId: string, providerId: string, rows: Pick<HoursRow, "weekday" | "start_min" | "end_min">[]): Promise<HoursRow[]>;
+  listWeeklyHours(tenantId: string, providerId: string): Promise<HoursRow[]>;
+  insertOverride(row: Omit<OverrideRow, "id" | "created_at">): Promise<OverrideRow>;
+  listOverrides(tenantId: string, providerId: string, fromDate: string, toDate: string): Promise<OverrideRow[]>;
+  /** 不收費（或現場付）的預約：原子防重複（builder_reserve_booking，order=null → confirmed） */
+  reserveBookingFree(tenantId: string, res: BookingReservation): Promise<string>;
+  getBooking(tenantId: string, id: string): Promise<BookingRow | null>;
+  listBookings(tenantId: string, opts: { providerId?: string; fromIso?: string; toIso?: string; status?: BookingStatus[]; orderId?: string; memberId?: string; limit: number; offset: number }): Promise<{ rows: BookingRow[]; total: number }>;
+  /** 有效預約（held＋confirmed）在 [fromIso, toIso) 附近的占用區間 [starts_at, block_until) */
+  busyIntervals(tenantId: string, providerId: string, fromIso: string, toIso: string): Promise<Pick<BookingRow, "starts_at" | "block_until">[]>;
+  updateBooking(tenantId: string, id: string, from: BookingStatus[], patch: Partial<Pick<BookingRow, "status" | "reminder_sent_at" | "refund_required" | "cancelled_at" | "cancel_reason" | "cancelled_by">>, opts?: { requireNull?: "reminder_sent_at"[] }): Promise<BookingRow | null>;
+  /** builder_reschedule_booking：鎖提供者、排除自己判斷重疊；時段被占丟 ServiceError(conflict)；狀態不是 held／confirmed 回 false */
+  rescheduleBooking(tenantId: string, id: string, startIso: string, endIso: string, blockIso: string): Promise<boolean>;
+  listExpiredHeldOrderIdsForProvider(tenantId: string, providerId: string, nowIso: string): Promise<string[]>;
+  /** 所有租戶：開始時間在 [fromIso, toIso) 的已確認預約（提醒 cron） */
+  listBookingsStartingBetween(fromIso: string, toIso: string, limit: number): Promise<BookingRow[]>;
 
   // 課程類訂單（活動票／預約／課程）
   /** builder_place_class_order：訂單＋品項＋優惠券＋名額預留在同一交易；任一失敗整筆不成立 */

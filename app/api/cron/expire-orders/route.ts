@@ -4,6 +4,7 @@ import { expireDueOrders } from "@/lib/services/orders";
 import { retryDueInvoices } from "@/lib/services/invoices";
 import { json } from "@/lib/http";
 import { runEventsCron } from "@/lib/services/events";
+import { runBookingCron } from "@/lib/services/booking";
 import { getMailer } from "@/lib/mail";
 import { baseUrlFrom } from "@/lib/runtime";
 
@@ -27,6 +28,7 @@ export async function GET(req: Request) {
   // 第四批：活動候補遞補（過期保留換下一位）、活動前提醒（今天稍晚與明天的場次，每筆只寄一次）
   const deps = { store: getStore(), sendMail: getMailer(), baseUrl: baseUrlFrom(req) };
   const ev = await runEventsCron(deps).catch((e) => (console.error("[cron] events", e), { offered: -1, reminded: -1 }));
-  console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)}`);
-  return json({ ...r, invoices: inv, events: ev });
+  const bk = await runBookingCron(deps).catch((e) => (console.error("[cron] booking", e), { reminded: -1 }));
+  console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)}`);
+  return json({ ...r, invoices: inv, events: ev, booking: bk });
 }

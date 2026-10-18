@@ -75,7 +75,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 11. 「我要超商取貨」→ `enable_module shipping { methods:[{id:"seven",type:"cvs",provider:"ecpay",subType:"UNIMARTC2C",label:"7-11 取貨",fee:60}], sender:{...} }` → 平台擁有者在後台「物流」輸入綠界憑證 → 發布 → 付款後 `create_shipment { orderNo, confirm: true }`。
 12. 「來辦個活動」→ `enable_module coupons` → `create_coupon { code:"FALL15", kind:"percent", value:15, maxDiscount:200 }`；電子報 `create_broadcast` → `send_test_broadcast` → 使用者確認 → `send_broadcast { confirm: true }`。
 13. 「我要開陶藝工作坊，12/7 下午一場 8 人，一人 1200」→ `enable_module events`（付費要 shop）→ `create_event` → `create_session { capacity: 8 }` → `create_ticket_type { price: 1200 }` → `update_event { patch:{status:"published"}, confirm:true }` → `add_section events_list` → 發布。報名後 `list_registrations`、當天 `check_in`。
-14. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
+14. 「我要開放一對一諮詢，60 分鐘 1500、收 500 訂金，平日 10–18 點」→ `enable_module booking`（訂金要 shop）→ `create_service { durationMin:60, price:1500, paymentMode:"deposit", depositAmount:500, status:"published", confirm:true }` → `set_weekly_hours { hours:[{weekday:1,start:"10:00",end:"18:00"}…], confirm:true }` → `add_section booking_widget` → 發布。「下週三休假」→ `add_date_override { date, kind:"closed", confirm:true }`。
+15. 「有人匯款了」→ `list_orders { status: "pending_payment" }` → 使用者確認入帳 → `mark_order_paid { orderNo, confirm: true }` → 出貨後 `fulfill_order`。
 
 ## 工具清單
 
@@ -132,6 +133,13 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_events` | site:read | 活動、場次、票種、即時名額（已報名、保留、候補、剩餘） |
 | `list_registrations` | attendees:read | 名單（聯絡資料遮罩；完整資料與 CSV 只在後台並留紀錄） |
 | `check_in` | attendees:write | 簽到（registrationId 或簽到碼；`confirm: true`） |
+| `create_service` / `update_service` | classes:write | 預約服務（時長、緩衝、價格、付款方式 none／deposit／full）；上架或改已上架服務需 publish ＋ confirm |
+| `list_services` | site:read | 服務、提供者、每週時段、預約設定 |
+| `set_weekly_hours` | classes:write | 整份取代每週可預約時段（台北，HH:MM，可多段）；**publish ＋ `confirm: true`** |
+| `add_date_override` | classes:write | 例外日：休假 closed／加開 open；**publish ＋ `confirm: true`** |
+| `get_booking_availability` | site:read | 某服務接下來幾天的可預約時段 |
+| `list_bookings` | attendees:read | 預約列表（聯絡資料遮罩） |
+| `cancel_booking` | attendees:write | 店家取消預約並通知客人（附取消 .ics）；已付款標待退款（`confirm: true`） |
 | `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |

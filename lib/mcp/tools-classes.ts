@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ServiceContext } from "../services/context";
 import * as events from "../services/events";
+import * as booking from "../services/booking";
 
 /**
  * 第四批 MCP 工具（events／booking／courses）：只做參數宣告與轉送，邏輯全在 lib/services。
@@ -135,5 +136,100 @@ export function registerClassTools(server: McpServer, ctx: ServiceContext, wrap:
       annotations: DESTRUCTIVE,
     },
     wrap(async (a) => events.cancelSession(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ 時段預約（booking） */
+
+  const serviceFields = {
+    slug: z.string().describe("服務代稱（小寫英數與連字號）"),
+    name: z.string(),
+    descriptionMd: z.string().optional(),
+    durationMin: z.number().int().describe("時長（分鐘）"),
+    bufferMin: z.number().int().optional().describe("每筆之後的緩衝（分鐘），期間不能被預約"),
+    price: z.number().int().optional().describe("價格 NT$"),
+    paymentMode: z.enum(["none", "deposit", "full"]).optional().describe("none 現場付（預設）；deposit 線上收訂金；full 線上收全額（後兩者需要 shop）"),
+    depositAmount: z.number().int().optional(),
+    status: z.enum(["draft", "published"]).optional().describe("published 需要 publish scope＋confirm"),
+    sort: z.number().int().optional(),
+  };
+
+  server.registerTool(
+    "create_service",
+    {
+      description: "建立預約服務（時長、緩衝、價格、付款方式）。第一版服務提供者預設為店主一人（自動建立）。直接上架需要 publish＋confirm。之後用 set_weekly_hours 設定可預約時段。需要 classes:write。",
+      inputSchema: { site, confirm, ...serviceFields },
+      annotations: WRITE,
+    },
+    wrap(async (a) => booking.createService(ctx, a)),
+  );
+
+  server.registerTool(
+    "update_service",
+    {
+      description: "修改預約服務（名稱、時長、緩衝、價格、付款方式、上架／下架）。改已上架服務或上架／下架會立即對外，需要 publish＋confirm。已成立的預約不受影響。需要 classes:write。",
+      inputSchema: { site, serviceId: z.string().optional(), slug: z.string().optional(), confirm, patch: z.object(serviceFields).partial() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => booking.updateService(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_services",
+    {
+      description: "列出預約服務、服務提供者、每週時段與預約設定（最早／最遠可約、時段間隔、最晚取消時間）。需要 site:read。",
+      inputSchema: { site },
+      annotations: RO,
+    },
+    wrap(async (a) => booking.listServices(ctx, a)),
+  );
+
+  server.registerTool(
+    "set_weekly_hours",
+    {
+      description: "整份取代每週可預約時段（台北時間；weekday 0＝週日…6＝週六；start/end 為 HH:MM，可一天多段）。會立即改變線上可預約時段：需要 publish scope＋confirm。已成立的預約不受影響。需要 classes:write。",
+      inputSchema: { site, providerId: z.string().optional(), confirm, hours: z.array(z.object({ weekday: z.number().int(), start: z.string(), end: z.string() })) },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => booking.setWeeklyHours(ctx, a)),
+  );
+
+  server.registerTool(
+    "add_date_override",
+    {
+      description: "例外日：kind closed＝整天休假（蓋掉每週時段）；kind open＝加開時段（帶 start/end HH:MM）。日期為台北日期 YYYY-MM-DD。立即生效：需要 publish＋confirm。休假不會自動取消已有的預約（回傳會提示）。需要 classes:write。",
+      inputSchema: { site, providerId: z.string().optional(), confirm, date: z.string(), kind: z.enum(["closed", "open"]), start: z.string().optional(), end: z.string().optional(), note: z.string().optional() },
+      annotations: WRITE,
+    },
+    wrap(async (a) => booking.addDateOverride(ctx, a)),
+  );
+
+  server.registerTool(
+    "get_booking_availability",
+    {
+      description: "查某服務接下來幾天的可預約時段（已扣掉已預約、緩衝、例外日、最早／最遠可約）。需要 site:read。",
+      inputSchema: { site, serviceId: z.string().optional(), serviceSlug: z.string().optional(), fromDate: z.string().optional().describe("YYYY-MM-DD（台北），預設今天"), days: z.number().int().optional().describe("1–31，預設 7") },
+      annotations: RO,
+    },
+    wrap(async (a) => booking.getBookingAvailability(ctx, a)),
+  );
+
+  server.registerTool(
+    "list_bookings",
+    {
+      description: "預約列表（預設昨天起 60 天；from/to 為 ISO 時間）：服務、時間、狀態（held 待付款／confirmed／cancelled／expired）、金額、是否待退款。🔴 聯絡資料遮罩。需要 attendees:read。",
+      inputSchema: { site, from: z.string().optional(), to: z.string().optional(), status: z.array(z.enum(["held", "confirmed", "cancelled", "expired"])).optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => booking.listBookings(ctx, a)),
+  );
+
+  server.registerTool(
+    "cancel_booking",
+    {
+      description: "店家取消一筆預約並通知客人（附取消用 .ics）。未付款保留 → 取消訂單；已付款 → 標待退款（🔴 不會自動退款）。必須先讓使用者確認，再帶 confirm: true。需要 attendees:write。",
+      inputSchema: { site, bookingId: z.string(), reason: z.string().optional(), confirm },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => booking.cancelBooking(ctx, a)),
   );
 }

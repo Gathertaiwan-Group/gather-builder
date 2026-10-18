@@ -150,10 +150,41 @@ if (orderNoB) {
   check(pii?.some((p) => p.action === "export" && p.actor === "admin"), "匯出留下查看紀錄（who/when）");
 }
 
-/* ---------------------------------------------------------------- booking／courses（下一段補上） */
-globalThis.__e2e = { site, slug, tenantRow, cookieA, cookieB, adminCookie, rest, post, get, flash, check, ts };
-const extra = args.find((a) => a.startsWith("--only=")) ? null : await import("./e2e-classes-more.mjs").catch((e) => (e.code === "ERR_MODULE_NOT_FOUND" ? null : Promise.reject(e)));
-if (extra?.run) await extra.run(globalThis.__e2e);
+/* ---------------------------------------------------------------- booking */
+const eb = await site.call("enable_module", { moduleId: "booking", config: { location: "台北市測試路 9 號", minLeadMinutes: 60 } });
+check(eb.changed?.some((c) => c.id === "booking" && c.status === "enabled"), "enable_module booking", eb.__error ?? JSON.stringify(eb.changed));
+const svc = await site.call("create_service", { slug: "consult", name: "一對一諮詢", durationMin: 60, bufferMin: 15, price: 1200, status: "published", confirm: true });
+check(svc.id && svc.paymentMode === "none", "create_service（60 分＋緩衝 15、現場付）", svc.__error ?? "");
+const whNo = await site.call("set_weekly_hours", { hours: [{ weekday: 1, start: "09:00", end: "18:00" }] });
+check(whNo.__error?.startsWith("[confirm_required]"), "set_weekly_hours 沒 confirm → confirm_required");
+const wh = await site.call("set_weekly_hours", { confirm: true, hours: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, start: "09:00", end: "18:00" })) });
+check(wh.hours?.length === 7, "set_weekly_hours（每天 09:00–18:00）", wh.__error ?? "");
+await site.call("add_section", { path: "/", type: "booking_widget", props: { heading: "線上預約" } });
+const pv2 = await site.call("preview_changes");
+const pub2 = await site.call("publish_site", { confirm: true, expectedDraftVersion: pv2.draftVersion, note: "e2e booking" });
+check(pub2.revision >= 2, "publish_site（booking 設定生效）", pub2.__error ?? "");
+const d3 = new Date(Date.now() + 3 * 24 * H + 8 * H).toISOString().slice(0, 10);
+const av = await site.call("get_booking_availability", { serviceSlug: "consult", fromDate: d3, days: 1 });
+const slot = av.days?.[0]?.slots?.find((x) => x.label === "10:00");
+check(!!slot, "get_booking_availability：3 天後 10:00 可約", av.__error ?? JSON.stringify(av.days?.[0]?.slots?.slice(0, 3)));
+const bookPage = await get(`/s/${slug}/book?service=consult&from=${d3}`);
+check(bookPage.status === 200 && bookPage.body.includes(`data-start="${slot?.start}"`), "/book 頁顯示該時段");
+const bk1 = await post(`/s/${slug}/api/booking/book`, { serviceId: svc.id, startsAt: slot.start, name: "王小明", email: emailA, phone: "0912000111" }, cookieA);
+check(bk1.status === 303 && /\/book\/manage\?/.test(bk1.location) && !!flash(bk1.location).ok, "A 預約 10:00 → 成功（管理頁）", flash(bk1.location).ok ?? flash(bk1.location).err);
+const bk2 = await post(`/s/${slug}/api/booking/book`, { serviceId: svc.id, startsAt: slot.start, name: "李大華", email: emailB, phone: "0912000222" }, cookieB);
+check(/無法預約|預約走了/.test(flash(bk2.location).err ?? ""), "B 預約同一時段 → 被拒", flash(bk2.location).err ?? bk2.location);
+const bk3 = await post(`/s/${slug}/api/booking/book`, { serviceId: svc.id, startsAt: new Date(new Date(slot.start).getTime() + 3600_000).toISOString(), name: "李大華", email: emailB, phone: "0912000222" }, cookieB);
+check(/無法預約/.test(flash(bk3.location).err ?? ""), "B 預約 11:00（在 A 的緩衝內）→ 被拒", flash(bk3.location).err ?? "");
+const mu = new URL(bk1.location, base);
+const ics = await get(`/s/${slug}/book/ics?b=${mu.searchParams.get("b")}&t=${encodeURIComponent(mu.searchParams.get("t"))}`);
+const stamp = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+check(ics.status === 200 && /text\/calendar/.test(ics.type) && ics.body.includes(`DTSTART:${stamp(slot.start)}`) && ics.body.includes(`DTEND:${stamp(new Date(new Date(slot.start).getTime() + 3600_000))}`) && ics.body.includes("LOCATION:台北市測試路 9 號") && ics.body.includes("\r\n"), ".ics 正確（DTSTART/DTEND UTC、地點、CRLF）", ics.body.split("\r\n").filter((l) => /^DT(START|END)/.test(l)).join(" "));
+const badIcs = await get(`/s/${slug}/book/ics?b=${mu.searchParams.get("b")}&t=${"x".repeat(32)}`);
+check(badIcs.status === 404, ".ics 簽章錯誤 → 404");
+const lb = await site.call("list_bookings", {});
+check(lb.bookings?.length === 1 && lb.bookings[0].status === "confirmed" && lb.bookings[0].contact.email.includes("＊"), "list_bookings：1 筆已確認、聯絡資料遮罩", lb.__error ?? JSON.stringify(lb.bookings?.[0]));
+const acctA = await get(`/s/${slug}/account`, cookieA);
+check(acctA.body.includes("我的預約") && acctA.body.includes("一對一諮詢"), "A 的會員中心：我的預約");
 
 await site.close();
 done();
