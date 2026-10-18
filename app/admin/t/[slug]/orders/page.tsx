@@ -84,6 +84,7 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
               <form action={act} method="post" className="mt-2 flex flex-wrap items-center gap-1" data-admin="refund-form">
                 <input type="hidden" name="orderNo" value={detail.orderNo} />
                 <input type="hidden" name="action" value="refund" />
+                <p className="m-0 w-full text-xs text-neutral-600" data-admin="refund-preview">退款會：{detail.refundPreview.effects}{detail.topupReversal ? `。儲值金：${detail.topupReversal.note}` : ""}{detail.refundPreview.topupBlocked ? "（客人已用掉部分儲值金：系統會拒絕自動退款）" : ""}</p>
                 <input name="reason" placeholder="退款原因（選填）" className="rounded border px-2 py-1 text-xs" maxLength={200} />
                 <label className="flex items-center gap-1 text-xs">
                   <input type="checkbox" name="confirm" required />
@@ -95,6 +96,21 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
               </form>
             )}
             {detail.refunds.length > 0 && <p className="text-xs text-neutral-600">退款紀錄：{detail.refunds.map((r) => `${twd(r.amount)} ${r.status}${r.error ? `（${r.error}）` : ""}`).join("；")}</p>}
+            {detail.refunds.filter((r) => r.status === "requested" || r.status === "unknown").map((r) => (
+              <form key={r.id} action={act} method="post" className="mt-1 flex flex-wrap items-center gap-1 text-xs" data-admin="resolve-refund">
+                <input type="hidden" name="orderNo" value={detail.orderNo} />
+                <input type="hidden" name="action" value="resolve_refund" />
+                <input type="hidden" name="refundId" value={r.id} />
+                <span>到金流後台查證後標記這筆退款（{twd(r.amount)}）：</span>
+                <select name="outcome" className="rounded border px-1 py-0.5">
+                  <option value="failed">退款失敗（可重新申請）</option>
+                  <option value="succeeded">已退款成功</option>
+                </select>
+                <input name="note" placeholder="備註" className="rounded border px-1 py-0.5" maxLength={200} />
+                <label className="flex items-center gap-1"><input type="checkbox" name="confirm" required />確認</label>
+                <button type="submit" className="rounded border px-2 py-0.5">標記</button>
+              </form>
+            ))}
             {detail.status === "paid" && detail.paymentMethod === "pchomepay" && <p className="text-xs text-amber-700">取消已付款的 PChomePay 訂單不會自動退款，需到 PChomePay 商家後台人工退款。</p>}
           </div>
         </Card>

@@ -179,7 +179,8 @@ for (const h of harnesses) {
       const fields = pay.fields;
       if (h.provider === "ecpay") {
         expect(fields).toMatchObject({ MerchantID: EC.merchantId, MerchantTradeNo: pay.gatewayOrderNo, TotalAmount: String(order.total), ChoosePayment: "Credit", EncryptType: "1", PaymentType: "aio" });
-        expect(fields.ReturnURL).toMatch(new RegExp(`/api/pay/ecpay/notify/${s.tenant.id}\\?p=`));
+        // 第七批審查 H1：短網址
+        expect(fields.ReturnURL).toMatch(/^https:\/\/test\.example\/p\/n\/[A-Za-z0-9]{18}$/);
         expect(fields.CheckMacValue).toBe(ecpayCheckMac(fields, EC.hashKey, EC.hashIv));
       }
       if (h.provider === "newebpay") {
@@ -366,7 +367,7 @@ describe("黑貓 PAY 專屬", () => {
     const { order, pay } = await s.order();
     expect(pay).toMatchObject({ kind: "redirect", url: "https://cocs.4128888card.com.tw/pay/xyz" });
     expect(s.appended[0]).toMatchObject({ cmd: "CocsOrderAppend", cust_id: BC.custId, order_amount: order.total, acquirer_type: "payuni" });
-    expect(String(s.appended[0]!.apn_url)).toMatch(new RegExp(`^https://test\\.example/api/pay/blackcat/notify/${s.tenant.id}\\?p=.+&t=.+`));
+    expect(String(s.appended[0]!.apn_url)).toMatch(/^https:\/\/test\.example\/p\/n\/[A-Za-z0-9]{18}$/);
   });
 
   it("🔴 checksum 正確（可被偽造）但回查未授權 → 不改狀態", async () => {

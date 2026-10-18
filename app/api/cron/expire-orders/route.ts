@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { getStore } from "@/lib/store";
-import { expireDueOrders, retryOrderHooks } from "@/lib/services/orders";
+import { expireDueOrders, retryOrderHooks, sweepStaleRefunds } from "@/lib/services/orders";
 import { retryDueInvoices } from "@/lib/services/invoices";
 import { json } from "@/lib/http";
 import { runEventsCron } from "@/lib/services/events";
@@ -39,8 +39,10 @@ export async function GET(req: Request) {
   const wallet = await runWalletCron(getStore()).catch((e) => (console.error("[cron] wallet", e), { expired: -1 }));
   // 第七批：訂閱寬限到期停權、應扣未扣進寬限、終止委託重試、放棄的 pending
   const subs = await sweepSubscriptions(deps).catch((e) => (console.error("[cron] subscriptions", e), { expired: -1 }));
-  console.log(`[cron/expire-orders] subscriptions=${JSON.stringify(subs)}`);
+  // 第七批審查 L2：卡住的退款（requested 超過 15 分鐘）→ 結果不明＋警示店主
+  const refunds = await sweepStaleRefunds(deps).catch((e) => (console.error("[cron] refunds", e), { scanned: -1, marked: 0 }));
+  console.log(`[cron/expire-orders] subscriptions=${JSON.stringify(subs)} refunds=${JSON.stringify(refunds)}`);
   console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)} wallet=${JSON.stringify(wallet)}`);
   console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs });
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs, refunds });
 }

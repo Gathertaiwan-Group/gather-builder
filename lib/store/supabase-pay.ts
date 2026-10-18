@@ -23,6 +23,13 @@ export function createSupabasePayStore(db: SupabaseClient): PayStore {
       const rows = must(await db.from("builder_refunds").update({ ...patch, status: to, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", id).eq("status", from).select("id"), "transitionRefund") as { id: string }[];
       return rows.length > 0;
     },
+    async getRefund(tenantId, id) {
+      if (!UUID.test(id)) return null;
+      return must(await db.from("builder_refunds").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getRefund") as RefundRow | null;
+    },
+    async listStaleRefunds(olderThanIso, limit) {
+      return (must(await db.from("builder_refunds").select("*").eq("status", "requested").lt("created_at", olderThanIso).order("created_at").limit(limit), "listStaleRefunds") ?? []) as RefundRow[];
+    },
     async listRefundsForOrder(tenantId, orderId) {
       return (must(await db.from("builder_refunds").select("*").eq("tenant_id", tenantId).eq("order_id", orderId).order("created_at"), "listRefundsForOrder") ?? []) as RefundRow[];
     },
@@ -50,6 +57,10 @@ export function createSupabasePayStore(db: SupabaseClient): PayStore {
     async getSubscription(tenantId, id) {
       if (!UUID.test(id)) return null;
       return must(await db.from("builder_subscriptions").select("*").eq("tenant_id", tenantId).eq("id", id).maybeSingle(), "getSubscription") as SubscriptionRow | null;
+    },
+    async getSubscriptionByShortCode(code) {
+      if (!/^[A-Za-z0-9]{16,22}$/.test(code)) return null;
+      return must(await db.from("builder_subscriptions").select("*").eq("short_code", code).maybeSingle(), "getSubscriptionByShortCode") as SubscriptionRow | null;
     },
     async getSubscriptionByMerchantOrderNo(no) {
       return must(await db.from("builder_subscriptions").select("*").eq("merchant_order_no", no).maybeSingle(), "getSubscriptionByMerchantOrderNo") as SubscriptionRow | null;

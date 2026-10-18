@@ -32,9 +32,9 @@ export const loyaltySettings = z
     pointsExpireDays: z.number().int().min(1).max(3650).optional(),
     /** 等級依「最近幾個月」的消費計算（預設 12；0＝累計全部） */
     tierWindowMonths: z.number().int().min(0).max(60).optional(),
-    /** 店主手動調整（adjust_points）單次上限（點，預設 5,000）——審查 M3 */
+    /** 店主手動調整（adjust_points）單次上限（點）——🔴 第七批審查 L4：只能把平台後台設定的上限（預設 5,000）調低，不能調高 */
     adjustMaxPerCall: z.number().int().min(1).max(1_000_000).optional(),
-    /** 店主手動調整每日上限（全站加總、台北日，預設 20,000 點） */
+    /** 店主手動調整每日上限（全站加總、台北日）——只能調低平台後台的上限（預設 20,000 點） */
     adjustMaxPerDay: z.number().int().min(1).max(10_000_000).optional(),
     /** 等級（依 minSpend 由低到高；沒達到任何一級＝一般會員） */
     tiers: z

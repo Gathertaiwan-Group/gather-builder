@@ -1,6 +1,6 @@
 import { adminContext } from "@/lib/adminServer";
 import { adminForm, str } from "@/lib/adminRoute";
-import { cancelOrder, fulfillOrder, markOrderPaid, refundOrder } from "@/lib/services/orders";
+import { cancelOrder, fulfillOrder, markOrderPaid, refundOrder, resolveRefund } from "@/lib/services/orders";
 import { ServiceError } from "@/lib/services/context";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +28,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     if (action === "refund") {
       const r = await refundOrder(ctx, { ...base, reason: str(f, "reason") || undefined });
       return { message: `訂單 ${base.orderNo}：${r.note}`, redirectTo: back };
+    }
+    if (action === "resolve_refund") {
+      const outcome = str(f, "outcome") === "succeeded" ? "succeeded" : "failed";
+      await resolveRefund(ctx, { site: slug, refundId: str(f, "refundId"), outcome, note: str(f, "note") || undefined, confirm: base.confirm });
+      return { message: `退款已標記為${outcome === "succeeded" ? "成功" : "失敗"}`, redirectTo: back };
     }
     throw new ServiceError("invalid", "未知動作");
   });

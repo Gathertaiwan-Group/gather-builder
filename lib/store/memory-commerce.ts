@@ -477,6 +477,17 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       credits?.releaseSync(tenantId, next);
       return clone(next);
     },
+    async markOrderRefunded(tenantId, id) {
+      const o = orders.get(id);
+      if (!o || o.tenant_id !== tenantId || o.status !== "fulfilled" || o.refunded_at) return null;
+      const next = { ...o, refunded_at: now(), updated_at: now() };
+      orders.set(id, next);
+      credits?.releaseSync(tenantId, next);
+      return clone(next);
+    },
+    async getPaymentByShortCode(code) {
+      return clone([...payments.values()].find((p) => p.short_code === code) ?? null);
+    },
     async cancelOrder(tenantId, id, from, reason) {
       const o = orders.get(id);
       if (!o || o.tenant_id !== tenantId || !from.includes(o.status)) return { transitioned: false, stockReleased: false };
@@ -539,8 +550,8 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       if (a) accounts.set(k, { ...a, ...patch, updated_at: now() });
     },
     async insertPayment(row) {
-      if ([...payments.values()].some((p) => p.gateway_order_no === row.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
-      const p: PaymentRow = { ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, query_failures: 0, last_query_error: null, alerted_at: null, gateway_trade_no: null, confirm_claimed_at: null, confirm_attempts: 0, created_at: now(), updated_at: now() };
+      if ([...payments.values()].some((p) => p.gateway_order_no === row.gateway_order_no || (!!row.short_code && p.short_code === row.short_code))) throw new ServiceError("conflict", "資料重複");
+      const p: PaymentRow = { short_code: null, return_key_enc: null, ...row, id: randomUUID(), status: "pending", payment_url: null, raw: null, paid_at: null, query_failures: 0, last_query_error: null, alerted_at: null, gateway_trade_no: null, confirm_claimed_at: null, confirm_attempts: 0, created_at: now(), updated_at: now() };
       payments.set(p.id, p);
       return clone(p);
     },

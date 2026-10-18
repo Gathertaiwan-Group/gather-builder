@@ -7,6 +7,7 @@ import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resol
 import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
 import { mailSafe, publishedShopSettings, twd, type CheckoutDeps } from "./shop";
+import { effectiveAdjustLimits, takeAdjustQuota } from "./adjust-limits";
 import { registerOrderHooks, type CancelDeps, type HookDeps } from "./order-hooks";
 import { placeClassOrder } from "./class-orders";
 import { computeLedgerState } from "../loyalty/ledger";
@@ -150,6 +151,18 @@ export async function buyTopup(deps: CheckoutDeps, input: { tenant: TenantRow; m
 type TopupSnapshot = { planName?: string; payAmount?: number; bonusAmount?: number; bonusExpireDays?: number | null };
 const topupItems = (o: OrderRow) => o.items.filter((i) => (i as { item_kind?: string }).item_kind === "topup") as (OrderRow["items"][number] & { ref_id?: string; snapshot?: TopupSnapshot })[];
 
+export const isTopupOrder = (o: OrderRow) => topupItems(o).length > 0;
+
+/** 儲值訂單：已入帳（本金＋贈送）與已收回的金額（以帳本為準） */
+export async function topupReclaimState(store: Store, tenant: TenantRow, order: OrderRow): Promise<{ credited: number; reclaimed: number }> {
+  const [base, bonus, rev] = await Promise.all([
+    store.getCreditByRef("wallet", tenant.id, `order:${order.id}:topup`),
+    store.getCreditByRef("wallet", tenant.id, `order:${order.id}:bonus`),
+    store.getCreditByRef("wallet", tenant.id, `order:${order.id}:topup_reverse`),
+  ]);
+  return { credited: (base?.amount ?? 0) + (bonus?.amount ?? 0), reclaimed: rev ? Math.abs(rev.amount) : 0 };
+}
+
 /** 付款成功（真正轉成已付款那一次；sandbox 不跑）→ 入帳本金＋贈送額度（ref 冪等） */
 export async function onWalletOrderPaid(deps: HookDeps, tenant: TenantRow, order: OrderRow) {
   const items = topupItems(order);
@@ -276,16 +289,17 @@ export async function adjustBalance(ctx: ServiceContext, input: { site?: string 
   const d = parse(adjustInput, { amount: input.amount, reason: input.reason });
   const m = await findMember(ctx, tenant, input);
   const s = (await publishedModuleSettings(ctx.store, tenant, "stored-value")) as StoredValueSettings;
-  const perCall = s.adjustMaxPerCall ?? DEFAULT_WALLET_ADJUST_PER_CALL;
-  const perDay = s.adjustMaxPerDay ?? DEFAULT_WALLET_ADJUST_PER_DAY;
+  // 第七批審查 L4：上限由平台後台設定（模組設定只能調低），每日上限原子累計
+  const { perCall, perDay } = effectiveAdjustLimits(tenant, "wallet", s);
   const reject = async (why: string) => {
     await audit(ctx, tenant.id, "wallet.adjust_rejected", { memberId: m.id, amount: d.amount, reason: d.reason, why });
     throw new ServiceError("invalid", why);
   };
-  if (Math.abs(d.amount) > perCall) await reject(`單次調整上限 ${twd(perCall)}（stored-value 設定 adjustMaxPerCall）`);
+  if (Math.abs(d.amount) > perCall) await reject(`單次調整上限 ${twd(perCall)}（上限由平台後台設定）`);
   const today = await ctx.store.sumCreditKindSince("wallet", tenant.id, "adjust", taipeiDayStartIso());
-  if (today + Math.abs(d.amount) > perDay) await reject(`今日手動調整已達 ${twd(today)}，再調 ${twd(Math.abs(d.amount))} 會超過每日上限 ${twd(perDay)}（stored-value 設定 adjustMaxPerDay）`);
+  if (today + Math.abs(d.amount) > perDay) await reject(`今日手動調整已達 ${twd(today)}，再調 ${twd(Math.abs(d.amount))} 會超過每日上限 ${twd(perDay)}`);
   if (input.confirm !== true) throw new ServiceError("confirm_required", `${d.amount > 0 ? "增加" : "扣除"}會員 ${m.email} 的儲值金 ${twd(Math.abs(d.amount))}（理由：${d.reason}）會寫入只增不改的儲值帳本（今日已調整 ${twd(today)}／上限 ${twd(perDay)}）。請先讓使用者確認，再以 confirm: true 呼叫。`);
+  if (!(await takeAdjustQuota(ctx.store, tenant, "wallet", d.amount, perDay)).allowed) await reject(`今日手動調整已接近每日上限 ${twd(perDay)}（含同時送出的其他調整），這次 ${twd(Math.abs(d.amount))} 會超過`);
   const r = await ctx.store.creditPost("wallet", { tenantId: tenant.id, memberId: m.id, kind: "adjust", amount: d.amount, reason: d.reason, actor: ctx.actor.label, mode: d.amount > 0 ? "credit" : "strict" });
   await audit(ctx, tenant.id, "wallet.adjust", { memberId: m.id, amount: d.amount, reason: d.reason });
   return { memberId: m.id, adjusted: r.amount, balance: r.balance };

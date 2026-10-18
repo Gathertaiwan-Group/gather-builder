@@ -97,7 +97,8 @@ export async function retryHookFailures(
     }
     // 第五六批審查 L2：sandbox 付款成功時保留已在同一交易釋放、並跑過取消側 hooks（候補遞補等）——
     // 那次失敗的補做仍適用（訂單是 paid＋payment_sandbox，不是 cancelled），不能標成不再適用
-    const applicable = f.event === "paid" ? (order.status === "paid" || order.status === "fulfilled") && !order.payment_sandbox : order.status === "cancelled" || !!order.payment_sandbox;
+    // 第七批審查 M1：已出貨訂單退款（refunded_at）也要跑取消側 hooks（沖回點數、分潤、撤銷課程…）
+    const applicable = f.event === "paid" ? (order.status === "paid" || order.status === "fulfilled") && !order.payment_sandbox && !order.refunded_at : order.status === "cancelled" || !!order.payment_sandbox || !!order.refunded_at;
     if (!applicable) {
       await deps.store.resolveHookFailure(f.id, "obsolete");
       resolved++;

@@ -221,6 +221,14 @@ export function createMemoryStore(): Store {
       return { count, allowed: count <= limit };
     },
 
+    async quotaTake(bucket, key, windowStartIso, amount, limit) {
+      const k = `quota|${bucket}|${key}|${windowStartIso}`;
+      const cur = rate.get(k) ?? 0;
+      if (amount < 0 || cur + amount > limit) return { total: cur, allowed: false };
+      rate.set(k, cur + amount);
+      return { total: cur + amount, allowed: true };
+    },
+
     async insertAudit(row) {
       audit.push({ ...clone(row), id: audit.length + 1, at: now() });
     },

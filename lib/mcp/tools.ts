@@ -599,11 +599,22 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
     "refund_order",
     {
       description:
-        "全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需設定退刷密碼〕；PChomePay 與綠界不支援，請到商家後台人工退款）。金額＝該筆線上付款金額，每筆付款只能退一次（重複呼叫會被拒）；退款成功後已付款訂單會自動取消（回補庫存、撤銷課程等）。結果不明（逾時）不會自動重送，請到金流後台確認。🔴 會真的把錢退給客人：必須先讓使用者確認，再帶 confirm: true。需要 orders:write。",
+        "全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需設定退刷密碼〕；PChomePay 與綠界不支援，請到商家後台人工退款）。金額＝該筆線上付款金額，每筆付款只能退一次（重複呼叫會被拒）；退款成功後已付款訂單會自動取消（回補庫存、撤銷課程等），已出貨訂單標為已退款並撤回點數／分潤／課程（不回補庫存）。儲值訂單：客人已用掉部分儲值金時拒絕自動退款（先 cancel_order 收回、再人工退款）；否則先收回儲值金再退款。先用 get_order 看 refundPreview／topupReversal 讓使用者確認。結果不明（逾時）不會自動重送，查證後用 resolve_refund 標記。🔴 會真的把錢退給客人：必須先讓使用者確認，再帶 confirm: true。需要 orders:write。",
       inputSchema: { site, ...orderRef, reason: z.string().max(200).optional(), confirm: z.boolean().optional() },
       annotations: DESTRUCTIVE,
     },
     wrap(async (a) => orders.refundOrder(ctx, a)),
+  );
+
+  server.registerTool(
+    "resolve_refund",
+    {
+      description:
+        "標記卡住（requested，超過 15 分鐘會自動轉 unknown）或結果不明（unknown）的退款：請使用者先到金流商家後台確認，再帶 outcome（succeeded＝已退款成功、會撤回訂單副作用；failed＝退款失敗、可重新 refund_order）與 confirm: true。refundId 從 get_order 的 refunds 取得。需要 orders:write。",
+      inputSchema: { site, refundId: z.string(), outcome: z.enum(["succeeded", "failed"]), note: z.string().max(300).optional(), confirm: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    },
+    wrap(async (a) => orders.resolveRefund(ctx, a)),
   );
 
   server.registerTool(

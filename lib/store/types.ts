@@ -275,6 +275,8 @@ export interface OrderRow {
   points_redeemed?: number;
   points_discount?: number;
   wallet_paid?: number;
+  /** 已出貨訂單退款成功的時間（第七批審查 M1；已付款未出貨的退款會直接取消訂單） */
+  refunded_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -388,8 +390,12 @@ export interface PaymentRow {
   confirm_attempts?: number;
   amount: number;
   sandbox: boolean;
-  status: "pending" | "paid" | "failed" | "paid_after_cancel";
+  status: "pending" | "paid" | "failed" | "paid_after_cancel" | "refunded";
   payment_url: string | null;
+  /** 短網址碼（/p/n/<碼> 等；第七批審查 H1：藍新 MPG 網址上限 200 字） */
+  short_code?: string | null;
+  /** 導回訂單頁用的存取金鑰（secretbox 加密、AAD 綁租戶） */
+  return_key_enc?: string | null;
   raw: Record<string, unknown> | null;
   paid_at: string | null;
   /** 權威回查連續失敗次數（成功回查歸零） */
@@ -497,6 +503,8 @@ export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
   listOrderItems(tenantId: string, orderId: string): Promise<OrderItemRow[]>;
   /** 條件式轉換：只有目前狀態 = from 才更新；回傳更新後的列，沒轉換成功回 null */
   transitionOrder(tenantId: string, id: string, from: OrderStatus, to: OrderStatus, patch: Partial<Pick<OrderRow, "paid_at" | "fulfilled_at" | "shipping_tracking" | "shipping_method" | "payment_sandbox">>): Promise<OrderRow | null>;
+  /** 第七批審查 M1：已出貨訂單退款成功 → refunded_at（只成功一次）＋同交易退回點數折抵／儲值金（builder_mark_order_refunded）；沒標記回 null */
+  markOrderRefunded(tenantId: string, id: string): Promise<OrderRow | null>;
   /** M3：sandbox 付款成功 → 同一交易轉 paid（payment_sandbox）＋釋放報名／預約保留（builder_mark_paid_sandbox）；沒轉換回 null */
   markPaidSandbox(tenantId: string, id: string, paidAt: string): Promise<OrderRow | null>;
   /** 原子取消＋回補庫存（builder_cancel_order） */
@@ -513,8 +521,10 @@ export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
   listPaymentAccounts(tenantId: string): Promise<PaymentAccountRow[]>;
   upsertPaymentAccount(row: Pick<PaymentAccountRow, "tenant_id" | "provider" | "sandbox" | "app_id" | "secret_enc">): Promise<PaymentAccountRow>;
   markPaymentAccount(tenantId: string, provider: ProviderId, patch: Pick<PaymentAccountRow, "status" | "verified_at" | "last_error">): Promise<void>;
-  insertPayment(row: Pick<PaymentRow, "tenant_id" | "order_id" | "provider" | "gateway_order_no" | "amount" | "sandbox">): Promise<PaymentRow>;
+  insertPayment(row: Pick<PaymentRow, "tenant_id" | "order_id" | "provider" | "gateway_order_no" | "amount" | "sandbox"> & Partial<Pick<PaymentRow, "short_code" | "return_key_enc">>): Promise<PaymentRow>;
   getPaymentByGatewayNo(gatewayOrderNo: string): Promise<PaymentRow | null>;
+  /** 短網址碼查付款（跨租戶；呼叫端再比對租戶） */
+  getPaymentByShortCode(code: string): Promise<PaymentRow | null>;
   listPaymentsForOrder(tenantId: string, orderId: string): Promise<PaymentRow[]>;
   updatePayment(tenantId: string, id: string, patch: Partial<Pick<PaymentRow, "payment_url" | "raw" | "status" | "paid_at" | "query_failures" | "last_query_error" | "gateway_trade_no" | "confirm_claimed_at">>): Promise<void>;
   /** LINE Pay：條件式宣告 confirm（confirm_claimed_at 為 null 或早於 staleBeforeIso、且付款仍 pending 才成功；attempts＋1） */
@@ -540,6 +550,8 @@ export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore {
 
   // 原子限流（固定時間窗）
   rateHit(bucket: string, key: string, windowSeconds: number, limit: number): Promise<{ count: number; allowed: boolean }>;
+  /** 以數量累計的原子額度（builder_quota_take）：累計 + amount ≤ limit 才扣並回 allowed */
+  quotaTake(bucket: string, key: string, windowStartIso: string, amount: number, limit: number): Promise<{ total: number; allowed: boolean }>;
 
   // audit
   insertAudit(row: Omit<AuditRow, "id" | "at">): Promise<void>;
@@ -579,6 +591,8 @@ export type CommerceStore = Pick<Store, OrderLinkedExt> & Pick<
   | "listOrders"
   | "listOrderItems"
   | "transitionOrder"
+  | "markOrderRefunded"
+  | "getPaymentByShortCode"
   | "cancelOrder"
   | "markPaidSandbox"
   | "releaseOrderStock"

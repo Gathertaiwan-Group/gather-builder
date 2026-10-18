@@ -48,6 +48,8 @@ export interface SubscriptionRow {
   member_id: string;
   provider: "newebpay";
   sandbox: boolean;
+  /** 短網址碼（/p/sn/<碼> 等；第七批審查 H2：定期定額網址上限 100 字） */
+  short_code?: string | null;
   status: SubscriptionStatus;
   merchant_order_no: string;
   period_no: string | null;
@@ -79,7 +81,8 @@ export interface SubscriptionChargeRow {
   subscription_id: string;
   period_index: number;
   amount: number;
-  status: "paid" | "failed";
+  /** paid_after_end：委託在本站已結束／未記錄後仍被扣款（不恢復訂閱、不開權益，需人工退款） */
+  status: "paid" | "failed" | "paid_after_end";
   trade_no: string | null;
   raw: Record<string, unknown> | null;
   created_at: string;
@@ -112,6 +115,9 @@ export interface PayStore {
   /** 條件式更新（目前狀態 = from 才寫）；回傳是否真的轉換 */
   transitionRefund(tenantId: string, id: string, from: RefundRow["status"], to: RefundRow["status"], patch: Partial<Pick<RefundRow, "provider_refund_no" | "error" | "raw">>): Promise<boolean>;
   listRefundsForOrder(tenantId: string, orderId: string): Promise<RefundRow[]>;
+  getRefund(tenantId: string, id: string): Promise<RefundRow | null>;
+  /** 跨租戶：requested 超過 olderThanIso 仍未有結果的退款（cron 用） */
+  listStaleRefunds(olderThanIso: string, limit: number): Promise<RefundRow[]>;
 
   // subscription plans
   insertSubscriptionPlan(row: Omit<SubscriptionPlanRow, "id" | "created_at" | "updated_at">): Promise<SubscriptionPlanRow>;
@@ -121,7 +127,8 @@ export interface PayStore {
 
   // subscriptions
   /** 同一會員同一方案已有進行中的訂閱 → 丟 ServiceError(conflict) */
-  insertSubscription(row: Pick<SubscriptionRow, "tenant_id" | "plan_id" | "member_id" | "provider" | "sandbox" | "merchant_order_no" | "amount" | "interval" | "total_periods">): Promise<SubscriptionRow>;
+  insertSubscription(row: Pick<SubscriptionRow, "tenant_id" | "plan_id" | "member_id" | "provider" | "sandbox" | "merchant_order_no" | "amount" | "interval" | "total_periods"> & Partial<Pick<SubscriptionRow, "short_code">>): Promise<SubscriptionRow>;
+  getSubscriptionByShortCode(code: string): Promise<SubscriptionRow | null>;
   getSubscription(tenantId: string, id: string): Promise<SubscriptionRow | null>;
   getSubscriptionByMerchantOrderNo(merchantOrderNo: string): Promise<SubscriptionRow | null>;
   listSubscriptions(tenantId: string, opts: { status?: SubscriptionStatus; memberId?: string; planId?: string; limit: number; offset: number }): Promise<{ rows: SubscriptionRow[]; total: number }>;
@@ -130,11 +137,11 @@ export interface PayStore {
   /** 條件式狀態轉換（目前狀態 ∈ from 才寫）；沒轉換回 null */
   transitionSubscription(tenantId: string, id: string, from: SubscriptionStatus[], to: SubscriptionStatus, patch?: SubscriptionPatch): Promise<SubscriptionRow | null>;
   /** 不改狀態的欄位更新；where 可加條件（例如 entitlement_state = 'none' 才寫） */
-  updateSubscriptionIf(tenantId: string, id: string, where: Partial<Pick<SubscriptionRow, "entitlement_state" | "cancel_state" | "status" | "alerted_at">>, patch: SubscriptionPatch): Promise<SubscriptionRow | null>;
+  updateSubscriptionIf(tenantId: string, id: string, where: Partial<Pick<SubscriptionRow, "entitlement_state" | "cancel_state" | "status" | "alerted_at" | "period_no">>, patch: SubscriptionPatch): Promise<SubscriptionRow | null>;
   /** builder_record_subscription_charge：同一交易插入扣款（同期同結果只一次）＋轉換狀態 */
   recordSubscriptionCharge(
     tenantId: string,
-    input: { subscriptionId: string; periodIndex: number; amount: number; status: "paid" | "failed"; tradeNo: string | null; raw: Record<string, unknown> | null; periodEnd: string; graceUntil: string },
+    input: { subscriptionId: string; periodIndex: number; amount: number; status: "paid" | "failed" | "paid_after_end"; tradeNo: string | null; raw: Record<string, unknown> | null; periodEnd: string; graceUntil: string },
   ): Promise<{ inserted: boolean; status: SubscriptionStatus }>;
   listSubscriptionCharges(tenantId: string, subscriptionId: string): Promise<SubscriptionChargeRow[]>;
 }

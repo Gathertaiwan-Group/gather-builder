@@ -215,6 +215,13 @@ export function createSupabaseStore(db: SupabaseClient = createServiceClient()):
       return { count: r.hit_count, allowed: r.allowed };
     },
 
+    async quotaTake(bucket, key, windowStartIso, amount, limit) {
+      const rows = must(await db.rpc("builder_quota_take", { p_bucket: bucket, p_key: key, p_window_start: windowStartIso, p_amount: amount, p_limit: limit }), "quotaTake") as { total: number | null; allowed: boolean }[];
+      const r = rows[0];
+      if (!r) throw new Error("quotaTake: 沒有回傳");
+      return { total: r.total ?? 0, allowed: r.allowed };
+    },
+
     async insertAudit(row) {
       must(await db.from("builder_audit_log").insert(row), "insertAudit");
     },

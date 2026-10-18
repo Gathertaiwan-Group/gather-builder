@@ -12,11 +12,12 @@ import "./booking";
 import "./courses";
 // 第五批：點數（賺點／沖回）
 import "./loyalty";
-import { topupReversalPreview, topupReversalText } from "./wallet";
+import { isTopupOrder, topupReclaimState, topupReversalPreview, topupReversalText } from "./wallet";
 import { decryptSecret, encryptSecret } from "../secretbox";
 import { PROVIDER_IDS, PROVIDER_LABEL, REFUND_CAPABLE as refundableProviders, isOnlineMethod, type AuthoritativeResult, type PaymentProvider, type ProviderId } from "../pay/types";
 import { providerFromAccount } from "../pay/registry";
 import { payToken, verifyPayToken } from "../pay/notify-token";
+import { CALLBACK_URL_LIMITS, MAX_BASE_URL_FOR_PERIOD, NEWEBPAY_PERIOD_URL_LIMIT, SHORT_CODE_LEN, assertUrlLengths, genShortCode, shortPayUrls, shortSubscriptionUrls } from "../pay/urls";
 import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
 
@@ -295,7 +296,10 @@ export async function getOrder(ctx: ServiceContext, input: { site?: string | nul
     payments: payments.map((p) => ({ provider: p.provider, gatewayOrderNo: p.gateway_order_no, amount: p.amount, status: p.status, sandbox: p.sandbox, paidAt: p.paid_at, createdAt: p.created_at })),
     allowedNext: (["paid", "fulfilled", "cancelled"] as OrderStatus[]).filter((s) => canTransition(o.status, s)),
     topupReversal: topupReversal ? { ...topupReversal, note: topupReversalText(topupReversal) } : null,
-    refunds: (await ctx.store.listRefundsForOrder(tenant.id, o.id)).map((r) => ({ provider: r.provider, amount: r.amount, status: r.status, error: r.error, createdAt: r.created_at })),
+    refunds: (await ctx.store.listRefundsForOrder(tenant.id, o.id)).map((r) => ({ id: r.id, provider: r.provider, amount: r.amount, status: r.status, error: r.error, createdAt: r.created_at })),
+    refundedAt: o.refunded_at ?? null,
+    /** 第七批審查 H4／M1：退款前先讓使用者看到會撤回什麼（儲值訂單另附已用／可收回／不足） */
+    refundPreview: { effects: refundEffectsText(o), topupBlocked: !!topupReversal && topupReversal.used > 0 },
   };
 }
 
@@ -765,6 +769,15 @@ export async function verifyProviderAccount(ctx: ServiceContext, input: { site: 
   if (!acct) throw new ServiceError("invalid", `尚未輸入 ${PROVIDER_LABEL[input.provider]} 憑證`);
   const p = await factory(ctx.store, tenant.id, input.provider, { requireVerified: false });
   if (!p) throw new ServiceError("invalid", "憑證無法使用");
+  // 第七批審查 H1／H2：平台網址太長會讓 callback 網址超過該家上限（藍新 MPG 200、定期定額 100）→ 設定時就拒絕／提示
+  const sample = "X".repeat(SHORT_CODE_LEN);
+  assertUrlLengths(shortPayUrls(ctx.baseUrl, sample, input.provider), CALLBACK_URL_LIMITS[input.provider], PROVIDER_LABEL[input.provider]);
+  let periodOk = true;
+  try {
+    if (input.provider === "newebpay") assertUrlLengths(shortSubscriptionUrls(ctx.baseUrl, sample), NEWEBPAY_PERIOD_URL_LIMIT, "藍新定期定額");
+  } catch {
+    periodOk = false;
+  }
   const r = await p.verifyCredentials();
   if (r.ok) await ctx.store.markPaymentAccount(tenant.id, input.provider, { status: "verified", verified_at: new Date().toISOString(), last_error: null });
   else await ctx.store.markPaymentAccount(tenant.id, input.provider, { status: "unverified", verified_at: null, last_error: r.message.slice(0, 300) });
@@ -773,16 +786,16 @@ export async function verifyProviderAccount(ctx: ServiceContext, input: { site: 
     // subscriptions 模組：藍新憑證驗證後才 enabled
     const row = (await ctx.store.listTenantModules(tenant.id)).find((m) => m.module_id === "subscriptions");
     if (row && row.status !== "disabled") {
-      const want = r.ok ? "enabled" : "pending_setup";
+      const want = r.ok && periodOk ? "enabled" : "pending_setup";
       if (row.status !== want) await ctx.store.upsertTenantModule({ ...row, status: want });
     }
   }
   await audit(ctx, tenant.id, "payment_account.verify", { provider: input.provider, ok: r.ok, sandbox: acct.sandbox });
   if (!r.ok) throw new ServiceError("invalid", `驗證失敗：${r.message}`);
-  return { verified: true, sandbox: acct.sandbox, note: r.note };
+  return { verified: true, sandbox: acct.sandbox, note: [r.note, periodOk ? null : `平台網址（${ctx.baseUrl}）太長，藍新定期定額的網址會超過 100 字上限，訂閱模組無法使用（平台網址需 ≤ ${MAX_BASE_URL_FOR_PERIOD} 字）`].filter(Boolean).join(" ") || undefined };
 }
 
-/** callback／導回網址（帶 tenantId 與每筆 token） */
+/** 舊版（第七批上線初期）callback／導回網址：帶 tenantId 與每筆 token。新付款一律用 lib/pay/urls.ts 的短網址；舊路由保留給還沒完成的舊付款 */
 export function providerUrls(baseUrl: string, tenant: TenantRow, payment: Pick<PaymentRow, "id" | "gateway_order_no" | "provider">, orderNo: string, accessKey: string) {
   const base = baseUrl.replace(/\/$/, "");
   const orderUrl = orderPageUrl(base, tenant, orderNo, accessKey);
@@ -820,8 +833,11 @@ export async function startOnlinePayment(
   if (!provider) throw new ServiceError("invalid", "此商店目前無法使用這個付款方式");
   // 藍新 MerchantOrderNo 只接受英數＿、PAYUNi／黑貓 ≤ 25：GB 開頭 20 碼英數全部相容
   const gatewayOrderNo = genGatewayOrderNo();
-  const payment = await deps.store.insertPayment({ tenant_id: tenant.id, order_id: order.id, provider: method, gateway_order_no: gatewayOrderNo, amount: order.total, sandbox: provider.sandbox });
-  const urls = providerUrls(deps.baseUrl, tenant, payment, order.order_no, input.accessKey);
+  // 第七批審查 H1：短網址（藍新 MPG URL 上限 200 字；原本帶 tenant／token／訂單金鑰的網址 224 字）。超過上限直接拒絕，不送一定失敗的建單
+  const shortCode = genShortCode();
+  const urls = { ...shortPayUrls(deps.baseUrl, shortCode, method), orderUrl: orderPageUrl(deps.baseUrl, tenant, order.order_no, input.accessKey) };
+  assertUrlLengths({ notifyUrl: urls.notifyUrl, returnUrl: urls.returnUrl, cancelUrl: urls.cancelUrl }, CALLBACK_URL_LIMITS[method], PROVIDER_LABEL[method]);
+  const payment = await deps.store.insertPayment({ tenant_id: tenant.id, order_id: order.id, provider: method, gateway_order_no: gatewayOrderNo, amount: order.total, sandbox: provider.sandbox, short_code: shortCode, return_key_enc: encryptSecret(input.accessKey, tenant.id) });
   let r: Awaited<ReturnType<PaymentProvider["createPayment"]>> = null;
   try {
     r = await provider.createPayment({
@@ -904,6 +920,8 @@ export async function handleProviderNotify(
   if (payment.status === "failed") {
     // 之前回查為失敗（例如刷卡被拒），客人在同一筆付款頁重試成功：只有權威回查為已付才重新打開這筆付款
     if (r.kind === "query_failed") return retry("query_failed");
+    // 第七批審查 L1：回查無法辨識 → 要求重送（已警示店主），不回 ok
+    if (r.kind === "unknown") return retry(`unknown_status:${r.q.statusText}`);
     if (r.kind !== "paid") return ok(`already:failed`);
     if (!(await deps.store.transitionPayment(tenant.id, payment.id, "failed", "pending", {}))) return ok("already:changed");
     payment.status = "pending";
@@ -944,8 +962,16 @@ export async function confirmLinepayPayment(deps: PayDeps, tenant: TenantRow, pa
   const provider = (deps.providerFor ? await deps.providerFor(tenant.id, "linepay", payment.sandbox) : await defaultProviderFor(deps.store, tenant.id, "linepay", payment.sandbox)) as LinepayConfirmCapable | null;
   if (!provider || typeof provider.confirm !== "function") return "pending";
   if (order.status !== "pending_payment") {
-    // 訂單已取消／逾期：不請款（授權會自動失效）。付款標 failed，避免日後誤 confirm
-    await deps.store.transitionPayment(tenant.id, payment.id, "pending", "failed", { raw: { reason: `order_${order.status}_not_confirmed` } });
+    // 第七批審查 M2：先用 Check API 權威回查再決定——
+    // 已請款（0123）→ settlePaid（訂單已取消 → paid_after_cancel＋警示店主退款）；已授權未請款（0110）→ 不 confirm（授權會自動失效）、付款標 failed；
+    // 回查失敗／無法辨識 → 先不動（逾期前回查或下次導回再試）
+    const q = await queryAuthoritative(deps, tenant, payment, order.order_no);
+    if (q.kind === "paid") {
+      const out = await settlePaid(deps, tenant, payment, order, q.q);
+      return out === "paid" || out === "already_processed" ? "paid" : out === "paid_after_cancel" ? "failed" : "pending";
+    }
+    if (q.kind === "query_failed" || q.kind === "unknown") return "pending";
+    await deps.store.transitionPayment(tenant.id, payment.id, "pending", "failed", { raw: { reason: `order_${order.status}_not_confirmed`, query: q.q.raw } });
     return "failed";
   }
   if (!(await deps.store.claimPaymentConfirm(tenant.id, payment.id, new Date(Date.now() - LINEPAY_CONFIRM_STALE_MS).toISOString()))) return "pending";
@@ -991,12 +1017,44 @@ export async function handleLinepayConfirm(deps: PayDeps, input: { tenantId: str
 
 /* ------------------------------------------------------------------ 退款（provider 有退款 API 的） */
 
+/** 第七批審查 M1：退款成功後會撤回的副作用（確認訊息用） */
+function refundEffectsText(o: OrderRow): string {
+  if (o.status === "paid") return "退款成功後訂單會自動取消：回補庫存、退回點數折抵與儲值金、沖回這張訂單賺的點數與團主／推薦分潤、撤銷由這張訂單開通的課程與報名";
+  if (o.status === "fulfilled") return "訂單已出貨：退款成功後不回補庫存（貨已寄出），但會退回點數折抵與儲值金、沖回這張訂單賺的點數與推薦分潤、撤銷由這張訂單開通的課程，付款標為已退款";
+  return "訂單已取消（取消時已處理庫存與副作用），退款只把錢退回";
+}
+
+/**
+ * 退款成功後的處理（refund_order 與人工確認 resolve_refund 共用；冪等）：
+ * 付款 paid／paid_after_cancel → refunded；已付款訂單 → 取消（跑取消 hooks）；已出貨訂單 → refunded_at（同交易退回點數折抵／儲值金）＋跑取消側 hooks。
+ */
+async function afterRefundSucceeded(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, tenant: TenantRow, orderId: string, paymentId: string): Promise<{ cancelled: boolean; refundedMarked: boolean }> {
+  for (const from of ["paid", "paid_after_cancel"] as const) if (await deps.store.transitionPayment(tenant.id, paymentId, from, "refunded", {})) break;
+  const o = await deps.store.getOrderById(tenant.id, orderId);
+  if (!o) return { cancelled: false, refundedMarked: false };
+  if (o.status === "paid") {
+    const c = await cancelOrderWithHooks(deps, tenant, o.id, ["paid"], "refunded");
+    return { cancelled: c.transitioned, refundedMarked: false };
+  }
+  if (o.status === "fulfilled") {
+    const moved = await deps.store.markOrderRefunded(tenant.id, o.id);
+    if (moved) {
+      await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system", action: "order.refunded_after_fulfil", payload: { orderNo: o.order_no } });
+      await runCancelHooks(deps.store, tenant, moved, { sendMail: deps.sendMail, baseUrl: deps.baseUrl });
+    }
+    return { cancelled: false, refundedMarked: !!moved };
+  }
+  return { cancelled: false, refundedMarked: false };
+}
+
 /**
  * 全額退款（refund_order，orders:write＋confirm）。規則：
  * - 只退「已付款」的線上付款（含已取消後才付款的 paid_after_cancel），金額＝該筆付款金額（不超過已付；部分退款本版不做）。
  * - 🔴 只能退一次：builder_refunds 的 partial unique index（requested／succeeded／unknown 只能有一筆）先宣告、再呼叫 provider。
- * - 先退錢、成功才改狀態：provider 成功 → 退款 succeeded → 訂單若仍是已付款則取消（跑取消 hooks：回補庫存、撤銷課程…）。
- * - provider 確定失敗 → failed（可重新申請）；結果不明（逾時）→ unknown，不自動重送，請到金流後台確認。
+ * - 先退錢、成功才改狀態：provider 成功 → 退款 succeeded → afterRefundSucceeded（取消／標記已退款＋撤回副作用）。
+ * - 🔴 第七批審查 H4：儲值訂單只在「入帳的儲值金全部收回得了」時自動退款，而且先收回（取消訂單＝收回儲值金）再退錢；
+ *   客人已用掉一部分 → 拒絕自動退款（部分退款本版不做），提示先 cancel_order 收回可收回部分、再到金流後台只退對應金額。
+ * - provider 確定失敗 → failed（可重新申請）；結果不明（逾時）→ unknown，不自動重送，查證後用 resolve_refund 標記結果。
  * - sandbox 付款只會打測試環境（回查與退款環境＝建單環境）。
  */
 export async function refundOrder(ctx: ServiceContext, input: { site?: string | null; orderId?: string; orderNo?: string; reason?: string; confirm?: boolean }, factory?: (tenantId: string, provider: ProviderId, sandbox: boolean) => Promise<PaymentProvider | null>) {
@@ -1006,15 +1064,30 @@ export async function refundOrder(ctx: ServiceContext, input: { site?: string | 
   const o = await findOrder(ctx, tenant, input);
   const payments = (await ctx.store.listPaymentsForOrder(tenant.id, o.id)).filter((p) => p.status === "paid" || p.status === "paid_after_cancel");
   const payment = payments[0];
-  if (!payment) throw new ServiceError("invalid", `訂單 ${o.order_no} 沒有已付款的線上付款紀錄（線下匯款請自行退款）`);
+  if (!payment) throw new ServiceError("invalid", `訂單 ${o.order_no} 沒有已付款的線上付款紀錄（線下匯款請自行退款；已退款的不能再退）`);
   const label = PROVIDER_LABEL[payment.provider];
   const refunds = await ctx.store.listRefundsForOrder(tenant.id, o.id);
   const prior = refunds.find((r) => r.payment_id === payment.id && r.status !== "failed");
-  if (prior) throw new ServiceError("conflict", prior.status === "succeeded" ? `訂單 ${o.order_no} 已退款（${twd(prior.amount)}），不能再退` : prior.status === "unknown" ? `訂單 ${o.order_no} 上一次退款結果不明，請先到 ${label} 後台確認，不會重送` : `訂單 ${o.order_no} 退款處理中`);
+  if (prior) throw new ServiceError("conflict", prior.status === "succeeded" ? `訂單 ${o.order_no} 已退款（${twd(prior.amount)}），不能再退` : prior.status === "unknown" ? `訂單 ${o.order_no} 上一次退款結果不明，請先到 ${label} 後台確認，再用 resolve_refund 標記結果；不會重送` : `訂單 ${o.order_no} 退款處理中（超過 15 分鐘仍無結果會轉為「結果不明」，請到 ${label} 後台確認後用 resolve_refund 標記）`);
   const provider = factory ? await factory(tenant.id, payment.provider, payment.sandbox) : await defaultProviderFor(ctx.store, tenant.id, payment.provider, payment.sandbox);
   if (!provider?.refund) throw new ServiceError("invalid", `${label} 不支援自動退款（或未設定退刷密碼），請到 ${label} 商家後台人工退款`);
   const amount = payment.amount;
-  requireConfirm(input.confirm, `退款 ${twd(amount)} 給訂單 ${o.order_no}（${label}${payment.sandbox ? "，測試環境" : ""}）會真的把錢退給客人且無法撤回${o.status === "paid" ? "，退款成功後訂單會自動取消（回補庫存、撤銷課程等）" : ""}`);
+  // H4：儲值訂單
+  const topupOrder = isTopupOrder(o);
+  const topup = topupOrder ? await topupReversalPreview(ctx.store, tenant, o) : null;
+  if (topupOrder) {
+    if (topup && topup.used > 0) {
+      throw new ServiceError("invalid", `儲值訂單 ${o.order_no}：${topupReversalText(topup)}。客人已用掉一部分，不提供自動全額退款（部分退款本版不做）：請先用 cancel_order（confirm）收回可收回的 ${twd(topup.reclaimable)}，再到 ${label} 商家後台人工退款（只退可收回部分對應的金額）。`);
+    }
+    if (!topup) {
+      const st = await topupReclaimState(ctx.store, tenant, o);
+      if (st.credited > 0 && st.reclaimed < st.credited) throw new ServiceError("invalid", `儲值訂單 ${o.order_no} 取消時只收回 ${twd(st.reclaimed)}（入帳 ${twd(st.credited)}），不提供自動全額退款：請到 ${label} 商家後台人工退款可收回部分對應的金額。`);
+    }
+  }
+  requireConfirm(
+    input.confirm,
+    `退款 ${twd(amount)} 給訂單 ${o.order_no}（${label}${payment.sandbox ? "，測試環境" : ""}）會真的把錢退給客人且無法撤回。${refundEffectsText(o)}${topup ? `。儲值金：${topupReversalText(topup)}；會先收回儲值金再退款` : ""}`,
+  );
   let refund;
   try {
     refund = await ctx.store.insertRefund({ tenant_id: tenant.id, order_id: o.id, payment_id: payment.id, provider: payment.provider, amount, requested_by: ctx.actor.label, reason: input.reason?.trim().slice(0, 200) || null });
@@ -1023,6 +1096,17 @@ export async function refundOrder(ctx: ServiceContext, input: { site?: string | 
     throw e;
   }
   await audit(ctx, tenant.id, "order.refund_request", { orderNo: o.order_no, provider: payment.provider, amount, sandbox: payment.sandbox });
+  const deps = { store: ctx.store, sendMail: ctx.sendMail, baseUrl: ctx.baseUrl };
+  if (topupOrder && o.status === "paid") {
+    // H4：先收回儲值金（取消訂單＝同一套冪等的收回）→ 確認全部收回 → 才退錢；收不足就不退（客人在這期間用掉了）
+    await cancelOrderWithHooks(deps, tenant, o.id, ["paid"], "refund_reclaim");
+    const st = await topupReclaimState(ctx.store, tenant, o);
+    if (st.reclaimed < st.credited) {
+      await ctx.store.transitionRefund(tenant.id, refund.id, "requested", "failed", { error: `儲值金只收回 ${st.reclaimed}／${st.credited}，未自動退款` });
+      await audit(ctx, tenant.id, "order.refund_reclaim_short", { orderNo: o.order_no, credited: st.credited, reclaimed: st.reclaimed });
+      throw new ServiceError("invalid", `訂單已取消並收回儲值金 ${twd(st.reclaimed)}，但客人在這期間用掉了 ${twd(st.credited - st.reclaimed)}，沒有自動退款：請到 ${label} 商家後台人工退款可收回部分對應的金額。`);
+    }
+  }
   let r: Awaited<ReturnType<NonNullable<PaymentProvider["refund"]>>>;
   try {
     r = await provider.refund({ gatewayOrderNo: payment.gateway_order_no, amount, tradeNo: payment.gateway_trade_no ?? null });
@@ -1032,20 +1116,58 @@ export async function refundOrder(ctx: ServiceContext, input: { site?: string | 
   if (r.kind === "ok") {
     await ctx.store.transitionRefund(tenant.id, refund.id, "requested", "succeeded", { provider_refund_no: r.refundNo ?? null, raw: r.raw });
     await audit(ctx, tenant.id, "order.refund", { orderNo: o.order_no, provider: payment.provider, amount });
-    let cancelled = false;
-    if (o.status === "paid") {
-      const c = await cancelOrderWithHooks({ store: ctx.store, sendMail: ctx.sendMail, baseUrl: ctx.baseUrl }, tenant, o.id, ["paid"], "refunded");
-      cancelled = c.transitioned;
-    }
+    const after = await afterRefundSucceeded(deps, tenant, o.id, payment.id);
     await mailSafe(ctx, o.contact.email, `【${tenant.name}】訂單 ${o.order_no} 已退款`, `${o.contact.name} 你好，\n\n訂單 ${o.order_no} 已透過 ${label} 退款 ${twd(amount)}。實際入帳時間依發卡銀行／錢包而定。`);
-    return { refunded: true, amount, status: "succeeded" as const, orderCancelled: cancelled, note: `已退款 ${twd(amount)}${cancelled ? "，訂單已取消" : ""}。` };
+    const cancelled = after.cancelled || (topupOrder && o.status === "paid");
+    return { refunded: true, amount, status: "succeeded" as const, orderCancelled: cancelled, refundedAfterFulfil: after.refundedMarked, note: `已退款 ${twd(amount)}${cancelled ? "，訂單已取消" : after.refundedMarked ? "，訂單標為已退款（已撤回點數、分潤與權益）" : ""}。` };
   }
   if (r.kind === "rejected") {
     await ctx.store.transitionRefund(tenant.id, refund.id, "requested", "failed", { error: r.message.slice(0, 300), raw: r.raw ?? null });
     await audit(ctx, tenant.id, "order.refund_failed", { orderNo: o.order_no, provider: payment.provider, message: r.message.slice(0, 200) });
-    throw new ServiceError("invalid", `退款失敗：${r.message}`);
+    throw new ServiceError("invalid", `退款失敗：${r.message}${topupOrder && o.status === "paid" ? "（訂單已取消並收回儲值金，可再用 refund_order 重試退款）" : ""}`);
   }
   await ctx.store.transitionRefund(tenant.id, refund.id, "requested", "unknown", { error: r.message.slice(0, 300), raw: r.raw ?? null });
   await audit(ctx, tenant.id, "order.refund_unknown", { orderNo: o.order_no, provider: payment.provider, message: r.message.slice(0, 200) });
-  return { refunded: false, amount, status: "unknown" as const, orderCancelled: false, note: `退款結果不明（${r.message}）。請到 ${label} 商家後台確認是否已退款；系統不會自動重送。` };
+  return { refunded: false, amount, status: "unknown" as const, orderCancelled: false, note: `退款結果不明（${r.message}）。請到 ${label} 商家後台確認是否已退款，再用 resolve_refund 標記結果；系統不會自動重送。` };
+}
+
+/**
+ * 第七批審查 L2：卡住（requested）或結果不明（unknown）的退款，店主到金流後台查證後標記結果（orders:write＋confirm）。
+ * succeeded → 跑退款成功後的處理（冪等）；failed → 可重新申請退款。
+ */
+export async function resolveRefund(ctx: ServiceContext, input: { site?: string | null; refundId: string; outcome: "succeeded" | "failed"; note?: string; confirm?: boolean }) {
+  requireScope(ctx, "orders:write");
+  const tenant = await resolveTenant(ctx, input.site);
+  await requireShop(ctx, tenant);
+  const rf = await ctx.store.getRefund(tenant.id, input.refundId);
+  if (!rf) throw new ServiceError("not_found", "找不到退款紀錄");
+  if (rf.status !== "requested" && rf.status !== "unknown") throw new ServiceError("conflict", `這筆退款已是「${rf.status}」，不能再標記`);
+  if (input.outcome !== "succeeded" && input.outcome !== "failed") throw new ServiceError("invalid", "outcome 需為 succeeded 或 failed");
+  const order = await ctx.store.getOrderById(tenant.id, rf.order_id);
+  requireConfirm(input.confirm, `把退款（${twd(rf.amount)}，${PROVIDER_LABEL[rf.provider]}）標記為「${input.outcome === "succeeded" ? "已退款成功" : "退款失敗"}」——請先到金流商家後台確認${input.outcome === "succeeded" && order ? `。${refundEffectsText(order)}` : ""}`);
+  const moved = await ctx.store.transitionRefund(tenant.id, rf.id, rf.status, input.outcome, { error: input.note?.trim().slice(0, 300) || (input.outcome === "failed" ? "店主確認退款失敗" : null) });
+  if (!moved) throw new ServiceError("conflict", "退款狀態已被其他操作改變，請重新讀取");
+  await audit(ctx, tenant.id, "order.refund_resolve", { refundId: rf.id, outcome: input.outcome, orderNo: order?.order_no ?? null });
+  const after = input.outcome === "succeeded" ? await afterRefundSucceeded({ store: ctx.store, sendMail: ctx.sendMail, baseUrl: ctx.baseUrl }, tenant, rf.order_id, rf.payment_id) : null;
+  return { refundId: rf.id, status: input.outcome, orderCancelled: !!after?.cancelled, refundedAfterFulfil: !!after?.refundedMarked };
+}
+
+/** 退款狀態查詢用（get_order 已附 refunds；這裡給 MCP 列出卡住的） */
+export const REFUND_STALE_MINUTES = 15;
+
+/** 每日 cron：requested 超過 15 分鐘仍無結果（程序中斷或逾時）→ 轉 unknown（不自動重送）並警示店主查證後用 resolve_refund 標記 */
+export async function sweepStaleRefunds(deps: { store: Store; sendMail?: Mailer; baseUrl: string }, now = Date.now()) {
+  const stale = await deps.store.listStaleRefunds(new Date(now - REFUND_STALE_MINUTES * 60_000).toISOString(), 100);
+  let marked = 0;
+  for (const rf of stale) {
+    if (!(await deps.store.transitionRefund(rf.tenant_id, rf.id, "requested", "unknown", { error: "退款請求逾時未回報結果（程序可能中斷），請到金流後台確認" }))) continue;
+    marked++;
+    const tenant = await deps.store.getTenantById(rf.tenant_id);
+    const order = tenant ? await deps.store.getOrderById(tenant.id, rf.order_id) : null;
+    if (!tenant) continue;
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system", action: "order.refund_stale", payload: { refundId: rf.id, orderNo: order?.order_no ?? null } });
+    const settings = await publishedShopSettings(deps.store, tenant);
+    if (settings.ownerEmail) await mailSafe(deps, settings.ownerEmail, `⚠️【${tenant.name}】退款結果不明 ${order?.order_no ?? ""}`, `訂單 ${order?.order_no ?? rf.order_id} 的 ${PROVIDER_LABEL[rf.provider]} 退款（${twd(rf.amount)}）送出後一直沒有結果。系統不會自動重送。\n請到 ${PROVIDER_LABEL[rf.provider]} 商家後台確認是否已退款，再到後台訂單頁（或 MCP resolve_refund）標記結果。`);
+  }
+  return { scanned: stale.length, marked };
 }

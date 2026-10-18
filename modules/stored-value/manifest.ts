@@ -9,9 +9,9 @@ export const storedValueSettings = z
     ownerEmail: z.email({ message: "通知信箱格式不正確" }).optional(),
     /** 顯示在儲值頁的注意事項（例如履約保證說明、退款規則） */
     notice: optText(1000),
-    /** 店主手動調整儲值金（adjust_balance）單次上限（NT$，預設 3,000）——審查 M3 */
+    /** 店主手動調整儲值金（adjust_balance）單次上限（NT$）——🔴 第七批審查 L4：只能把平台後台設定的上限（預設 3,000）調低，不能調高 */
     adjustMaxPerCall: z.number().int().min(1).max(1_000_000).optional(),
-    /** 店主手動調整每日上限（全站加總、台北日，預設 NT$10,000） */
+    /** 店主手動調整每日上限（全站加總、台北日）——只能調低平台後台的上限（預設 NT$10,000） */
     adjustMaxPerDay: z.number().int().min(1).max(10_000_000).optional(),
   })
   .strict();

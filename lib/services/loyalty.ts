@@ -4,6 +4,7 @@ import { loyaltySettings, tierSchema, type LoyaltySettings, type Tier } from "@/
 import { ServiceError, activeModuleIds, audit, loadDraft, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
 import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
+import { effectiveAdjustLimits, takeAdjustQuota } from "./adjust-limits";
 import { registerOrderHooks, type CancelDeps, type HookDeps } from "./order-hooks";
 import { configureModule } from "./modules";
 import { computeLedgerState } from "../loyalty/ledger";
@@ -168,16 +169,17 @@ export async function adjustPoints(ctx: ServiceContext, input: { site?: string |
   const d = parse(adjustInput, { amount: input.amount, reason: input.reason });
   const m = await findMember(ctx, tenant, input);
   const s = await publishedLoyaltySettings(ctx.store, tenant);
-  const perCall = s.adjustMaxPerCall ?? DEFAULT_POINTS_ADJUST_PER_CALL;
-  const perDay = s.adjustMaxPerDay ?? DEFAULT_POINTS_ADJUST_PER_DAY;
+  // 第七批審查 L4：上限由平台後台設定（模組設定只能調低），每日上限原子累計
+  const { perCall, perDay } = effectiveAdjustLimits(tenant, "points", s);
   const reject = async (why: string) => {
     await audit(ctx, tenant.id, "loyalty.adjust_rejected", { memberId: m.id, amount: d.amount, reason: d.reason, why });
     throw new ServiceError("invalid", why);
   };
-  if (Math.abs(d.amount) > perCall) await reject(`單次調整上限 ${perCall} 點（loyalty 設定 adjustMaxPerCall）`);
+  if (Math.abs(d.amount) > perCall) await reject(`單次調整上限 ${perCall} 點（上限由平台後台設定）`);
   const today = await ctx.store.sumCreditKindSince("points", tenant.id, "adjust", taipeiDayStartIso());
-  if (today + Math.abs(d.amount) > perDay) await reject(`今日手動調整已達 ${today} 點，再調 ${Math.abs(d.amount)} 點會超過每日上限 ${perDay} 點（loyalty 設定 adjustMaxPerDay）`);
+  if (today + Math.abs(d.amount) > perDay) await reject(`今日手動調整已達 ${today} 點，再調 ${Math.abs(d.amount)} 點會超過每日上限 ${perDay} 點`);
   if (input.confirm !== true) throw new ServiceError("confirm_required", `${d.amount > 0 ? "加" : "扣"} ${Math.abs(d.amount)} 點給 ${m.email}（理由：${d.reason}）會寫入只增不改的點數帳本（今日已調整 ${today}／上限 ${perDay} 點）。請先讓使用者確認，再以 confirm: true 呼叫。`);
+  if (!(await takeAdjustQuota(ctx.store, tenant, "points", d.amount, perDay)).allowed) await reject(`今日手動調整已接近每日上限 ${perDay} 點（含同時送出的其他調整），這次 ${Math.abs(d.amount)} 點會超過`);
   const r = await ctx.store.creditPost("points", {
     tenantId: tenant.id,
     memberId: m.id,

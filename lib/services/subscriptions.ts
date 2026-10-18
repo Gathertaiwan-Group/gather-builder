@@ -11,7 +11,8 @@ import { maskEmail } from "./class-common";
 import { providerFromAccount } from "../pay/registry";
 import type { NewebpayProvider } from "../pay/newebpay";
 import { intAmount, parseBody, taipeiFormat } from "../pay/crypto";
-import { payToken, verifyPayToken } from "../pay/notify-token";
+import { verifyPayToken } from "../pay/notify-token";
+import { NEWEBPAY_PERIOD_URL_LIMIT, assertUrlLengths, genShortCode, shortSubscriptionUrls } from "../pay/urls";
 import type { Mailer } from "../mail";
 
 /**
@@ -192,14 +193,16 @@ export async function subscribe(deps: SubDeps, input: { tenant: TenantRow; membe
   }
   let sub: SubscriptionRow;
   try {
-    sub = await deps.store.insertSubscription({ tenant_id: tenant.id, plan_id: plan.id, member_id: member.id, provider: "newebpay", sandbox: acct.sandbox, merchant_order_no: genMerOrderNo(), amount: plan.amount, interval: plan.interval, total_periods: plan.total_periods });
+    // 第七批審查 H2：定期定額 ReturnURL／NotifyURL／BackURL 上限 100 字 → 短網址；超過上限直接拒絕
+    const code = genShortCode();
+    assertUrlLengths(shortSubscriptionUrls(deps.baseUrl, code), NEWEBPAY_PERIOD_URL_LIMIT, "藍新定期定額");
+    sub = await deps.store.insertSubscription({ tenant_id: tenant.id, plan_id: plan.id, member_id: member.id, provider: "newebpay", sandbox: acct.sandbox, merchant_order_no: genMerOrderNo(), amount: plan.amount, interval: plan.interval, total_periods: plan.total_periods, short_code: code });
   } catch (e) {
     if (e instanceof ServiceError && e.code === "conflict") throw new ServiceError("conflict", "你已經有這個方案的訂閱（或剛送出、尚在處理中），請到會員中心查看");
     throw e;
   }
   const pp = periodPlan(plan.interval, plan.trial_days);
-  const base = deps.baseUrl.replace(/\/$/, "");
-  const q = `s=${encodeURIComponent(sub.id)}&t=${payToken("notify", `sub:${sub.id}`)}`;
+  const urls = shortSubscriptionUrls(deps.baseUrl, sub.short_code!);
   const form = provider.buildPeriodForm({
     merOrderNo: sub.merchant_order_no,
     prodDesc: `${tenant.name} ${plan.name}`,
@@ -208,9 +211,9 @@ export async function subscribe(deps: SubDeps, input: { tenant: TenantRow; membe
     periodPoint: pp.periodPoint,
     startType: pp.startType,
     times: plan.total_periods,
-    notifyUrl: `${base}/api/subscriptions/newebpay/notify/${tenant.id}?${q}`,
-    returnUrl: `${base}/api/subscriptions/newebpay/return/${tenant.id}?s=${encodeURIComponent(sub.id)}&t=${payToken("return", `sub:${sub.id}`)}`,
-    backUrl: `${base}/s/${tenant.slug}/account`,
+    notifyUrl: urls.notifyUrl,
+    returnUrl: urls.returnUrl,
+    backUrl: urls.backUrl,
     payerEmail: member.email,
   });
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: `member:${member.id}`, action: "subscription.start", payload: { subscriptionId: sub.id, planId: plan.id, amount: plan.amount, sandbox: acct.sandbox } });
@@ -306,27 +309,46 @@ async function onCreation(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow
   return recordCharge(deps, tenant, { ...sub, period_no: periodNo }, provider, 1, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { create: r } }, ok, retry);
 }
 
-async function onPeriodCharge(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider, data: Record<string, unknown>, r: Record<string, unknown>, ok: R, retry: R) {
+async function onPeriodCharge(deps: SubDeps, tenant: TenantRow, subIn: SubscriptionRow, provider: NewebpayProvider, data: Record<string, unknown>, r: Record<string, unknown>, ok: R, retry: R) {
+  let sub = subIn;
   const n = intAmount(r.AlreadyTimes);
   if (!n || n < 1 || n > sub.total_periods) return ok("bad_period_index");
   const orderNo = String(r.OrderNo ?? "");
   if (orderNo && orderNo !== `${sub.merchant_order_no}_${n}`) return ok("order_no_mismatch");
-  if (!sub.period_no) return retry("not_activated_yet");
   const success = String(data.Status) === "SUCCESS" && String(r.RespondCode ?? "") === "00";
   if (intAmount(r.AuthAmt) !== sub.amount) return ok("amount_mismatch");
+  // 第七批審查 H3：本地沒記到 PeriodNo（建立通知遺失）→ 用通知中的 PeriodNo，先以委託單查詢確認它真的屬於這筆委託
+  const notifiedPeriodNo = String(r.PeriodNo ?? "");
+  const periodNo = sub.period_no ?? notifiedPeriodNo;
+  if (!periodNo || !/^[A-Za-z0-9]{1,30}$/.test(periodNo)) return queryFailed(deps, tenant, sub, "每期通知沒有可用的委託單號（PeriodNo）", retry, true);
   // 權威回查 1：委託單查詢（已授權期數必須涵蓋這一期、委託狀態為扣款中／已到期）
-  const q = await provider.queryPeriod(sub.merchant_order_no, sub.period_no);
+  const q = await provider.queryPeriod(sub.merchant_order_no, periodNo);
   if (!q || String(q.Status) !== "SUCCESS") return queryFailed(deps, tenant, sub, "委託單查詢失敗", retry);
   const qr = (q.Result ?? {}) as Record<string, unknown>;
   const already = intAmount(qr.AlreadyTimes) ?? 0;
   const st = String(qr.Status ?? "");
   if (already < n) return ok("query_not_reached");
   if (intAmount(qr.PeriodAmt) !== sub.amount) return ok("query_amount_mismatch");
+  if (!sub.period_no) {
+    // 回填（條件式：period_no 仍為 null 才寫）
+    const filled = await deps.store.updateSubscriptionIf(tenant.id, sub.id, { period_no: null }, { period_no: periodNo });
+    sub = filled ?? (await deps.store.getSubscription(tenant.id, sub.id)) ?? sub;
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "newebpay", action: "subscription.period_no_backfill", payload: { subscriptionId: sub.id, periodNo } });
+  }
+  // 本地已結束（取消／停權）或從未開通（pending 已被清掉）卻仍在扣款 → 終止委託、警示店主、這期記 paid_after_end（不開權益）
+  if (sub.status === "cancelled" || sub.status === "expired") {
+    if (success) return chargeAfterEnd(deps, tenant, sub, provider, n, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { notify: r } }, ok);
+    if (sub.cancel_state !== "done") await terminateLeftover(deps, tenant, sub, provider);
+    return ok(`failed_after_end:${n}`);
+  }
   if (!success) return recordCharge(deps, tenant, sub, provider, n, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { notify: r }, failed: true }, ok, retry);
   if (st !== "1" && st !== "4") return queryFailed(deps, tenant, sub, `委託狀態 ${st}，與「本期授權成功」不一致`, retry, true);
   // 權威回查 2：交易查詢（藍新未明文保證每期可用 QueryTradeInfo 查到：查到就以它為準，查無才只依委託單查詢——列為已知風險）
+  // 第七批審查 L3：AlreadyTimes 也算失敗的期數，不能單獨證明扣款成功 → 必須交易查詢查得到且 TradeStatus 1、金額相符才入帳；
+  // 查不到／查詢失敗＝待確認（不入帳、要求藍新重送、警示店主到藍新後台確認）
   const t = await provider.queryRaw(orderNo || `${sub.merchant_order_no}_${n}`, sub.amount);
-  if (t && String(t.Status) === "SUCCESS") {
+  if (!t || String(t.Status) !== "SUCCESS") return queryFailed(deps, tenant, sub, `第 ${n} 期交易查詢查不到（${t ? String(t.Status) : "查詢失敗"}），待確認，不入帳`, retry, true);
+  {
     const tr = (t.Result ?? {}) as Record<string, unknown>;
     if (String(tr.TradeStatus) !== "1" || intAmount(tr.Amt) !== sub.amount) return queryFailed(deps, tenant, sub, `交易查詢與通知不一致（TradeStatus=${String(tr.TradeStatus)}）`, retry, true);
   }
@@ -342,6 +364,29 @@ async function queryFailed(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRo
     if (owner) await mailSafe(deps, owner, `⚠️【${tenant.name}】訂閱扣款狀態無法確認`, `訂閱（委託編號 ${sub.merchant_order_no}）的扣款通知無法用藍新回查確認：${reason}\n系統不會入帳這一期，會持續等待藍新重送。請到藍新商店後台確認這張委託的授權紀錄。`);
   }
   return retry(`query_failed:${reason}`);
+}
+
+/** 委託在本站已結束但藍新仍在扣款：終止委託（冪等：PER10065 等視同已終止）並記錄結果 */
+async function terminateLeftover(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider) {
+  if (!sub.period_no) return { kind: "unknown" as const, message: "沒有委託單號" };
+  const t = await provider.terminatePeriod(sub.merchant_order_no, sub.period_no);
+  const done = t.kind === "ok" || t.kind === "already";
+  await deps.store.updateSubscriptionIf(tenant.id, sub.id, {}, { cancel_state: done ? "done" : "failed", cancel_attempts: sub.cancel_attempts + 1, cancel_error: done ? null : ("message" in t ? t.message : "終止失敗").slice(0, 300) });
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:subscriptions", action: done ? "subscription.terminate_leftover" : "subscription.terminate_leftover_failed", payload: { subscriptionId: sub.id } });
+  return t;
+}
+
+/** 第七批審查 H3：結束後仍被扣款 → 終止委託＋這期記 paid_after_end（不恢復訂閱、不開權益）＋警示店主退款（同一期只記／只寄一次） */
+async function chargeAfterEnd(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider, n: number, c: { amount: number; tradeNo: string | null; raw: Record<string, unknown> }, ok: R) {
+  const t = sub.cancel_state === "done" ? ({ kind: "already" } as const) : await terminateLeftover(deps, tenant, sub, provider);
+  const now = new Date().toISOString();
+  const res = await deps.store.recordSubscriptionCharge(tenant.id, { subscriptionId: sub.id, periodIndex: n, amount: c.amount, status: "paid_after_end", tradeNo: c.tradeNo, raw: c.raw, periodEnd: now, graceUntil: now });
+  if (!res.inserted) return ok(`duplicate_after_end:${n}`);
+  await deps.store.insertAudit({ tenant_id: tenant.id, actor: "newebpay", action: "subscription.paid_after_end", payload: { subscriptionId: sub.id, period: n, amount: c.amount } });
+  const owner = await ownerEmail(deps.store, tenant);
+  const terminated = t.kind === "ok" || t.kind === "already";
+  if (owner) await mailSafe(deps, owner, `🔴【${tenant.name}】已結束的訂閱仍被扣款，請人工退款`, `訂閱（委託編號 ${sub.merchant_order_no}）在本站狀態為 ${sub.status}，但藍新第 ${n} 期授權成功 ${twd(c.amount)}。\n系統${terminated ? "已終止這張委託" : "終止委託失敗，請立刻到藍新後台手動終止"}，這期不會開通任何權益。請到藍新後台退款給會員。`);
+  return ok(`paid_after_end:${n}`);
 }
 
 async function recordCharge(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, _provider: NewebpayProvider, n: number, c: { amount: number; tradeNo: string | null; raw: Record<string, unknown>; failed?: boolean }, ok: R, _retry: R) {
@@ -524,6 +569,33 @@ export async function memberSubscriptions(store: Store, tenant: TenantRow, membe
 
 /* ================================================================== 每日 cron（寬限到期停權、應扣未扣、取消重試、放棄的 pending） */
 
+/**
+ * 第七批審查 H3：放棄的 pending 沒有 PeriodNo（藍新的建立通知沒收到）→ 不能只在本地取消：
+ * 先用 MerchantOrderNo 的第一期交易（<委託編號>_1）回查——查得到授權（委託其實已成立）→ 警示店主到藍新後台終止委託並退款，
+ * 本地標 cancel_state=failed（之後若收到每期通知，會用通知裡的 PeriodNo 自動終止，見 onPeriodCharge）；
+ * 回查失敗 → 這次不動（下次 cron 再試）；明確查無 → 才本地取消（試用方案的 10 元驗證查不到時一併警示）。
+ */
+async function abandonPendingWithoutPeriodNo(deps: SubDeps, tenant: TenantRow, s: SubscriptionRow, nowIso: string): Promise<boolean> {
+  const provider = await newebpay(deps, tenant.id, s.sandbox);
+  const t = provider ? await provider.queryRaw(`${s.merchant_order_no}_1`, s.amount) : null;
+  if (!t) {
+    await deps.store.updateSubscriptionIf(tenant.id, s.id, {}, { query_failures: s.query_failures + 1 });
+    if (s.query_failures + 1 < 3) return false; // 回查失敗：下次再試
+  }
+  const status = t ? String(t.Status) : "QUERY_FAILED";
+  const found = status === "SUCCESS";
+  const notFound = status === "TRA10021";
+  const plan = await deps.store.getSubscriptionPlan(tenant.id, s.plan_id);
+  const moved = await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso, cancel_state: notFound && !(plan?.trial_days) ? "done" : "failed", cancel_error: notFound ? null : "委託可能已在藍新成立，但沒有收到委託單號（PeriodNo），請到藍新後台確認並終止" });
+  if (!moved) return false;
+  if (!notFound || (plan?.trial_days ?? 0) > 0) {
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:subscriptions", action: "subscription.abandoned_unverified", payload: { subscriptionId: s.id, tradeQuery: status } });
+    const owner = await ownerEmail(deps.store, tenant);
+    if (owner) await mailSafe(deps, owner, `⚠️【${tenant.name}】請確認一筆未完成的訂閱是否已在藍新成立`, `委託編號 ${s.merchant_order_no} 建立後一直沒有收到藍新的結果通知，系統已在本站取消。\n${found ? "🔴 藍新查得到第一期授權：委託已成立且已扣款——請立刻到藍新後台終止這張委託並退款。" : "無法確認藍新是否已成立這張委託（試用方案或查詢失敗），請到藍新後台搜尋這個委託編號；若已成立請手動終止。"}\n之後若藍新仍送來扣款通知，系統會自動終止委託並通知你退款。`);
+  }
+  return true;
+}
+
 export async function sweepSubscriptions(deps: SubDeps, now = new Date()) {
   const nowIso = now.toISOString();
   const out = { expired: 0, pastDue: 0, revoked: 0, cancelRetried: 0, abandoned: 0 };
@@ -539,7 +611,7 @@ export async function sweepSubscriptions(deps: SubDeps, now = new Date()) {
       if (s.period_no) {
         await requestCancel(deps, tenant, s, "system:abandoned");
         out.abandoned++;
-      } else if (await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso })) out.abandoned++;
+      } else if (await abandonPendingWithoutPeriodNo(deps, tenant, s, nowIso)) out.abandoned++;
       continue;
     }
     if (s.status === "past_due" && s.grace_until && s.grace_until <= nowIso) {

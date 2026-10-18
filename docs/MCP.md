@@ -121,7 +121,8 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `mark_order_paid` | orders:write | 線下匯款訂單標記已收款（**必須** `confirm: true`；PChomePay 訂單由 notify 回查自動更新，不能手動標） |
 | `fulfill_order` | orders:write | 已付款 → 已出貨（可帶物流單號，`confirm: true`） |
 | `cancel_order` | orders:write | 取消並回補庫存（`confirm: true`）；已付款訂單**不會自動退款**，回傳 note 會提示用 `refund_order` 或人工退款 |
-| `refund_order` | orders:write | 全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需退刷密碼〕；PChomePay、綠界不支援→提示人工）。金額＝已付金額、每筆付款只能退一次、結果不明不自動重送；成功後已付款訂單自動取消。**必須** `confirm: true` |
+| `refund_order` | orders:write | 全額退款（藍新、LINE Pay、PAYUNi、黑貓 PAY〔需退刷密碼〕；PChomePay、綠界不支援→提示人工）。金額＝已付金額、每筆付款只能退一次、結果不明不自動重送；成功後已付款訂單自動取消，已出貨訂單標為已退款並撤回點數／分潤／課程（不回補庫存）。🔴 儲值訂單：客人已用掉部分儲值金 → 拒絕自動退款（先 `cancel_order` 收回、再人工退款）；否則先收回儲值金再退款。先用 `get_order` 的 `refundPreview`／`topupReversal` 讓使用者確認。**必須** `confirm: true` |
+| `resolve_refund` | orders:write | 卡住（requested，cron 15 分鐘後轉 unknown）或結果不明的退款：使用者到金流後台查證後標 `outcome: succeeded`（跑退款成功後的處理）或 `failed`（可重新退款）。**必須** `confirm: true` |
 | `get_payment_setup_status` | orders:read | 金流設定狀態：PChomePay 與藍新、綠界、LINE Pay、黑貓 PAY、PAYUNi 各家是否已驗證、測試／正式、遮罩後的商店代號、是否支援後台退款。🔴 **沒有**設定或讀出金鑰的工具：金鑰只能由平台擁有者在後台輸入 |
 | `get_invoice_setup_status` | orders:read | 發票設定狀態（模組、開立時機、憑證是否驗證、是否已設固定 IP 中繼）。🔴 **沒有**設定或讀出 Amego 金鑰的工具 |
 | `list_invoices` / `get_invoice` | orders:read | 發票列表／某訂單發票（狀態、發票號、canVoid） |
@@ -159,11 +160,11 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `list_enrollments` | attendees:read | 學員（email 遮罩、來源、完成單元數） |
 | `cancel_session` | classes:write | 取消場次並通知所有人；已付款者標待退款、不自動退款（`confirm: true`） |
 | `get_member_points` | members:read | 會員點數：餘額、可用、即將到期批次（FIFO）、等級、帳本 |
-| `adjust_points` | points:adjust | 手動加／扣點（理由必填；扣點不能超過可用；單次上限預設 5,000 點、全站每日 20,000 點（loyalty 設定 `adjustMaxPerCall`／`adjustMaxPerDay`）；被拒也寫稽核；**必須** `confirm: true`） |
+| `adjust_points` | points:adjust | 手動加／扣點（理由必填；扣點不能超過可用；單次上限預設 5,000 點、全站每日 20,000 點（🔴 上限只能由平台後台「會員經營」調高；模組設定 `adjustMaxPerCall`／`adjustMaxPerDay` 只能調低；每日上限 DB 原子累計）；被拒也寫稽核；**必須** `confirm: true`） |
 | `list_tiers` | site:read | 會員等級（已發布／草稿）與各等級人數 |
 | `update_tiers` | modules:write | 整份取代等級（進草稿，發布後生效） |
 | `get_member_balance` | members:read | 會員儲值金：餘額、可用、贈送額度到期、帳本 |
-| `adjust_balance` | wallet:adjust | 手動增減儲值金（理由必填；扣款不能超過可用；單次上限預設 NT$3,000、全站每日 NT$10,000（stored-value 設定 `adjustMaxPerCall`／`adjustMaxPerDay`）；被拒也寫稽核；**必須** `confirm: true`） |
+| `adjust_balance` | wallet:adjust | 手動增減儲值金（理由必填；扣款不能超過可用；單次上限預設 NT$3,000、全站每日 NT$10,000（🔴 上限只能由平台後台調高；模組設定只能調低；每日上限 DB 原子累計）；被拒也寫稽核；**必須** `confirm: true`） |
 | `create_topup_plan` / `update_topup_plan` | commerce:write | 儲值方案（付 X 得 X＋贈送、贈送到期天數）；上架或改已上架需 publish ＋ confirm |
 | `list_topup_plans` | site:read | 儲值方案列表 |
 | `translate_content` | content:write | AI 翻譯頁面／導覽／文章／商品／活動／課程（只翻文字欄位、進草稿、標記 AI；每日上限） |

@@ -28,6 +28,13 @@ export function createMemoryPayStore(): PayStore {
       refunds.set(id, { ...r, ...clone(patch), status: to, updated_at: now() });
       return true;
     },
+    async getRefund(tenantId, id) {
+      const r = refunds.get(id);
+      return r && r.tenant_id === tenantId ? clone(r) : null;
+    },
+    async listStaleRefunds(olderThanIso, limit) {
+      return clone([...refunds.values()].filter((r) => r.status === "requested" && r.created_at < olderThanIso).slice(0, limit));
+    },
     async listRefundsForOrder(tenantId, orderId) {
       return clone([...refunds.values()].filter((r) => r.tenant_id === tenantId && r.order_id === orderId).sort((a, b) => a.created_at.localeCompare(b.created_at)));
     },
@@ -84,6 +91,9 @@ export function createMemoryPayStore(): PayStore {
     async getSubscription(tenantId, id) {
       const s = subs.get(id);
       return s && s.tenant_id === tenantId ? clone(s) : null;
+    },
+    async getSubscriptionByShortCode(code) {
+      return clone([...subs.values()].find((s) => !!s.short_code && s.short_code === code) ?? null);
     },
     async getSubscriptionByMerchantOrderNo(no) {
       return clone([...subs.values()].find((s) => s.merchant_order_no === no) ?? null);

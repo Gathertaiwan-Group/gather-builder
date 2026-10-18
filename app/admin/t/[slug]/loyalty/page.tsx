@@ -6,6 +6,7 @@ import { getTenantBySlugAdmin } from "@/lib/services/admin";
 import { getMemberPoints, listTiers } from "@/lib/services/loyalty";
 import { getMemberBalance, listTopupPlans } from "@/lib/services/wallet";
 import { ServiceError } from "@/lib/services/context";
+import { effectiveAdjustLimits } from "@/lib/services/adjust-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,7 @@ export default async function LoyaltyAdmin({ params, searchParams }: { params: P
   const pts = email && !("error" in tiers) ? await orErr(getMemberPoints(ctx, { site: slug, email })) : null;
   const bal = email && !("error" in plans) ? await orErr(getMemberBalance(ctx, { site: slug, email })) : null;
   const act = `/api/admin/tenants/${slug}/loyalty/action`;
+  const limits = { points: effectiveAdjustLimits(tenant, "points", {}), wallet: effectiveAdjustLimits(tenant, "wallet", {}) };
   return (
     <AdminShell sp={sp}>
       <TenantTabs slug={slug} active="/loyalty" name={tenant.name} />
@@ -66,6 +68,21 @@ export default async function LoyaltyAdmin({ params, searchParams }: { params: P
             <input type="checkbox" name="confirm" required /> 確認
           </label>
           <button className="rounded border px-3 py-1" type="submit">送出</button>
+        </form>
+      </Card>
+      <Card title="手動調整上限（只有平台後台能改；模組設定只能調低）">
+        <p className="m-0 mb-2 text-xs text-neutral-600" data-admin="adjust-limits">
+          點數：單次 {limits.points.perCall}、每日 {limits.points.perDay} 點 · 儲值金：單次 NT${limits.wallet.perCall}、每日 NT${limits.wallet.perDay}（每日上限以資料庫原子累計，同時送出也不會超過）
+        </p>
+        <form action={act} method="post" className="flex flex-wrap items-center gap-2 text-sm">
+          <input type="hidden" name="action" value="limits" />
+          <select name="ledger" className="rounded border px-2 py-1">
+            <option value="points">點數</option>
+            <option value="wallet">儲值金（NT$）</option>
+          </select>
+          <input name="perCall" type="number" min={1} placeholder="單次上限" className="w-28 rounded border px-3 py-1" required />
+          <input name="perDay" type="number" min={1} placeholder="每日上限" className="w-28 rounded border px-3 py-1" required />
+          <button className="rounded border px-3 py-1" type="submit">儲存</button>
         </form>
       </Card>
       <Card title="會員等級">

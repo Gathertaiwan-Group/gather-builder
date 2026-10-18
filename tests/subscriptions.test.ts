@@ -138,7 +138,11 @@ describe("訂閱：建立與每期扣款", () => {
     expect(r.form.action).toBe("https://core.newebpay.com/MPG/period");
     const q = Object.fromEntries(new URLSearchParams(aesCbcDecryptHex(r.form.fields.PostData_!, NW.hashKey, NW.hashIv)));
     expect(q).toMatchObject({ Version: "1.5", MerOrderNo: r.subscription.merchant_order_no, PeriodAmt: "299", PeriodType: "M", PeriodStartType: "2", PeriodTimes: "12", PayerEmail: "sub@example.com" });
-    expect(q.NotifyURL).toMatch(new RegExp(`/api/subscriptions/newebpay/notify/${s.tenant.id}\\?s=`));
+    // 第七批審查 H2：短網址（≤ 100 字）
+    expect(q.NotifyURL).toMatch(/^https:\/\/test\.example\/p\/sn\/[A-Za-z0-9]{18}$/);
+    expect(String(q.ReturnURL)).toMatch(/\/p\/sr\/[A-Za-z0-9]{18}$/);
+    expect(String(q.BackURL)).toMatch(/\/p\/sb\/[A-Za-z0-9]{18}$/);
+    for (const k of ["NotifyURL", "ReturnURL", "BackURL"]) expect(String(q[k]).length).toBeLessThanOrEqual(100);
     const sb = await subShop(store, "sub-sbx", { sandbox: true });
     await expect(subscribe(sb.deps, { tenant: sb.tenant, member: sb.member, data: { planId: sb.plan.id } })).rejects.toThrow(/無法線上訂閱/);
     await expect(subscribe(sb.deps, { tenant: sb.tenant, member: sb.member, allowSandbox: true, data: { planId: sb.plan.id } })).resolves.toBeTruthy();
@@ -200,9 +204,12 @@ describe("訂閱：建立與每期扣款", () => {
     s.nw.st.queryDown = true;
     expect((await s.notify(sub.id, charge(sub, 2))).status).toBe(500);
     s.nw.st.queryDown = false;
-    // 交易查詢查無（藍新未保證每期可查）→ 依委託單查詢入帳（已知風險，見 ARCHITECTURE）
+    // 第七批審查 L3：交易查詢查無 → 不再只靠委託單查詢入帳：待確認（要求重送＋警示），不入帳
     s.nw.st.tradeStatus = null;
-    expect((await s.notify(sub.id, charge(sub, 2))).outcome).toBe("charged:2");
+    const pend = await s.notify(sub.id, charge(sub, 2));
+    expect(pend.status).toBe(500);
+    expect(pend.outcome).toMatch(/^query_failed:第 2 期交易查詢查不到/);
+    expect((await s.deps.store.listSubscriptionCharges(s.tenant.id, sub.id)).filter((c) => c.period_index === 2 && c.status === "paid")).toHaveLength(0);
   });
 
   it("試用期：10 元驗證成功 → active（試用）並開通；第 1 期稍後通知入帳", async () => {
@@ -344,5 +351,75 @@ describe("第七批審查修正（訂閱）", () => {
     expect((await s.notify(r2.subscription.id, creation(r2.subscription))).outcome).toBe("created_after_cancel");
     expect(s.nw.st.terminates).toBe(2);
     expect(s.sent.some((m) => m.subject.includes("已取消的訂閱收到藍新委託成立"))).toBe(true);
+  });
+});
+
+describe("第七批審查第二輪（訂閱）", () => {
+  it("H2：定期定額 ReturnURL／NotifyURL／BackURL 用短網址，64 字網域也 ≤ 100；平台網址過長 → 拒絕建立", async () => {
+    const { shortSubscriptionUrls, assertUrlLengths, NEWEBPAY_PERIOD_URL_LIMIT, MAX_BASE_URL_FOR_PERIOD, genShortCode } = await import("@/lib/pay/urls");
+    const host64 = `${"a".repeat(53)}.example.tw`; // 64 字網域
+    expect(host64.length).toBe(64);
+    const urls = shortSubscriptionUrls(`https://${host64}`, genShortCode());
+    for (const v of Object.values(urls)) expect(v.length).toBeLessThanOrEqual(NEWEBPAY_PERIOD_URL_LIMIT);
+    expect(() => assertUrlLengths(shortSubscriptionUrls(`https://${"b".repeat(MAX_BASE_URL_FOR_PERIOD)}`, genShortCode()), NEWEBPAY_PERIOD_URL_LIMIT, "x")).toThrow(/超過上限/);
+    const store = newStore();
+    const s = await subShop(store, "rv2-long");
+    await expect(subscribe({ ...s.deps, baseUrl: `https://${"c".repeat(90)}.tw` }, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } })).rejects.toThrow(/超過上限 100/);
+    expect((await store.listSubscriptions(s.tenant.id, { limit: 5, offset: 0 })).total).toBe(0);
+  });
+
+  it("H3：本地沒記到 PeriodNo 的 pending 訂閱收到每期扣款 → 委託單查詢確認後回填 PeriodNo 並入帳", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv2-backfill");
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    expect(r.subscription.period_no).toBeNull();
+    s.nw.st.already = 1;
+    expect((await s.notify(r.subscription.id, charge(r.subscription, 1))).outcome).toBe("charged:1");
+    expect((await store.getSubscription(s.tenant.id, r.subscription.id))!).toMatchObject({ status: "active", period_no: "P2610190000aaaa" });
+  });
+
+  it("H3：本地已取消（沒有 PeriodNo）後藍新仍扣款 → 回填、終止委託、記 paid_after_end、警示店主、不開權益；重送冪等", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv2-after", { course: true });
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    await store.transitionSubscription(s.tenant.id, r.subscription.id, ["pending"], "cancelled", { cancelled_at: new Date().toISOString(), ended_at: new Date().toISOString() });
+    s.nw.st.already = 2;
+    expect((await s.notify(r.subscription.id, charge(r.subscription, 2))).outcome).toBe("paid_after_end:2");
+    const row = (await store.getSubscription(s.tenant.id, r.subscription.id))!;
+    expect(row).toMatchObject({ status: "cancelled", period_no: "P2610190000aaaa", cancel_state: "done", entitlement_state: "none" });
+    expect(s.nw.st.terminates).toBe(1);
+    expect((await store.listSubscriptionCharges(s.tenant.id, row.id)).map((c) => c.status)).toEqual(["paid_after_end"]);
+    expect(s.sent.filter((m) => m.subject.includes("仍被扣款"))).toHaveLength(1);
+    expect(await store.getEnrollment(s.tenant.id, s.course!.id, s.member.id)).toBeNull();
+    expect((await s.notify(r.subscription.id, charge(r.subscription, 2))).outcome).toBe("duplicate_after_end:2");
+    expect(s.sent.filter((m) => m.subject.includes("仍被扣款"))).toHaveLength(1);
+  });
+
+  it("H3：sweep 放棄的 pending（沒有 PeriodNo）先回查第一期交易：查得到 → 取消但標 cancel_state=failed＋警示；查無 → 本地取消；回查失敗 → 先不動", async () => {
+    const later = new Date(Date.now() + 2 * 3600_000);
+    for (const [mode, want] of [["found", "failed"], ["none", "done"], ["down", "pending"]] as const) {
+      const store = newStore();
+      const s = await subShop(store, `rv2-ab-${mode}`);
+      const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+      s.nw.st.tradeStatus = mode === "found" ? "1" : null;
+      s.nw.st.queryDown = mode === "down";
+      await sweepSubscriptions(s.deps, later);
+      const row = (await store.getSubscription(s.tenant.id, r.subscription.id))!;
+      if (want === "pending") expect(row.status).toBe("pending");
+      else expect(row).toMatchObject({ status: "cancelled", cancel_state: want });
+      expect(s.sent.some((m) => m.subject.includes("請確認一筆未完成的訂閱"))).toBe(mode === "found");
+    }
+  });
+
+  it("L3：委託單查詢 AlreadyTimes 到了、但交易查詢查不到 → 不入帳（待確認＋警示），查到 TradeStatus 1 才入帳", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv2-l3");
+    const { sub } = await activeSub(s);
+    s.nw.st.already = 2;
+    s.nw.st.tradeStatus = null;
+    expect((await s.notify(sub.id, charge(sub, 2))).status).toBe(500);
+    expect(s.sent.some((m) => m.subject.includes("訂閱扣款狀態無法確認"))).toBe(true);
+    s.nw.st.tradeStatus = "1";
+    expect((await s.notify(sub.id, charge(sub, 2))).outcome).toBe("charged:2");
   });
 });

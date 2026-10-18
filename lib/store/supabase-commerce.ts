@@ -216,6 +216,11 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
       const rows = must(await db.rpc("builder_mark_paid_sandbox", { p_tenant: tenantId, p_order: id, p_paid_at: paidAt }), "markPaidSandbox") as OrderRow[] | null;
       return rows?.[0] ?? null;
     },
+    async markOrderRefunded(tenantId, id) {
+      if (!isUuid(id)) return null;
+      const rows = must(await db.rpc("builder_mark_order_refunded", { p_tenant: tenantId, p_order: id }), "markOrderRefunded") as OrderRow[] | null;
+      return rows?.[0] ?? null;
+    },
     async cancelOrder(tenantId, id, from, reason) {
       const rows = must(await db.rpc("builder_cancel_order", { p_tenant: tenantId, p_order: id, p_from: from, p_reason: reason }), "cancelOrder") as {
         transitioned: boolean;
@@ -328,6 +333,10 @@ export function createSupabaseCommerceStore(db: SupabaseClient): CommerceStore {
     },
     async insertPayment(row) {
       return must(await db.from("builder_payments").insert(row).select("*").single(), "insertPayment") as PaymentRow;
+    },
+    async getPaymentByShortCode(code) {
+      if (!/^[A-Za-z0-9]{16,22}$/.test(code)) return null;
+      return must(await db.from("builder_payments").select("*").eq("short_code", code).maybeSingle(), "getPaymentByShortCode") as PaymentRow | null;
     },
     async getPaymentByGatewayNo(gatewayOrderNo) {
       return must(await db.from("builder_payments").select("*").eq("gateway_order_no", gatewayOrderNo).maybeSingle(), "getPaymentByGatewayNo") as PaymentRow | null;
