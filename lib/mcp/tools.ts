@@ -15,6 +15,7 @@ import * as shipping from "../services/shipping";
 import * as coupons from "../services/coupons";
 import * as referral from "../services/referral";
 import * as newsletter from "../services/newsletter";
+import * as aiChat from "../services/ai-chat";
 import { THEME_PRESETS } from "../themes";
 import { TENANT_SCOPES } from "../scopes";
 
@@ -838,6 +839,18 @@ export function registerTools(server: McpServer, ctx: ServiceContext) {
       annotations: RO,
     },
     wrap(async (a) => newsletter.listBroadcasts(ctx, a)),
+  );
+
+  /* ------------------------------------------------------------ AI 客服（ai-chat） */
+
+  server.registerTool(
+    "list_ai_chats",
+    {
+      description: "AI 客服最近的對話摘要（訊息數、最後時間、是否已萃取聯絡資料；聯絡資料本身在 list_inquiries）。AI 的知識＝已發布網站內容＋已上架商品＋ai-chat 模組設定 extraKnowledge（configure_module 設定、發布後生效）。需要 inquiries:read。",
+      inputSchema: { site, limit: z.number().int().optional() },
+      annotations: RO,
+    },
+    wrap(async (a) => aiChat.listAiChats(ctx, a)),
   );
 
   /* ------------------------------------------------------------ 發布 */

@@ -11,10 +11,11 @@ import { manifest as shipping } from "./shipping/manifest";
 import { manifest as coupons } from "./coupons/manifest";
 import { manifest as referral } from "./referral/manifest";
 import { manifest as newsletter } from "./newsletter/manifest";
+import { manifest as aiChat } from "./ai-chat/manifest";
 import type { ModuleManifest, SectionTypeDef } from "./types";
 
 /** 模組註冊表：程式內唯一真相。新增模組只要在這裡加一行。 */
-export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter];
+export const MODULES: ModuleManifest[] = [core, sectionsBasic, blog, portfolio, contactForm, line, members, shop, invoice, shipping, coupons, referral, newsletter, aiChat];
 
 export type Registry = Map<string, ModuleManifest>;
 export const registry: Registry = new Map(MODULES.map((m) => [m.id, m]));

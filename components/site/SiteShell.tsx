@@ -4,6 +4,7 @@ import { moduleActive, moduleConfig, type LoadedSite } from "@/lib/site-loader";
 import { siteHref, type RenderCtx } from "@/modules/render-types";
 import { LineFloating } from "@/modules/line/sections";
 import { siteBasePath } from "@/lib/tenant-resolve";
+import { ChatWidget } from "@/modules/ai-chat/ChatWidget";
 
 export function makeRenderCtx(site: LoadedSite, path: string): RenderCtx {
   return { site, basePath: siteBasePath(site.tenant.slug), path };
@@ -63,6 +64,16 @@ export function SiteShell({ ctx, children }: { ctx: RenderCtx; children: React.R
         </div>
       </footer>
       {moduleActive(site, "line") && <LineFloating ctx={ctx} />}
+      {site.modules.get("ai-chat")?.status === "enabled" && !!process.env.GEMINI_API_KEY && site.mode === "published" && !privatePage && (
+        <ChatWidget
+          endpoint={`/api/s/${site.tenant.slug}/ai-chat`}
+          slug={site.tenant.slug}
+          path={ctx.path}
+          bottom={moduleActive(site, "line") ? 76 : 16}
+          title={moduleConfig<{ assistantName?: string }>(site, "ai-chat").assistantName ?? `${site.tenant.name} 客服`}
+          greeting={moduleConfig<{ greeting?: string }>(site, "ai-chat").greeting ?? `你好！有什麼關於 ${site.tenant.name} 的問題都可以問我。`}
+        />
+      )}
       {ga && (
         <>
           <Script src={`https://www.googletagmanager.com/gtag/js?id=${ga}`} strategy="afterInteractive" />
