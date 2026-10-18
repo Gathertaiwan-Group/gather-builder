@@ -39,7 +39,7 @@
 
 - MCP：`Authorization: Bearer <token>` → `authenticateBearer()` 比對 `builder_api_tokens.token_hash`（sha256，原文只在建立時顯示一次）、未撤銷 → `Actor { tenantId, scopes }`，更新 `last_used_at`。
 - 刻意不做 OAuth 流程、不提供 `/.well-known/oauth-*`、401 不帶 `resource_metadata`（避免客戶端誤走 OAuth discovery）。
-- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
+- scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`、`classes:write`、`attendees:read`、`attendees:write`、`certificates:read`、`certificates:write`、`reviews:write`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
 - 預覽連結：HMAC-SHA256 簽 `{ tenantId, exp }`，1 小時有效（`lib/preview.ts`）。
 - 後台：單一密碼 → HMAC cookie（`lib/adminAuth.ts`），middleware 擋 `/admin` 與 `/api/admin`，頁面與 API 再驗一次；後台 POST 檢查 Origin 防 CSRF。
 - token 發行：發出的 scopes 必須是呼叫者 scopes 的子集（`issue_site_token` 超出直接拒絕；`create_site` 取交集，沒有任何網站 scope 就不發）。
@@ -274,6 +274,16 @@
 | 簽到沒有 QR 圖 | 簽到碼 10 碼（確認信、會員中心），後台輸入；沒有內建 QR 產生。 | 加 QR 產生器（不依賴外部服務）。 |
 | 每日 cron 才遞補／提醒 | Hobby cron 只能每日：候補保留過期後最晚約一天才換下一位（另有讀取時 lazy 處理）；提醒是「明天的活動／預約」。 | 升級每小時 cron 或 pg_cron。 |
 | 預約一個提供者 | 第一版前台自動用第一位啟用的提供者（資料結構與 API 都支援多位）。 | 前台選人、每位各自的時段。 |
+| 點數／儲值金只在商店結帳可用 | 活動票、預約、課程訂單不能用點數折抵或儲值金付款（付款後一樣會賺點）。 | `placeClassOrder` 接 `resolveCredits`（SQL 已支援，`builder_place_class_order` 會呼叫 `builder_apply_order_credits`）。 |
+| 沖回不足不追討 | 已賺的點數／儲值的金額被用掉後訂單取消：扣到 0、記 `meta.shortfall` 與稽核，不讓餘額變負。 | 記負債帳（下次賺點先抵）或退款時人工扣除。 |
+| 儲值金屬預收款 | 平台只提供功能；履約保證／信託由店家依《零售業等禮券定型化契約應記載及不得記載事項》自行處理。儲值訂單取消不會自動退款。 | 串接信託／履約保證、退款流程。 |
+| 多語只翻內容 | 模組頁面的固定按鈕文字、Email 通知仍為中文；人員名錄、文件、公告不在可翻譯清單。正式站目前沒有 `GEMINI_API_KEY`，非測試網站只能手動翻譯（`set_translation`）。 | 模組 UI 字典、通知信多語、擴充 `ENTITY_FIELDS`；在 Vercel 設 `GEMINI_API_KEY`。 |
+| 站內搜尋沒有索引 | `strpos` 全表掃描（只掃該租戶）；頁面文字在記憶體比對。大型網站會慢。 | 加 tsvector／trigram 索引（需 extension，屬專案層級設定，需另行協調）或外部搜尋。 |
+| 文件刪除 | 沒有刪除文件的工具（只能下架）；網站刪除時 Storage 物件不會自動刪。 | 刪除工具＋Storage API 刪物件、定期清孤兒檔。 |
+| 證照生日明文 | 生日是比對鍵，DB 存明文（RLS 全關、只有 service_role 讀得到）。 | 存 HMAC（含租戶 salt）比對，不存原文。 |
+| 評價附圖 | 只接受店家白名單網域的 https 網址，不能直接上傳圖片。 | 上傳到 builder- 公開 bucket＋圖片處理。 |
+| 必讀公告只在網站上提示 | 會員登入網站才看得到，不寄信。 | 發布必讀公告時寄信／推播。 |
+| CI 不跑 next build | GitHub Actions 只跑 typecheck＋test；2026-10-19 曾因循環 import 的 TDZ 讓租戶首頁 500 約 10–25 分鐘（Vercel 部署成功但執行期失敗），已修（`lib/services/class-common.ts`）。 | CI 加 `next build`（需要建置期 env 的假值）或部署後健康檢查（租戶首頁 200）。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點
