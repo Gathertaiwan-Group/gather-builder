@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listBookings, listServices, revealBooking } from "@/lib/services/booking";
 import { addDays, taipeiDateOf, weekdayOf } from "@/lib/booking/availability";
 import { fmtTaipeiTime } from "@/lib/services/class-orders";
@@ -15,11 +14,10 @@ const STATUS: Record<string, string> = { held: "待付款", confirmed: "已確�
 
 /** 週曆（7 欄，手機可橫向捲動）＋可查看完整資料（留紀錄）＋店家取消 */
 export default async function BookingAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string; week?: string; reveal?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const today = taipeiDateOf(new Date());
   const monday = addDays(today, -((weekdayOf(today) + 6) % 7));
   const week = sp.week && /^\d{4}-\d{2}-\d{2}$/.test(sp.week) ? sp.week : monday;
@@ -29,10 +27,10 @@ export default async function BookingAdmin({ params, searchParams }: { params: P
   const svc = "error" in r ? null : await listServices(ctx, { site: slug });
   const revealed = sp.reveal ? await revealBooking(ctx, { site: slug, bookingId: sp.reveal }).catch(() => null) : null;
   const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
-  const act = `/api/admin/tenants/${slug}/booking/action`;
+  const act = `${bo.api}/booking/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/booking" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/booking" name={tenant.name} />
       {"error" in r ? (
         <Card title="預約">
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>
@@ -41,9 +39,9 @@ export default async function BookingAdmin({ params, searchParams }: { params: P
         <>
           <Card title={`週曆 ${week} 起（${r.total} 筆）`}>
             <div className="mb-3 flex justify-between text-sm">
-              <a href={`/admin/t/${slug}/booking?week=${addDays(week, -7)}`}>← 上一週</a>
-              <a href={`/admin/t/${slug}/booking`}>本週</a>
-              <a href={`/admin/t/${slug}/booking?week=${addDays(week, 7)}`}>下一週 →</a>
+              <a href={`${bo.base}/booking?week=${addDays(week, -7)}`}>← 上一週</a>
+              <a href={`${bo.base}/booking`}>本週</a>
+              <a href={`${bo.base}/booking?week=${addDays(week, 7)}`}>下一週 →</a>
             </div>
             {revealed && (
               <p className="rounded bg-amber-50 p-2 text-sm" data-admin="revealed">

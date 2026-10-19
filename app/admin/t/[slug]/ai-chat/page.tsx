@@ -1,23 +1,21 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listAiChats } from "@/lib/services/ai-chat";
 import { ServiceError } from "@/lib/services/context";
 
 export const dynamic = "force-dynamic";
 
 export default async function AiChatAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listAiChats(ctx, { site: slug, limit: 50 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/ai-chat" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/ai-chat" name={tenant.name} />
       {"error" in r ? (
         <Card title="AI 客服">
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>

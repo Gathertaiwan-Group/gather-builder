@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listDomains } from "@/lib/services/domains";
 import { getDomainAdapter } from "@/lib/domains/adapter";
 
@@ -11,17 +10,16 @@ export const dynamic = "force-dynamic";
 const STATUS: Record<string, string> = { pending: "等待 DNS／驗證", verified: "已驗證（尚未啟用）", active: "啟用中（正式網址）" };
 
 export default async function DomainsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listDomains(ctx, { site: slug });
   const adapter = getDomainAdapter();
-  const act = `/api/admin/tenants/${slug}/domains`;
+  const act = `${bo.api}/domains`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/domains" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/domains" name={tenant.name} />
       <Card title="網址">
         <p className="mt-0 text-sm">
           目前正式網址：<a href={r.siteUrl} data-admin="site-url">{r.siteUrl}</a>

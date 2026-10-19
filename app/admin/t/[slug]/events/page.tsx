@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listEvents, listRegistrations, revealRegistration } from "@/lib/services/events";
 import { fmtTaipei } from "@/lib/services/class-orders";
 import { ServiceError } from "@/lib/services/context";
@@ -13,20 +12,19 @@ const STATUS: Record<string, string> = { held: "待付款", confirmed: "已確�
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 
 export default async function EventsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string; session?: string; reveal?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listEvents(ctx, { site: slug, limit: 50 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const roster = sp.session && !("error" in r) ? await listRegistrations(ctx, { site: slug, sessionId: sp.session }).catch(() => null) : null;
   // 🔴 查看完整個資：每次都寫查看紀錄（who/when）
   const revealed = sp.reveal ? await revealRegistration(ctx, { site: slug, registrationId: sp.reveal, reason: "後台查看" }).catch(() => null) : null;
   const pii = await ctx.store.listPiiLog(tenant.id, 20);
-  const act = `/api/admin/tenants/${slug}/events/action`;
+  const act = `${bo.api}/events/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/events" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/events" name={tenant.name} />
       <Card title="簽到">
         <form action={act} method="post" className="flex flex-wrap items-center gap-2 text-sm">
           <input type="hidden" name="action" value="checkin" />
@@ -56,7 +54,7 @@ export default async function EventsAdmin({ params, searchParams }: { params: Pr
                 <ul className="m-0 mt-1 list-none p-0">
                   {e.sessions.map((s) => (
                     <li key={s.id} className="flex flex-wrap gap-3 border-t py-1">
-                      <a href={`/admin/t/${slug}/events?session=${s.id}`}>{s.startsAtTaipei}</a>
+                      <a href={`${bo.base}/events?session=${s.id}`}>{s.startsAtTaipei}</a>
                       <span>
                         容量 {s.capacity}・已報名 {s.registered}・保留 {s.offered}・剩 {s.remaining}・候補 {s.waiting}
                         {s.status === "cancelled" ? "・已取消" : ""}
@@ -73,7 +71,7 @@ export default async function EventsAdmin({ params, searchParams }: { params: Pr
       {roster && sp.session && (
         <Card title={`名單（${roster.total}）・已確認 ${roster.confirmedSeats} 位・待付款 ${roster.heldSeats} 位・已簽到 ${roster.checkedIn}`}>
           <p className="mt-0 text-xs text-neutral-600">
-            聯絡資料已遮罩；「查看」與「匯出 CSV」都會留下查看紀錄。 <a href={`/api/admin/tenants/${slug}/events/roster?session=${sp.session}`} data-admin="roster-csv">匯出 CSV</a>
+            聯絡資料已遮罩；「查看」與「匯出 CSV」都會留下查看紀錄。 <a href={`${bo.api}/events/roster?session=${sp.session}`} data-admin="roster-csv">匯出 CSV</a>
           </p>
           {revealed && (
             <p className="rounded bg-amber-50 p-2 text-sm" data-admin="revealed">

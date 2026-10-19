@@ -1,5 +1,4 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { importCertificates } from "@/lib/services/certificates";
 import { ServiceError } from "@/lib/services/context";
 
@@ -7,8 +6,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/certificates`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/certificates", async (f, bo) => {
+    const ctx = bo.ctx;
     const file = f.get("file");
     if (!(file instanceof File)) throw new ServiceError("invalid", "請選擇 CSV 檔");
     if (file.size > 2_000_000) throw new ServiceError("invalid", "檔案太大（上限 2MB）");

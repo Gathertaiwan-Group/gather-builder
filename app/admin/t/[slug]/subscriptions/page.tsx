@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listSubscriptionPlans, listSubscriptions } from "@/lib/services/subscriptions";
 import { ServiceError } from "@/lib/services/context";
 
@@ -12,17 +11,16 @@ const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 const LABEL: Record<string, string> = { pending: "處理中", active: "訂閱中", past_due: "扣款失敗（寬限）", cancelled: "已取消", expired: "已結束" };
 
 export default async function SubscriptionsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const plans = await listSubscriptionPlans(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const subs = "error" in plans ? null : await listSubscriptions(ctx, { site: slug, limit: 100 });
-  const act = `/api/admin/tenants/${slug}/subscriptions/action`;
+  const act = `${bo.api}/subscriptions/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/subscriptions" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/subscriptions" name={tenant.name} />
       {"error" in plans ? (
         <Card title="訂閱">
           <p className="m-0 text-sm text-neutral-600">{plans.error}</p>

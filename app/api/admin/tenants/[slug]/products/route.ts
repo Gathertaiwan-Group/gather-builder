@@ -1,14 +1,14 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { createProduct } from "@/lib/services/shop";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/products`, async (f) => {
+  return backofficeForm(req, slug, "/products", async (f, bo) => {
     const image = str(f, "image");
-    const r = await createProduct(adminContext(req), {
+    const r = await createProduct(bo.ctx, {
       site: slug,
       slug: str(f, "slug"),
       name: str(f, "name"),

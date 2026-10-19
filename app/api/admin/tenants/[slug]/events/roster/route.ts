@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { adminContext, isAdmin } from "@/lib/adminServer";
+import { backofficeForRequest } from "@/lib/backoffice";
 import { exportRegistrationsCsv } from "@/lib/services/events";
 import { ServiceError } from "@/lib/services/context";
 
@@ -7,11 +7,12 @@ export const dynamic = "force-dynamic";
 
 /** 名單 CSV（明文個資）：匯出前已寫入查看紀錄；回應不快取 */
 export async function GET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
-  if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { slug } = await params;
+  const bo = await backofficeForRequest(req, slug);
+  if (!bo || bo.viewAs) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const sessionId = new URL(req.url).searchParams.get("session") ?? "";
   try {
-    const r = await exportRegistrationsCsv(adminContext(req), { site: slug, sessionId });
+    const r = await exportRegistrationsCsv(bo.ctx, { site: slug, sessionId });
     return new NextResponse(r.csv, {
       headers: {
         "content-type": "text/csv; charset=utf-8",

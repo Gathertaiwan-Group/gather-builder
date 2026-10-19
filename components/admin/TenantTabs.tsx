@@ -1,3 +1,5 @@
+import type { Backoffice } from "@/lib/backoffice";
+
 const TABS = [
   { path: "", label: "總覽" },
   { path: "/members", label: "會員" },
@@ -22,7 +24,16 @@ const TABS = [
   { path: "/domains", label: "網址" },
 ];
 
-export function TenantTabs({ slug, active, name }: { slug: string; active: string; name?: string }) {
+const OWNER_TABS = [
+  { path: "/content", label: "內容編輯" },
+  { path: "/team", label: "成員" },
+  { path: "/tokens", label: "MCP 連線" },
+  { path: "/audit", label: "稽核紀錄" },
+];
+
+export function TenantTabs({ bo, active, name }: { bo: Backoffice; active: string; name?: string }) {
+  const slug = bo.slug;
+  const tabs = bo.mode === "owner" ? [...TABS, ...OWNER_TABS] : [...TABS, { path: "/content", label: "內容編輯" }, { path: "/team", label: "店主成員" }];
   return (
     <>
       {name && (
@@ -31,10 +42,10 @@ export function TenantTabs({ slug, active, name }: { slug: string; active: strin
         </h1>
       )}
       <nav aria-label="網站分頁" className="mb-6 flex flex-wrap gap-2 text-sm" data-admin="tenant-tabs">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <a
             key={t.path}
-            href={`/admin/t/${slug}${t.path}`}
+            href={`${bo.base}${t.path}`}
             aria-current={active === t.path ? "page" : undefined}
             className="rounded border px-3 py-1 no-underline"
             style={active === t.path ? { background: "#171717", color: "#fff" } : undefined}

@@ -16,7 +16,7 @@ import {
   verifyCheckMacValue,
   type EcpayCreds,
 } from "../shipping/ecpay";
-import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
+import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, requireFormCredential, type ServiceContext } from "./context";
 import { publishedModuleSettings } from "./members";
 import { mailSafe, orderPageUrl } from "./shop";
 
@@ -188,7 +188,7 @@ export async function resolveShipping(
 /* ================================================================== 綠界憑證（只限平台後台） */
 
 function requireAdminActor(ctx: ServiceContext) {
-  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "物流憑證只能從平台後台表單輸入（不經過 agent 對話）");
+  requireFormCredential(ctx, "物流憑證");
 }
 async function requireShipping(ctx: Pick<ServiceContext, "store">, tenant: TenantRow) {
   if (!(await shippingActive(ctx.store, tenant.id))) throw new ServiceError("forbidden", "此網站未啟用模組「shipping」，請先 enable_module shipping");

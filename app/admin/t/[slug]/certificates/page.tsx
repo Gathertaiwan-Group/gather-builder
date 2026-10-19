@@ -1,25 +1,23 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listCertificateLookups, listCertificates } from "@/lib/services/certificates";
 import { ServiceError } from "@/lib/services/context";
 
 export const dynamic = "force-dynamic";
 
 export default async function CertificatesAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listCertificates(ctx, { site: slug, limit: 100 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const logs = "error" in r ? null : await listCertificateLookups(ctx, { site: slug, limit: 30 });
-  const act = `/api/admin/tenants/${slug}/certificates/action`;
+  const act = `${bo.api}/certificates/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/certificates" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/certificates" name={tenant.name} />
       {"error" in r ? (
         <Card title="證照">
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>

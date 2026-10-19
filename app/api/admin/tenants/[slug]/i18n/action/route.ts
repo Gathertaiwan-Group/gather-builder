@@ -1,5 +1,5 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { publishTranslations, translateContent } from "@/lib/services/i18n";
 import { ServiceError } from "@/lib/services/context";
 
@@ -8,8 +8,8 @@ export const maxDuration = 60;
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/i18n`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/i18n", async (f, bo) => {
+    const ctx = bo.ctx;
     const action = str(f, "action");
     if (action === "translate_page") {
       const r = await translateContent(ctx, { site: slug, lang: str(f, "lang"), target: { type: "page", path: str(f, "path") } });

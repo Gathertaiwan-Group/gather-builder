@@ -1,5 +1,5 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { issueInvoice, retryInvoice, voidInvoice } from "@/lib/services/invoices";
 import { ServiceError } from "@/lib/services/context";
 
@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/invoices`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/invoices", async (f, bo) => {
+    const ctx = bo.ctx;
     const base = { site: slug, orderNo: str(f, "orderNo"), confirm: f.get("confirm") === "on" };
     const action = str(f, "action");
     if (action === "issue") return { message: (await issueInvoice(ctx, base)).note };

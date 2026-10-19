@@ -1,20 +1,37 @@
 import { cookies } from "next/headers";
 import { FLASH_COOKIE } from "@/lib/adminServer";
+import type { Backoffice } from "@/lib/backoffice";
 
-export async function AdminShell({ children, sp }: { children: React.ReactNode; sp: { ok?: string; err?: string } }) {
+const ROLE_LABEL = { admin: "平台擁有者", owner: "擁有者", editor: "編輯", viewer: "檢視者" } as const;
+
+export async function AdminShell({ children, sp, bo }: { children: React.ReactNode; sp: { ok?: string; err?: string }; bo?: Backoffice }) {
   const flash = (await cookies()).get(FLASH_COOKIE)?.value;
+  const owner = bo?.mode === "owner";
   return (
     <div className="min-h-screen" style={{ background: "var(--pf-bg)" }}>
       <header className="border-b bg-white" style={{ borderColor: "var(--pf-line)" }}>
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <nav className="flex flex-wrap items-center gap-5 text-sm">
-            <a href="/admin" className="font-bold no-underline" style={{ color: "var(--pf-text)" }}>
-              Gather Builder 後台
-            </a>
-            <a href="/admin">網站</a>
-            <a href="/admin/tokens">MCP Token</a>
-          </nav>
-          <form action="/api/admin/logout" method="post">
+          {owner ? (
+            <nav className="flex flex-wrap items-center gap-5 text-sm">
+              <a href="/owner" className="font-bold no-underline" style={{ color: "var(--pf-text)" }}>
+                店主後台
+              </a>
+              <a href="/owner">我的網站</a>
+              <a href="/owner/account">帳號與二步驟驗證</a>
+              <span className="text-neutral-500" data-admin="role">
+                {bo?.user?.email ?? ""}（{ROLE_LABEL[bo!.role]}）
+              </span>
+            </nav>
+          ) : (
+            <nav className="flex flex-wrap items-center gap-5 text-sm">
+              <a href="/admin" className="font-bold no-underline" style={{ color: "var(--pf-text)" }}>
+                Gather Builder 後台
+              </a>
+              <a href="/admin">網站</a>
+              <a href="/admin/tokens">MCP Token</a>
+            </nav>
+          )}
+          <form action={owner ? "/api/owner/logout" : "/api/admin/logout"} method="post">
             <button className="text-sm underline" type="submit">
               登出
             </button>
@@ -22,6 +39,16 @@ export async function AdminShell({ children, sp }: { children: React.ReactNode; 
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-4 py-8">
+        {bo?.viewAs && (
+          <p className="mb-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900" data-admin="view-as">
+            你正以「店主身分檢視」（唯讀，已記錄稽核）。要修改請回 <a href={`/admin/t/${bo.slug}`}>平台後台</a>。
+          </p>
+        )}
+        {bo && bo.role === "viewer" && !bo.viewAs && (
+          <p className="mb-4 rounded-lg bg-neutral-100 px-4 py-3 text-sm" data-admin="read-only">
+            你的角色是「檢視者」，只能查看、不能修改。
+          </p>
+        )}
         {sp.ok && (
           <p role="status" className="mb-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-900" data-admin="ok">
             {sp.ok}

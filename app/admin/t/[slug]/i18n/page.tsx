@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listTranslationStatus } from "@/lib/services/i18n";
 import { ServiceError } from "@/lib/services/context";
 import { langLabel } from "@/lib/i18n/langs";
@@ -11,16 +10,15 @@ export const dynamic = "force-dynamic";
 
 /** 多語：翻譯進度、AI 翻譯按鈕（進草稿）、發布模組資料翻譯 */
 export default async function I18nAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listTranslationStatus(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
-  const act = `/api/admin/tenants/${slug}/i18n/action`;
+  const act = `${bo.api}/i18n/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/i18n" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/i18n" name={tenant.name} />
       {"error" in r ? (
         <Card title="多語">
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>

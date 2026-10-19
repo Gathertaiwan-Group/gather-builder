@@ -1,13 +1,13 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { moderateReview, replyReview } from "@/lib/services/reviews";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/reviews`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/reviews", async (f, bo) => {
+    const ctx = bo.ctx;
     const confirm = f.get("confirm") === "on";
     const action = str(f, "action");
     if (action === "reply") {

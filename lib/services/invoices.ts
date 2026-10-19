@@ -6,7 +6,7 @@ import { amegoRelayFromEnv, createAmegoProvider } from "../invoice/amego";
 import { createMockProvider } from "../invoice/mock";
 import { canVoidInPeriod, invoiceLines, type InvoiceProvider } from "../invoice/provider";
 import { isValidTaxId } from "../invoice/validate";
-import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
+import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resolveTenant, requireFormCredential, type ServiceContext } from "./context";
 import { publishedModuleSettings } from "./members";
 import { twd } from "./shop";
 
@@ -55,7 +55,7 @@ function requireConfirm(confirm: boolean | undefined, what: string) {
 }
 
 function requireAdminActor(ctx: ServiceContext) {
-  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "發票憑證只能從平台後台表單輸入（不經過 agent 對話）");
+  requireFormCredential(ctx, "發票憑證");
 }
 
 const STATUS_LABEL: Record<InvoiceRow["status"], string> = {

@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { getMemberPoints, listTiers } from "@/lib/services/loyalty";
 import { getMemberBalance, listTopupPlans } from "@/lib/services/wallet";
 import { ServiceError } from "@/lib/services/context";
@@ -14,21 +13,20 @@ const orErr = <T,>(p: Promise<T>) => p.catch((e) => (e instanceof ServiceError ?
 
 /** 會員經營：點數／等級／儲值金。查某位會員、手動調整（confirm＋理由），儲值方案列表 */
 export default async function LoyaltyAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string; email?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const tiers = await orErr(listTiers(ctx, { site: slug }));
   const plans = await orErr(listTopupPlans(ctx, { site: slug }));
   const email = sp.email?.trim();
   const pts = email && !("error" in tiers) ? await orErr(getMemberPoints(ctx, { site: slug, email })) : null;
   const bal = email && !("error" in plans) ? await orErr(getMemberBalance(ctx, { site: slug, email })) : null;
-  const act = `/api/admin/tenants/${slug}/loyalty/action`;
+  const act = `${bo.api}/loyalty/action`;
   const limits = { points: effectiveAdjustLimits(tenant, "points", {}), wallet: effectiveAdjustLimits(tenant, "wallet", {}) };
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/loyalty" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/loyalty" name={tenant.name} />
       <Card title="查詢會員">
         <form method="get" className="flex flex-wrap gap-2 text-sm">
           <input name="email" type="email" defaultValue={email} placeholder="會員 Email" className="rounded border px-3 py-1" required />

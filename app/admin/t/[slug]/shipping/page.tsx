@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { getShippingSetupStatus, listShipments } from "@/lib/services/shipping";
 import { listOrders } from "@/lib/services/orders";
 import { ServiceError } from "@/lib/services/context";
@@ -11,17 +10,16 @@ import { SHIPMENT_LABEL } from "@/lib/order-labels";
 export const dynamic = "force-dynamic";
 
 export default async function ShippingAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const st = await getShippingSetupStatus(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const [ships, paid] = "error" in st ? [null, null] : await Promise.all([listShipments(ctx, { site: slug, limit: 100 }), listOrders(ctx, { site: slug, status: "paid", limit: 100 })]);
   const shipped = new Set(ships?.shipments.filter((s) => s.status !== "failed" && s.status !== "cancelled").map((s) => s.orderNo) ?? []);
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/shipping" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/shipping" name={tenant.name} />
       {"error" in st ? (
         <Card title="物流">
           <p className="m-0 text-sm text-neutral-600">{st.error}</p>
@@ -50,7 +48,7 @@ export default async function ShippingAdmin({ params, searchParams }: { params: 
                 "尚未設定（超商取貨與綠界宅配不會出現在結帳頁）"
               )}
             </p>
-            <form action={`/api/admin/tenants/${slug}/shipping-account`} method="post" className="flex flex-col gap-2 text-sm" autoComplete="off">
+            <form action={`${bo.api}/shipping-account`} method="post" className="flex flex-col gap-2 text-sm" autoComplete="off">
               <p className="m-0 text-xs text-neutral-600">HashKey／HashIV 只在這裡輸入，以 AES-256-GCM 加密存放，任何頁面與 MCP 都讀不到原文。</p>
               <input name="merchantId" required placeholder="MerchantID（特店編號）" className="rounded border px-3 py-1" />
               <input name="hashKey" required type="password" placeholder="HashKey" className="rounded border px-3 py-1" autoComplete="new-password" />
@@ -75,7 +73,7 @@ export default async function ShippingAdmin({ params, searchParams }: { params: 
                 .filter((o) => !shipped.has(o.orderNo))
                 .map((o) => (
                   <li key={o.orderNo}>
-                    <form action={`/api/admin/tenants/${slug}/shipments/action`} method="post" className="flex flex-wrap items-center gap-2">
+                    <form action={`${bo.api}/shipments/action`} method="post" className="flex flex-wrap items-center gap-2">
                       <span>{o.orderNo}</span>
                       <input type="hidden" name="orderNo" value={o.orderNo} />
                       <input name="tracking" placeholder="手動出貨的追蹤號（綠界免填）" className="rounded border px-2" />

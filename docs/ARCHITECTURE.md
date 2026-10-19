@@ -62,6 +62,23 @@
 - 限流：`builder_rate_limits` ＋ SQL 函式 `builder_rate_hit`（固定時間窗，`insert … on conflict … returning` 原子計數，跨 serverless 實例有效）。用在聯絡表單（每 IP 每小時，預設 5，被擋的不寫入不寄信）、LINE 點擊（每 IP 每 10 分鐘 30）、後台登入（每 IP 每 15 分鐘 10 次嘗試）、會員登入／註冊／忘記密碼（見「會員」）、結帳（每 IP 每小時 20）、計價（每 IP 每 10 分鐘 120）。
 - 錯誤：MCP 只回 `ServiceError` 的訊息；其他內部錯誤只記 server log，回客戶端通用訊息＋追查碼。unique 衝突轉成 `conflict`「資料重複」。
 
+## 店主後台（第九批）
+
+- **入口**：`/owner`（平台 host；租戶 host 上 404）。帳號 `builder_owner_users`（一個 email 一個帳號，可屬於多個網站）＋成員 `builder_tenant_users`（`owner`／`editor`／`viewer`，邀請制 invited → active，可停用）。不用 Supabase Auth。
+- **登入**：密碼 scrypt（與會員同一套 `lib/members/password.ts`）；錯誤一律「Email 或密碼錯誤」（不存在的帳號也跑一次同成本雜湊）；限流每 IP 30 次／15 分、email＋IP 10 次／15 分（`builder_rate_hit`）。session：cookie `gb_owner`（HttpOnly、SameSite=Lax、prod Secure、**host-only**、path `/`）只放隨機 token，DB 存 sha256；**閒置 12 小時、絕對 7 天到期**，登出撤銷該筆、重設密碼撤銷全部、「登出所有裝置」。
+- **二步驟（TOTP，RFC 6238，`lib/owner/totp.ts`，RFC 範例向量測試）**：任何角色都可在「帳號」頁啟用（建議 owner 必開）。秘密以 secretbox 加密（AAD 綁帳號）；啟用要先輸入一組正確碼。密碼正確後發 5 分鐘的 mfa ticket（cookie `gb_owner_mfa`，DB 存雜湊），輸錯不讓 ticket 失效但每張最多試 5 次；`totp_last_step` 條件更新，**同一組碼不能重用**。
+- **忘記密碼／邀請**：token 只存 sha256、一次性（條件更新 `used_at is null`）；重設 1 小時、邀請 7 天。忘記密碼一律回同一句並補到固定最短回應時間。邀請信寄到被邀請者 email（沒設 Resend 時寫 server log）。
+- **權限模型**：每個 request 都把店主轉成 `Actor { kind: "owner", tenantId, role, scopes }`，**所有寫入都走既有 `lib/services`**（`requireScope`＋`resolveTenant` 租戶隔離）：
+  | 角色 | scopes | 另外 |
+  |---|---|---|
+  | viewer | `site:read`、`inquiries:read`、`members:read`、`orders:read`、`newsletter:read`、`attendees:read`、`certificates:read`（只讀） | — |
+  | editor | 全部網站 scope（不含 `platform:sites`） | **不能**改金流／發票／物流憑證、自有網域（`requireFormCredential`）、成員與 MCP token（`requireTeamAdmin`） |
+  | owner | 全部網站 scope | 以上全部可以；網站至少保留一位啟用中的 owner |
+  平台後台限定的動作（手動調整上限、平台 token、建站）仍只限 admin actor。
+- **頁面共用**：`app/admin/t/[slug]/*` 的頁面與 `app/api/admin/tenants/[slug]/*` 的 route 改用 `lib/backoffice.ts`（`requireBackoffice`／`backofficeForm`），`app/owner/t/[slug]/*`、`app/api/owner/tenants/[slug]/*` 只是 re-export 同一支（單元測試檢查每支都有對應）。入口由 middleware 依路徑設 `x-gb-bo`（客戶端送的會被刪）。店主不是這個網站的啟用中成員 → 404。店主專用分頁：內容編輯、成員、MCP 連線（發行／撤銷自己網站的 token、OAuth 授權列表）、稽核紀錄。
+- **以店主身分檢視**：平台擁有者帶 admin cookie 開 `/owner/t/<slug>` → viewer 權限、頁面顯示唯讀橫幅、每次檢視寫稽核 `admin.view_as_owner`；所有表單送出一律拒絕。
+- **CSRF／cookie**：`/owner`、`/api/owner` 的 POST 由 middleware 檢查 Origin（同 `/admin`）；店主與平台後台 cookie 都是 host-only，啟用子網域後租戶網站拿不到。
+
 ## 會員（members 模組）
 
 平台自管帳號，**不用 Supabase Auth**（共用專案還住著其他客戶站）。
@@ -326,7 +343,7 @@
 
 | 風險 | 現況 | 日後方案 |
 |---|---|---|
-| 後台 session 無法單獨撤銷 | cookie 是無狀態 HMAC（12 小時），登出只刪自己瀏覽器的 cookie；外洩的 cookie 在到期前都有效。緊急時只能換 `ADMIN_SESSION_SECRET`（全部登出）。 | 改成 DB session 表（`builder_admin_sessions`，cookie 只放隨機 id），可逐筆撤銷；或換成正式身分系統（多使用者＋2FA）。 |
+| 平台後台 session 無法單獨撤銷 | **店主後台（第九批）已是 DB session（可撤銷、閒置／絕對到期、TOTP）**；平台擁有者後台仍是單一密碼＋無狀態 HMAC cookie（12 小時），緊急時只能換 `ADMIN_SESSION_SECRET`。 | 平台擁有者也改用 `builder_owner_users` 類的帳號＋DB session＋TOTP。 |
 | 前台與後台同源 | **第九批起程式已支援分開**：啟用子網域後，租戶網站只在 `<slug>.<網域>`／自有網域上服務（平台 host 的 `/s/<slug>` GET 301 過去），平台後台、店主後台、OAuth、MCP 只在平台 host；租戶 host 上這些路徑 404，後台 cookie（host-only）也不會送到租戶 host。**但正式站要等老闆設好 wildcard DNS＋Vercel wildcard 網域＋`PLATFORM_SITES_DOMAIN` 才生效**；在那之前仍是 `/s/<slug>` 與後台同源。仍未做：`?preview=` 的 `/s/<slug>` 在平台 host 上仍可開（相容舊預覽連結）、POST 到平台 host 的 `/s/<slug>/api/…`（舊表單）仍會處理。 | 設好 env 後再加 CSP；過渡期結束後讓平台 host 的 `/s/*` 只剩 301。 |
 | 未付款訂單佔庫存 | 訪客下單即扣庫存，保留到逾期（預設 72h）；每 IP 每小時 20 單限流，但多 IP 仍可凍結限量商品。 | 線上付款縮短保留時間、每 email/電話限制同時 pending 單數、提高 cron 頻率。 |
 | 更換 PChomePay 憑證後舊單回查失敗 | notify 回查用「目前」的憑證；正式帳號 A→B 更換後，A 帳號的未完成付款回查會失敗（回 500 讓對方重試），可能逾期取消且不會警示。 | payments 記錄建單時的 app_id、或有 pending 線上付款時禁止更換憑證、回查連續失敗寄警示。 |
@@ -387,5 +404,4 @@
 | OAuth 2.1 | 只換 `authenticateBearer()`：驗 access token → 同一個 `Actor` 形狀；scope 字串不變。屆時才提供 `/.well-known/oauth-protected-resource` |
 | 付款開通模組 | `builder_tenant_modules.status` 已有 `pending_setup`；加 `billing_status`／訂閱表，`enableModule` 前檢查付款；manifest 已有 `priceSetup/priceMonthly` |
 | 改用獨立 schema | 所有存取都經 `lib/store/supabase.ts`；換 schema 只需 `db.schema("builder")` ＋ migration 搬表（需在 PostgREST 暴露該 schema，屬專案層級設定，需另行協調） |
-| 租戶自己的後台 | 服務層已依 Actor 隔離；新增租戶使用者表＋登入後產生租戶 Actor 即可複用 |
 | 草稿併發 | 目前最後寫入者勝；可在 `builder_site_drafts` 加 `version` 欄位做樂觀鎖 |

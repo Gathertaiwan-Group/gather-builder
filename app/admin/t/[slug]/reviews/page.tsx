@@ -1,24 +1,22 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listReviews } from "@/lib/services/reviews";
 import { ServiceError } from "@/lib/services/context";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReviewsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listReviews(ctx, { site: slug, limit: 100 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
-  const act = `/api/admin/tenants/${slug}/reviews/action`;
+  const act = `${bo.api}/reviews/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/reviews" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/reviews" name={tenant.name} />
       <Card title={"error" in r ? "評價" : `評價（${r.total}）`}>
         {"error" in r ? (
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>

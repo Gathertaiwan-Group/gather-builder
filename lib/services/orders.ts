@@ -21,7 +21,7 @@ import { PROVIDER_IDS, PROVIDER_LABEL, REFUND_CAPABLE as refundableProviders, is
 import { providerFromAccount } from "../pay/registry";
 import { payToken, verifyPayToken } from "../pay/notify-token";
 import { CALLBACK_URL_LIMITS, MAX_BASE_URL_FOR_PERIOD, NEWEBPAY_PERIOD_URL_LIMIT, SHORT_CODE_LEN, assertUrlLengths, genShortCode, shortPayUrls, shortSubscriptionUrls } from "../pay/urls";
-import { ServiceError, audit, moduleStates, requireScope, resolveTenant, type ServiceContext } from "./context";
+import { ServiceError, audit, moduleStates, requireScope, resolveTenant, requireFormCredential, type ServiceContext } from "./context";
 import { mailSafe, orderPageUrl, publishedShopSettings, requireShop, twd, type CheckoutDeps } from "./shop";
 
 type Mailer = CheckoutDeps["sendMail"];
@@ -453,7 +453,7 @@ function maskAppId(id: string) {
 
 /** 🔴 只有平台後台（admin actor）能設定憑證；MCP 沒有任何設定或讀出 secret 的工具 */
 function requireAdminActor(ctx: ServiceContext) {
-  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "金流憑證只能從平台後台表單輸入（不經過 agent 對話）");
+  requireFormCredential(ctx, "金流憑證");
 }
 
 export async function savePaymentAccount(ctx: ServiceContext, input: { site: string; appId: string; secret: string; sandbox: boolean }) {
@@ -731,7 +731,7 @@ function maskId(id: string) {
 
 /** 🔴 只有平台後台（admin actor）能設定憑證；MCP 沒有任何設定或讀出 secret 的工具 */
 export async function saveProviderAccount(ctx: ServiceContext, input: { site: string; provider: ProviderId; appId: string; secrets: Record<string, string>; sandbox: boolean }) {
-  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "金流憑證只能從平台後台表單輸入（不經過 agent 對話）");
+  requireFormCredential(ctx, "金流憑證");
   if (input.provider === "pchomepay") return savePaymentAccount(ctx, { site: input.site, appId: input.appId, secret: input.secrets.secret ?? "", sandbox: input.sandbox });
   const spec = PROVIDER_FIELDS[input.provider];
   if (!spec) throw new ServiceError("invalid", "不支援的金流");
@@ -767,7 +767,7 @@ export type ProviderFactory = (store: Store, tenantId: string, provider: Provide
 /** 後台「驗證」：用該組憑證做無副作用的檢查（各家見 lib/pay/*.ts verifyCredentials） */
 export async function verifyProviderAccount(ctx: ServiceContext, input: { site: string; provider: ProviderId }, factory: ProviderFactory = providerClientFor) {
   if (input.provider === "pchomepay") return verifyPaymentAccount(ctx, { site: input.site });
-  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "金流憑證只能從平台後台驗證");
+  requireFormCredential(ctx, "金流憑證");
   const tenant = await resolveTenant(ctx, input.site);
   await requireShop(ctx, tenant);
   const acct = await ctx.store.getPaymentAccount(tenant.id, input.provider);

@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listProducts } from "@/lib/services/shop";
 import { ServiceError } from "@/lib/services/context";
 
@@ -11,16 +10,15 @@ export const dynamic = "force-dynamic";
 const input = "rounded border px-2 py-1";
 
 export default async function ProductsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listProducts(ctx, { site: slug, limit: 100 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
-  const action = `/api/admin/tenants/${slug}/products`;
+  const action = `${bo.api}/products`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/products" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/products" name={tenant.name} />
       {"error" in r ? (
         <Card title="商品">
           <p className="m-0 text-sm text-neutral-600">{r.error}</p>

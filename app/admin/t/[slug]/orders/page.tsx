@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { getOrder, listOrders } from "@/lib/services/orders";
 import { ServiceError } from "@/lib/services/context";
 import { PROVIDER_LABEL, REFUND_CAPABLE, type ProviderId } from "@/lib/pay/types";
@@ -12,17 +11,16 @@ export const dynamic = "force-dynamic";
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 
 export default async function OrdersAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string; order?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const r = await listOrders(ctx, { site: slug, limit: 100 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const detail = sp.order && !("error" in r) ? await getOrder(ctx, { site: slug, orderNo: sp.order }).catch(() => null) : null;
-  const act = `/api/admin/tenants/${slug}/orders/action`;
+  const act = `${bo.api}/orders/action`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/orders" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/orders" name={tenant.name} />
       {detail && (
         <Card title={`訂單 ${detail.orderNo}`}>
           <div className="text-sm" data-admin="order-detail">
@@ -135,7 +133,7 @@ export default async function OrdersAdmin({ params, searchParams }: { params: Pr
                 {r.orders.map((o) => (
                   <tr key={o.id} className="border-t" data-admin="order-row">
                     <td className="py-1 pr-3">
-                      <a href={`/admin/t/${slug}/orders?order=${encodeURIComponent(o.orderNo)}`}>{o.orderNo}</a>
+                      <a href={`${bo.base}/orders?order=${encodeURIComponent(o.orderNo)}`}>{o.orderNo}</a>
                     </td>
                     <td className="py-1 pr-3">{o.statusLabel}</td>
                     <td className="py-1 pr-3">

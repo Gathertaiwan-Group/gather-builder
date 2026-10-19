@@ -1,5 +1,5 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { adjustPoints } from "@/lib/services/loyalty";
 import { adjustBalance } from "@/lib/services/wallet";
 import { setAdjustLimits } from "@/lib/services/adjust-limits";
@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/loyalty`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/loyalty", async (f, bo) => {
+    const ctx = bo.ctx;
     if (str(f, "action") === "limits") {
       const r = await setAdjustLimits(ctx, { site: slug, ledger: str(f, "ledger") === "wallet" ? "wallet" : "points", perCall: Number(str(f, "perCall")), perDay: Number(str(f, "perDay")) });
       return { message: `${r.ledger === "wallet" ? "儲值金" : "點數"}手動調整上限：單次 ${r.perCall}、每日 ${r.perDay}` };

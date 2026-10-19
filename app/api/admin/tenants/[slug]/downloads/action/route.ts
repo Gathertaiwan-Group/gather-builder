@@ -1,5 +1,5 @@
-import { adminContext } from "@/lib/adminServer";
-import { adminForm, str } from "@/lib/adminRoute";
+import { str } from "@/lib/adminRoute";
+import { backofficeForm } from "@/lib/backoffice";
 import { updateDocument, uploadDocumentDirect } from "@/lib/services/downloads";
 import { getFileStorage } from "@/lib/storage/files";
 import { ServiceError } from "@/lib/services/context";
@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  return adminForm(req, `/admin/t/${slug}/downloads`, async (f) => {
-    const ctx = adminContext(req);
+  return backofficeForm(req, slug, "/downloads", async (f, bo) => {
+    const ctx = bo.ctx;
     const action = str(f, "action");
     const confirm = f.get("confirm") === "on";
     if (action === "upload") {

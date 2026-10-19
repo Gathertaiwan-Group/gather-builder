@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { getInvoiceSetupStatus, listInvoices } from "@/lib/services/invoices";
 import { listOrders } from "@/lib/services/orders";
 import { ServiceError } from "@/lib/services/context";
@@ -12,19 +11,18 @@ export const dynamic = "force-dynamic";
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 
 export default async function InvoicesAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const st = await getInvoiceSetupStatus(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
   const [inv, paid] = "error" in st ? [null, null] : await Promise.all([listInvoices(ctx, { site: slug, limit: 100 }), listOrders(ctx, { site: slug, status: "paid", limit: 100 })]);
   const invoiced = new Set(inv?.invoices.map((i) => i.orderNo) ?? []);
-  const act = `/api/admin/tenants/${slug}/invoices/action`;
-  const base = `/api/admin/tenants/${slug}/invoice-account`;
+  const act = `${bo.api}/invoices/action`;
+  const base = `${bo.api}/invoice-account`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/invoices" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/invoices" name={tenant.name} />
       {"error" in st ? (
         <Card title="電子發票">
           <p className="m-0 text-sm text-neutral-600">{st.error}</p>

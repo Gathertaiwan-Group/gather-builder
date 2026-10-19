@@ -1,11 +1,11 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
+import { requireBackoffice } from "@/lib/backoffice";
 import { getSite } from "@/lib/services/sites";
 import { listRevisions, previewChanges } from "@/lib/services/publish";
 import { listInquiries } from "@/lib/services/inquiries";
 import { listTokens } from "@/lib/services/tokens";
-import { getTenantBySlugAdmin, listAuditLog } from "@/lib/services/admin";
+import { listAuditLog } from "@/lib/services/admin";
 import { TENANT_SCOPES } from "@/lib/scopes";
 import { ServiceError } from "@/lib/services/context";
 import { TokenTable } from "@/components/admin/TokenTable";
@@ -14,22 +14,21 @@ import { TenantTabs } from "@/components/admin/TenantTabs";
 export const dynamic = "force-dynamic";
 
 export default async function TenantPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const [site, pv, revs, inq, toks, logs] = await Promise.all([
     getSite(ctx, slug),
     previewChanges(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? null : Promise.reject(e))),
     listRevisions(ctx, { site: slug }),
     listInquiries(ctx, { site: slug, limit: 50 }),
-    listTokens(ctx, { tenantId: tenant.id }),
-    listAuditLog(ctx, { tenantId: tenant.id, limit: 50 }),
+    bo.mode === "admin" ? listTokens(ctx, { tenantId: tenant.id }) : Promise.resolve(null),
+    bo.mode === "admin" ? listAuditLog(ctx, { tenantId: tenant.id, limit: 50 }) : Promise.resolve(null),
   ]);
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="" name={site.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="" name={site.name} />
       <p className="mb-6 mt-0 text-sm text-neutral-600">
         狀態 {site.status} · 已發布版本 {site.publishedRevision ?? "無"} · <a href={site.publicUrl}>前台</a>
         {pv && (
@@ -50,7 +49,7 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
           </ul>
         )}
         {pv && pv.validationErrors.length > 0 && <p className="text-sm text-red-700">發布前需修正：{pv.validationErrors.join("；")}</p>}
-        <form action={`/api/admin/tenants/${slug}/publish`} method="post" className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+        <form action={`${bo.api}/publish`} method="post" className="mt-3 flex flex-wrap items-center gap-3 text-sm">
           <input name="note" placeholder="版本備註" className="rounded border px-3 py-1" />
           {pv && <input type="hidden" name="draftVersion" value={pv.draftVersion} />}
           <label className="flex items-center gap-1">
@@ -85,7 +84,7 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
                 <td className="py-1 pr-3">{fmt(r.publishedAt)}</td>
                 <td className="py-1 pr-3">
                   {!r.isCurrent && (
-                    <form action={`/api/admin/tenants/${slug}/rollback`} method="post" className="flex items-center gap-1">
+                    <form action={`${bo.api}/rollback`} method="post" className="flex items-center gap-1">
                       <input type="hidden" name="number" value={r.number} />
                       <label className="flex items-center gap-1 text-xs">
                         <input type="checkbox" name="confirm" required />確認
@@ -127,6 +126,14 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
         )}
       </Card>
 
+      {bo.mode === "owner" && (
+        <Card title="管理">
+          <p className="m-0 text-sm">
+            <a href={`${bo.base}/content`}>編輯網站內容</a> · <a href={`${bo.base}/tokens`}>MCP 連線（讓你的 AI agent 管理網站）</a> · <a href={`${bo.base}/team`}>成員</a> · <a href={`${bo.base}/audit`}>稽核紀錄</a>
+          </p>
+        </Card>
+      )}
+      {toks && logs && (<>
       <Card title="MCP Token">
         <TokenTable tokens={toks} />
         <form action="/api/admin/tokens" method="post" className="mt-4 flex flex-col gap-2 text-sm">
@@ -156,6 +163,12 @@ export default async function TenantPage({ params, searchParams }: { params: Pro
           ))}
         </ul>
       </Card>
+      </>)}
+      {bo.mode === "admin" && (
+        <p className="text-sm">
+          <a href={`/owner/t/${slug}`} data-admin="view-as-owner">以店主身分檢視（唯讀）</a>
+        </p>
+      )}
     </AdminShell>
   );
 }

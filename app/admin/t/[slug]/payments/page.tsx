@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { PROVIDER_FIELDS, getPaymentSetupStatus } from "@/lib/services/orders";
 import type { ProviderId } from "@/lib/pay/types";
 import { ServiceError } from "@/lib/services/context";
@@ -10,16 +9,15 @@ import { ServiceError } from "@/lib/services/context";
 export const dynamic = "force-dynamic";
 
 export default async function PaymentsAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const st = await getPaymentSetupStatus(ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
-  const base = `/api/admin/tenants/${slug}/payment-account`;
+  const base = `${bo.api}/payment-account`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/payments" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/payments" name={tenant.name} />
       {"error" in st ? (
         <Card title="金流設定">
           <p className="m-0 text-sm text-neutral-600">{st.error}</p>
@@ -72,7 +70,7 @@ export default async function PaymentsAdmin({ params, searchParams }: { params: 
             .filter((p) => p.provider !== "pchomepay")
             .map((p) => {
               const spec = PROVIDER_FIELDS[p.provider as Exclude<ProviderId, "pchomepay">];
-              const pbase = `/api/admin/tenants/${slug}/payment-provider`;
+              const pbase = `${bo.api}/payment-provider`;
               return (
                 <Card key={p.provider} title={p.label}>
                   <div className="text-sm" data-admin={`provider-${p.provider}`}>

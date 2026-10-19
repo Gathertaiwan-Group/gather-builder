@@ -1,11 +1,11 @@
 import { Card, fmt } from "@/components/admin/AdminShell";
-import { adminContext } from "@/lib/adminServer";
+import type { Backoffice } from "@/lib/backoffice";
 import { listReferrals } from "@/lib/services/referral";
 import { ServiceError } from "@/lib/services/context";
 
 /** 推薦分潤報表（referral 模組啟用後才有內容） */
-export async function ReferralAdmin({ slug }: { slug: string }) {
-  const r = await listReferrals(adminContext(), { site: slug }).catch((e) => (e instanceof ServiceError ? null : Promise.reject(e)));
+export async function ReferralAdmin({ bo }: { bo: Backoffice }) {
+  const r = await listReferrals(bo.ctx, { site: bo.slug }).catch((e) => (e instanceof ServiceError ? null : Promise.reject(e)));
   if (!r) return null;
   return (
     <Card title={`推薦回饋（成功推薦 ${r.totalReferrals} 人）`}>
@@ -34,7 +34,7 @@ export async function ReferralAdmin({ slug }: { slug: string }) {
           ))}
         </tbody>
       </table>
-      <form action={`/api/admin/tenants/${slug}/referral-kol`} method="post" className="flex flex-wrap items-center gap-2 text-sm">
+      <form action={`${bo.api}/referral-kol`} method="post" className="flex flex-wrap items-center gap-2 text-sm">
         <input name="email" required placeholder="會員 Email" className="rounded border px-2 py-1" />
         <input name="rate" required inputMode="decimal" placeholder="分潤 %（0–50）" className="w-32 rounded border px-2 py-1" />
         <button className="rounded bg-neutral-900 px-3 py-1 text-white" type="submit">

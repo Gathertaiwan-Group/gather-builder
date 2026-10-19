@@ -1,8 +1,7 @@
 import { notFound } from "next/navigation";
 import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
-import { adminContext, requireAdminPage } from "@/lib/adminServer";
-import { getTenantBySlugAdmin } from "@/lib/services/admin";
+import { requireBackoffice } from "@/lib/backoffice";
 import { listCoupons } from "@/lib/services/coupons";
 import { ServiceError } from "@/lib/services/context";
 import { ReferralAdmin } from "./referral";
@@ -10,16 +9,15 @@ import { ReferralAdmin } from "./referral";
 export const dynamic = "force-dynamic";
 
 export default async function MarketingAdmin({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {
-  await requireAdminPage();
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const ctx = adminContext();
-  const tenant = await getTenantBySlugAdmin(ctx, slug);
-  if (!tenant) notFound();
+  const bo = await requireBackoffice(slug);
+  const ctx = bo.ctx;
+  const tenant = bo.tenant;
   const cps = await listCoupons(ctx, { site: slug, limit: 100 }).catch((e) => (e instanceof ServiceError ? { error: e.message } : Promise.reject(e)));
-  const act = `/api/admin/tenants/${slug}/coupons`;
+  const act = `${bo.api}/coupons`;
   return (
-    <AdminShell sp={sp}>
-      <TenantTabs slug={slug} active="/marketing" name={tenant.name} />
+    <AdminShell sp={sp} bo={bo}>
+      <TenantTabs bo={bo} active="/marketing" name={tenant.name} />
       <Card title="折扣碼">
         {"error" in cps ? (
           <p className="m-0 text-sm text-neutral-600">{cps.error}</p>
@@ -96,7 +94,7 @@ export default async function MarketingAdmin({ params, searchParams }: { params:
           </>
         )}
       </Card>
-      <ReferralAdmin slug={slug} />
+      <ReferralAdmin bo={bo} />
     </AdminShell>
   );
 }
