@@ -713,9 +713,16 @@ async function onEventOrderPaid(deps: HookDeps, tenant: TenantRow, order: OrderR
 }
 
 async function onEventOrderCancelled(store: Store, tenant: TenantRow, order: OrderRow, cd?: CancelDeps) {
-  // 名額已在 builder_cancel_order 同一交易釋放；這裡只負責通知候補（冪等）
+  // 名額已在 builder_cancel_order／builder_mark_order_refunded 同一交易釋放；這裡只負責通知候補（冪等）
   const regs = (await store.listRegistrations(tenant.id, { orderId: order.id, limit: 20, offset: 0 })).rows;
   if (!regs.length) return;
+  // 第八批審查 M-2：安全網——訂單已取消／已退款（含已出貨後退款），仍有效的報名一律條件式取消（只成功一次）
+  if (order.status === "cancelled" || order.refunded_at) {
+    for (const r of regs) {
+      if (r.status !== "held" && r.status !== "confirmed") continue;
+      await store.updateRegistration(tenant.id, r.id, ["held", "confirmed"], { status: "cancelled", cancelled_at: new Date().toISOString(), cancel_reason: order.refunded_at ? "refunded" : (order.cancel_reason ?? "order_cancelled") });
+    }
+  }
   const deps = { store, sendMail: cd ? cd.sendMail : getMailer(), baseUrl: (cd?.baseUrl ?? process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "") };
   for (const sid of new Set(regs.map((r) => r.session_id))) await promoteWaitlist(deps, tenant, sid);
 }

@@ -397,7 +397,7 @@ describe("第七批審查第二輪（訂閱）", () => {
 
   it("H3：sweep 放棄的 pending（沒有 PeriodNo）先回查第一期交易：查得到 → 取消但標 cancel_state=failed＋警示；查無 → 本地取消；回查失敗 → 先不動", async () => {
     const later = new Date(Date.now() + 2 * 3600_000);
-    for (const [mode, want] of [["found", "failed"], ["none", "done"], ["down", "pending"]] as const) {
+    for (const [mode, want] of [["found", "failed"], ["none", "not_needed"], ["down", "pending"]] as const) {
       const store = newStore();
       const s = await subShop(store, `rv2-ab-${mode}`);
       const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
@@ -423,3 +423,65 @@ describe("第七批審查第二輪（訂閱）", () => {
     expect((await s.notify(sub.id, charge(sub, 2))).outcome).toBe("charged:2");
   });
 });
+
+describe("第八批審查（訂閱 H-1）", () => {
+  it("H-1：首期已扣但建立通知遺失 → 會員取消（沒有 PeriodNo）先回查：查得到 → 本地取消但 cancel_state=failed（不是 done）＋警示店主；之後每期扣款 → 回填並真的終止委託、記 paid_after_end", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv8-h1-member");
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    s.nw.st.tradeStatus = "1"; // 藍新查得到第一期授權（委託其實已成立）
+    const c = await memberCancelSubscription(s.deps, { tenant: s.tenant, member: s.member, subscriptionId: r.subscription.id });
+    expect(c.status).toBe("cancelled");
+    expect(c.cancelState).toBe("failed");
+    const row = (await store.getSubscription(s.tenant.id, r.subscription.id))!;
+    expect(row).toMatchObject({ status: "cancelled", cancel_state: "failed", period_no: null });
+    expect(s.sent.some((m) => m.subject.includes("請確認一筆未完成的訂閱"))).toBe(true);
+    expect(s.nw.st.terminates).toBe(0);
+    // 之後藍新第 2 期照扣 → 用通知中的 PeriodNo 回填，真的呼叫終止
+    s.nw.st.already = 2;
+    expect((await s.notify(r.subscription.id, charge(r.subscription, 2))).outcome).toBe("paid_after_end:2");
+    expect(s.nw.st.terminates).toBe(1);
+    expect((await store.getSubscription(s.tenant.id, r.subscription.id))!).toMatchObject({ cancel_state: "done", period_no: "P2610190000aaaa", entitlement_state: "none" });
+  });
+
+  it("H-1：會員取消時回查確認委託不存在 → cancel_state=not_needed（不是 done）；回查失敗 → 照樣取消但標 failed＋警示", async () => {
+    for (const [mode, want] of [["none", "not_needed"], ["down", "failed"]] as const) {
+      const store = newStore();
+      const s = await subShop(store, `rv8-h1-q-${mode}`);
+      const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+      s.nw.st.tradeStatus = null;
+      s.nw.st.queryDown = mode === "down";
+      const c = await memberCancelSubscription(s.deps, { tenant: s.tenant, member: s.member, subscriptionId: r.subscription.id });
+      expect(c).toMatchObject({ status: "cancelled", cancelState: want });
+      expect(s.sent.some((m) => m.subject.includes("請確認一筆未完成的訂閱"))).toBe(mode === "down");
+    }
+  });
+
+  it("H-1：重新訂閱時作廢舊 pending（沒有 PeriodNo）也先回查；查得到 → 標 failed＋警示", async () => {
+    const store = newStore();
+    const s = await subShop(store, "rv8-h1-resub");
+    const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+    // 讓舊 pending 看起來超過 1 小時
+    await store.updateSubscriptionIf(s.tenant.id, r.subscription.id, {}, { created_at: new Date(Date.now() - 2 * 3600_000).toISOString() } as never);
+    s.nw.st.tradeStatus = "1";
+    await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } }).catch(() => undefined);
+    const row = (await store.getSubscription(s.tenant.id, r.subscription.id))!;
+    expect(row).toMatchObject({ status: "cancelled", cancel_state: "failed" });
+    expect(s.sent.some((m) => m.subject.includes("請確認一筆未完成的訂閱"))).toBe(true);
+  });
+
+  it("H-1：舊資料 cancel_state=done 但從沒有 PeriodNo（本地取消、從未呼叫終止）→ 收到扣款成功或失敗通知都真的終止委託", async () => {
+    for (const ok of [true, false]) {
+      const store = newStore();
+      const s = await subShop(store, `rv8-h1-legacy-${ok}`);
+      const r = await subscribe(s.deps, { tenant: s.tenant, member: s.member, data: { planId: s.plan.id } });
+      await store.transitionSubscription(s.tenant.id, r.subscription.id, ["pending"], "cancelled", { cancelled_at: new Date().toISOString(), ended_at: new Date().toISOString(), cancel_state: "done" });
+      s.nw.st.already = 2;
+      const out = await s.notify(r.subscription.id, charge(r.subscription, 2, ok));
+      expect(out.outcome).toBe(ok ? "paid_after_end:2" : "failed_after_end:2");
+      expect(s.nw.st.terminates).toBe(1);
+      if (ok) expect(s.sent.find((m) => m.subject.includes("仍被扣款"))).toBeTruthy();
+    }
+  });
+});
+

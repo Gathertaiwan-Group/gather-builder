@@ -62,11 +62,13 @@ describe.skipIf(!enabled)("qr-catalog（整合）", () => {
 
     const rep = await store.qrScanReport(t.id, new Date(Date.now() - 86400_000).toISOString());
     // 這個商品沒有日文／英文翻譯 → 自動 fallback 繁中
-    expect(rep.find((r) => r.country === "JP" && r.lang === "zh-TW")).toMatchObject({ scans: 1, orders: 1, inquiries: 0 });
+    // 第八批審查 L-5：未付款的訂單不計入訂單轉換（付款後才計入，見下方）
+    expect(rep.find((r) => r.country === "JP" && r.lang === "zh-TW")).toMatchObject({ scans: 1, orders: 0, inquiries: 0 });
     expect(rep.find((r) => r.country === "" && r.lang === "zh-TW")).toMatchObject({ scans: 1, orders: 0 });
     const since = new Date(Date.now() - 86400_000).toISOString();
     expect(await store.brandSales(t.id, [p.id], since)).toEqual([]); // 未付款不算
     await store.transitionOrder(t.id, order.id, "pending_payment", "paid", { paid_at: new Date().toISOString() });
     expect(await store.brandSales(t.id, [p.id], since)).toEqual([{ product_id: p.id, qty: 3, revenue: 1500, orders: 1 }]);
+    expect((await store.qrScanReport(t.id, since)).find((r) => r.country === "JP" && r.lang === "zh-TW")).toMatchObject({ scans: 1, orders: 1 });
   });
 });

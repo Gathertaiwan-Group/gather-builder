@@ -485,7 +485,9 @@ export async function placeGroupBuyOrder(deps: CheckoutDeps, input: { tenant: Te
   // 團主：有效且不是自己買自己的團
   const contactEmail = typeof (d.contact as { email?: unknown })?.email === "string" ? String((d.contact as { email: string }).email).trim().toLowerCase() : "";
   const lead = await leaderForGroupBuy(deps.store, tenant, g, d.leaderCode?.toUpperCase());
-  const self = !!lead && (normalizeEmail(contactEmail) === lead.leader.email_norm || (!!input.member && normalizeEmail(input.member.email) === lead.leader.email_norm));
+  // 第八批審查 L-2：盡力防範團主自己買自己的團——email（正規化）之外，也比對電話（只留數字、09 開頭）與收件地址（去空白、全形轉半形）。
+  // 限制：團主用別人的 email／電話／地址下單仍無法辨識（見 ARCHITECTURE 已知風險）。
+  const self = !!lead && (normalizeEmail(contactEmail) === lead.leader.email_norm || (!!input.member && normalizeEmail(input.member.email) === lead.leader.email_norm) || (await sameAsLeader(deps.store, tenant, lead.leader, d)));
   const leader = lead && !self ? lead : null;
   // 到店自取
   let pickup: ShippingChoice | null = null;
@@ -572,20 +574,26 @@ export async function settleGroupBuy(deps: { store: Store; sendMail?: Mailer; ba
   let cancelled = 0;
   let refundRequired = 0;
   let notified = 0;
+  // 第八批審查 L-1：回報過匯款末五碼（已匯款、待對帳）的待付款單 → 也要列入「需退款／需聯絡」
+  const reported = new Set(g.status === "failed" ? (await deps.store.listGroupBuyOrderRows(tenant.id, { groupBuyId: g.id })).filter((r) => !!r.payer_last5).map((r) => r.order_id) : []);
+  const contactNeeded: string[] = [];
   for (const o of orders) {
     if (g.status === "failed") {
+      const transferReported = o.status === "pending_payment" && reported.has(o.id);
       if (o.status === "pending_payment" || o.status === "paid") {
         const was = o.status;
         const r = await cancelOrderWithHooks(deps, tenant, o.id, [was], "group_buy_failed");
         if (r.transitioned) {
           cancelled++;
           if (was === "paid") refundRequired++;
+          if (transferReported) contactNeeded.push(o.order_no);
         }
       }
       const after = (await deps.store.getOrderById(tenant.id, o.id)) ?? o;
       if (after.cancel_reason === "group_buy_failed" && (await deps.store.insertGroupBuyNotice({ tenant_id: tenant.id, group_buy_id: g.id, order_id: o.id, kind: "failed" }))) {
         notified++;
-        await mailSafe(deps, o.contact.email, `【${tenant.name}】團購未成團：${g.title}`, `${o.contact.name} 你好，\n\n很抱歉，「${g.title}」截止時未達成團門檻（${g.min_qty} 件），你的訂單 ${o.order_no} 已取消。${o.status === "paid" ? "\n你已付款的金額，店家會儘快退款給你。" : "\n尚未付款的訂單不需再付款。"}`);
+        const tail = o.status === "paid" ? "\n你已付款的金額，店家會儘快退款給你。" : transferReported ? "\n你已回報匯款（帳號末五碼），店家核對入帳後會與你聯絡並退回已匯款項。" : "\n尚未付款的訂單不需再付款。";
+        await mailSafe(deps, o.contact.email, `【${tenant.name}】團購未成團：${g.title}`, `${o.contact.name} 你好，\n\n很抱歉，「${g.title}」截止時未達成團門檻（${g.min_qty} 件），你的訂單 ${o.order_no} 已取消。${tail}`);
       }
     } else if (o.status !== "cancelled" && (await deps.store.insertGroupBuyNotice({ tenant_id: tenant.id, group_buy_id: g.id, order_id: o.id, kind: "formed" }))) {
       notified++;
@@ -593,9 +601,9 @@ export async function settleGroupBuy(deps: { store: Store; sendMail?: Mailer; ba
     }
   }
   if (await deps.store.markGroupBuySettled(tenant.id, g.id)) {
-    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:group-buy", action: "group_buy.settled", payload: { groupBuyId: g.id, status: g.status, orders: orders.length, cancelled, refundRequired, notified } });
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:group-buy", action: "group_buy.settled", payload: { groupBuyId: g.id, status: g.status, orders: orders.length, cancelled, refundRequired, notified, transferReported: contactNeeded } });
     if (shop.ownerEmail) {
-      await mailSafe(deps, shop.ownerEmail, `【${tenant.name}】團購${g.status === "closed" ? "已結團（成團）" : "未成團（已自動取消訂單）"}：${g.title}`, `團購「${g.title}」${g.status === "closed" ? "已成團結團" : `未達門檻 ${g.min_qty} 件，已取消 ${cancelled} 張訂單`}。\n訂單數：${orders.length}${refundRequired ? `\n🔴 其中 ${refundRequired} 張已付款，需要退款（可用 refund_order 或到金流後台／自行退款）` : ""}\n出貨報表請用 export_shipping。`);
+      await mailSafe(deps, shop.ownerEmail, `【${tenant.name}】團購${g.status === "closed" ? "已結團（成團）" : "未成團（已自動取消訂單）"}：${g.title}`, `團購「${g.title}」${g.status === "closed" ? "已成團結團" : `未達門檻 ${g.min_qty} 件，已取消 ${cancelled} 張訂單`}。\n訂單數：${orders.length}${refundRequired ? `\n🔴 其中 ${refundRequired} 張已付款，需要退款（可用 refund_order 或到金流後台／自行退款）` : ""}${contactNeeded.length ? `\n🔴 另有 ${contactNeeded.length} 張待付款訂單客人已回報匯款末五碼（${contactNeeded.join("、")}）：請核對銀行入帳，已入帳的需退款並聯絡客人` : ""}\n出貨報表請用 export_shipping。`);
     }
   }
   return (await deps.store.getGroupBuy(tenant.id, g.id)) ?? g;
@@ -1017,3 +1025,30 @@ export async function confirmBankMatches(ctx: ServiceContext, input: { site?: st
 }
 
 export { commissionFor };
+
+const normPhone = (v: unknown) => {
+  const d = typeof v === "string" ? v.normalize("NFKC").replace(/\D/g, "").replace(/^8869/, "09") : "";
+  return d.length >= 8 ? d : "";
+};
+const normAddr = (v: unknown) => (typeof v === "string" ? v.normalize("NFKC").replace(/[\s,，、.。-]/g, "").toLowerCase() : "");
+
+/** 第八批審查 L-2：下單的電話或收件地址與團主（或團主以前下過的單）相同 → 視為自己買自己的團 */
+async function sameAsLeader(store: Store, tenant: TenantRow, leader: { phone?: string | null; email_norm: string }, d: { contact?: unknown; shipping?: unknown }): Promise<boolean> {
+  const c = (d.contact ?? {}) as { phone?: unknown };
+  const sh = (d.shipping ?? {}) as { phone?: unknown; address?: unknown };
+  const phones = new Set([normPhone(c.phone), normPhone(sh.phone)].filter(Boolean));
+  const addr = normAddr(sh.address);
+  if (leader.phone && phones.has(normPhone(leader.phone))) return true;
+  if (!phones.size && addr.length < 6) return false;
+  // 團主自己的會員帳號（同 email）下過的訂單的電話／地址
+  const member = await store.listMembers(tenant.id, { limit: 5, offset: 0, q: leader.email_norm });
+  for (const m of member.rows.filter((x) => normalizeEmail(x.email) === leader.email_norm)) {
+    if (m.phone && phones.has(normPhone(m.phone))) return true;
+    const own = await store.listOrders(tenant.id, { memberId: m.id, limit: 20, offset: 0 });
+    for (const o of own.rows) {
+      if (phones.has(normPhone(o.contact.phone)) || (o.shipping && phones.has(normPhone(o.shipping.phone)))) return true;
+      if (addr.length >= 6 && o.shipping && normAddr(o.shipping.address) === addr) return true;
+    }
+  }
+  return false;
+}

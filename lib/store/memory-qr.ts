@@ -5,7 +5,8 @@ const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
 
 /** 記憶體實作（brandSales 由 memory-commerce 提供，因為要讀訂單） */
-export function createMemoryQrStore(): Omit<QrStore, "brandSales"> {
+export function createMemoryQrStore(): Omit<QrStore, "brandSales"> & { attachOrders(fn: (tenantId: string, orderId: string) => Promise<boolean>): void } {
+  let orderCounts: (tenantId: string, orderId: string) => Promise<boolean> = async () => true;
   const codes = new Map<string, QrCodeRow>();
   const scans: QrScanRow[] = [];
   const conversions: QrConversionRow[] = [];
@@ -13,6 +14,9 @@ export function createMemoryQrStore(): Omit<QrStore, "brandSales"> {
   let scanSeq = 0;
   let convSeq = 0;
   return {
+    attachOrders(fn) {
+      orderCounts = fn;
+    },
     async insertQrCode(row) {
       if ([...codes.values()].some((c) => c.tenant_id === row.tenant_id && (c.code === row.code || c.product_id === row.product_id))) return null;
       const r: QrCodeRow = { ...clone(row), id: randomUUID(), status: "active", created_at: now() };
@@ -48,7 +52,11 @@ export function createMemoryQrStore(): Omit<QrStore, "brandSales"> {
         const k = `${s.product_id}|${s.country ?? ""}|${s.lang}`;
         const row = out.get(k) ?? { product_id: s.product_id, country: s.country ?? "", lang: s.lang, scans: 0, orders: 0, inquiries: 0, o: new Set<string>(), i: new Set<string>() };
         row.scans++;
-        for (const c of conversions) if (c.scan_id === s.id) (c.kind === "order" ? row.o : row.i).add(c.ref_id);
+        for (const c of conversions) {
+          if (c.scan_id !== s.id) continue;
+          // 第八批審查 L-5：訂單轉換只算真正付款的（已付款／已出貨、非 sandbox、未退款）；未付款或取消的不計入（＝builder_qr_scan_report）
+          if (c.kind === "order" ? await orderCounts(tenantId, c.ref_id) : true) (c.kind === "order" ? row.o : row.i).add(c.ref_id);
+        }
         out.set(k, row);
       }
       return [...out.values()].map(({ o, i, ...r }) => ({ ...r, orders: o.size, inquiries: i.size }));

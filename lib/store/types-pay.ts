@@ -60,7 +60,8 @@ export interface SubscriptionRow {
   grace_until: string | null;
   failed_count: number;
   last_charge_at: string | null;
-  cancel_state: "none" | "requested" | "done" | "failed";
+  /** done＝我們確實成功呼叫過藍新終止委託；not_needed＝回查確認委託未成立（本地取消即可）；failed＝終止失敗或無法確認 */
+  cancel_state: "none" | "requested" | "done" | "failed" | "not_needed";
   cancel_attempts: number;
   cancel_error: string | null;
   cancel_requested_at: string | null;

@@ -188,7 +188,8 @@ export async function subscribe(deps: SubDeps, input: { tenant: TenantRow; membe
     if (Date.parse(s.created_at) < Date.now() - 3600_000) {
       // 第七批審查 M4：已有委託單號（藍新那邊可能已成立）→ 先終止委託
       if (s.period_no) await requestCancel(deps, tenant, s, "system:abandoned");
-      else await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: new Date().toISOString(), ended_at: new Date().toISOString() });
+      // 第八批審查 H-1：沒有 PeriodNo 也不能只在本地取消——先回查第一期交易，必要時警示店主（委託可能已在藍新成立）
+      else await abandonPendingWithoutPeriodNo(deps, tenant, s, new Date().toISOString(), { force: true });
     }
   }
   let sub: SubscriptionRow;
@@ -320,6 +321,7 @@ async function onPeriodCharge(deps: SubDeps, tenant: TenantRow, subIn: Subscript
   // 第七批審查 H3：本地沒記到 PeriodNo（建立通知遺失）→ 用通知中的 PeriodNo，先以委託單查詢確認它真的屬於這筆委託
   const notifiedPeriodNo = String(r.PeriodNo ?? "");
   const periodNo = sub.period_no ?? notifiedPeriodNo;
+  let backfilled = false;
   if (!periodNo || !/^[A-Za-z0-9]{1,30}$/.test(periodNo)) return queryFailed(deps, tenant, sub, "每期通知沒有可用的委託單號（PeriodNo）", retry, true);
   // 權威回查 1：委託單查詢（已授權期數必須涵蓋這一期、委託狀態為扣款中／已到期）
   const q = await provider.queryPeriod(sub.merchant_order_no, periodNo);
@@ -333,12 +335,14 @@ async function onPeriodCharge(deps: SubDeps, tenant: TenantRow, subIn: Subscript
     // 回填（條件式：period_no 仍為 null 才寫）
     const filled = await deps.store.updateSubscriptionIf(tenant.id, sub.id, { period_no: null }, { period_no: periodNo });
     sub = filled ?? (await deps.store.getSubscription(tenant.id, sub.id)) ?? sub;
+    backfilled = true;
     await deps.store.insertAudit({ tenant_id: tenant.id, actor: "newebpay", action: "subscription.period_no_backfill", payload: { subscriptionId: sub.id, periodNo } });
   }
   // 本地已結束（取消／停權）或從未開通（pending 已被清掉）卻仍在扣款 → 終止委託、警示店主、這期記 paid_after_end（不開權益）
   if (sub.status === "cancelled" || sub.status === "expired") {
-    if (success) return chargeAfterEnd(deps, tenant, sub, provider, n, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { notify: r } }, ok);
-    if (sub.cancel_state !== "done") await terminateLeftover(deps, tenant, sub, provider);
+    if (success) return chargeAfterEnd(deps, tenant, sub, provider, n, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { notify: r } }, ok, backfilled);
+    // 第八批審查 H-1：只有「我們確實成功呼叫過終止」（cancel_state=done）且委託單號不是剛回填的，才不再終止
+    if (sub.cancel_state !== "done" || backfilled) await terminateLeftover(deps, tenant, sub, provider);
     return ok(`failed_after_end:${n}`);
   }
   if (!success) return recordCharge(deps, tenant, sub, provider, n, { amount: sub.amount, tradeNo: String(r.TradeNo ?? "") || null, raw: { notify: r }, failed: true }, ok, retry);
@@ -377,8 +381,9 @@ async function terminateLeftover(deps: SubDeps, tenant: TenantRow, sub: Subscrip
 }
 
 /** 第七批審查 H3：結束後仍被扣款 → 終止委託＋這期記 paid_after_end（不恢復訂閱、不開權益）＋警示店主退款（同一期只記／只寄一次） */
-async function chargeAfterEnd(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider, n: number, c: { amount: number; tradeNo: string | null; raw: Record<string, unknown> }, ok: R) {
-  const t = sub.cancel_state === "done" ? ({ kind: "already" } as const) : await terminateLeftover(deps, tenant, sub, provider);
+async function chargeAfterEnd(deps: SubDeps, tenant: TenantRow, sub: SubscriptionRow, provider: NewebpayProvider, n: number, c: { amount: number; tradeNo: string | null; raw: Record<string, unknown> }, ok: R, backfilled = false) {
+  // 第八批審查 H-1：cancel_state=done 只代表「我們確實成功終止過這張委託（有 PeriodNo）」；剛回填 PeriodNo 或其他狀態一律真的呼叫終止
+  const t = sub.cancel_state === "done" && !backfilled ? ({ kind: "already" } as const) : await terminateLeftover(deps, tenant, sub, provider);
   const now = new Date().toISOString();
   const res = await deps.store.recordSubscriptionCharge(tenant.id, { subscriptionId: sub.id, periodIndex: n, amount: c.amount, status: "paid_after_end", tradeNo: c.tradeNo, raw: c.raw, periodEnd: now, graceUntil: now });
   if (!res.inserted) return ok(`duplicate_after_end:${n}`);
@@ -483,8 +488,16 @@ export async function requestCancel(deps: SubDeps, tenant: TenantRow, sub: Subsc
   if (sub.status === "cancelled" || sub.status === "expired") return { status: sub.status, cancelState: sub.cancel_state, message: "這筆訂閱已經結束" };
   const nowIso = new Date().toISOString();
   if (!sub.period_no) {
-    const moved = await deps.store.transitionSubscription(tenant.id, sub.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso, cancel_state: "done" });
-    return { status: moved?.status ?? sub.status, cancelState: "done", message: "已取消（委託尚未建立）" };
+    // 第八批審查 H-1：沒有 PeriodNo（建立通知可能遺失、委託可能已在藍新成立）→ 一律先回查第一期交易，查無才算「不需要終止」；
+    // 查得到或無法確認 → 本地取消但 cancel_state=failed＋警示店主（之後收到每期通知會用通知中的 PeriodNo 自動終止）。
+    // 🔴 絕不設 done（done＝我們確實成功呼叫過終止）。
+    if (sub.status === "pending") await abandonPendingWithoutPeriodNo(deps, tenant, sub, nowIso, { force: true, by });
+    const cur = (await deps.store.getSubscription(tenant.id, sub.id)) ?? sub;
+    return {
+      status: cur.status,
+      cancelState: cur.cancel_state,
+      message: cur.cancel_state === "not_needed" ? "已取消（委託尚未在藍新成立）" : "已在本站取消；無法確認藍新是否已成立委託，已通知店家到藍新後台確認並終止（若之後仍被扣款，系統會自動終止委託並通知店家退款）",
+    };
   }
   await deps.store.updateSubscriptionIf(tenant.id, sub.id, {}, { cancel_state: "requested", cancel_requested_at: sub.cancel_requested_at ?? nowIso });
   const provider = await newebpay(deps, tenant.id, sub.sandbox);
@@ -575,21 +588,22 @@ export async function memberSubscriptions(store: Store, tenant: TenantRow, membe
  * 本地標 cancel_state=failed（之後若收到每期通知，會用通知裡的 PeriodNo 自動終止，見 onPeriodCharge）；
  * 回查失敗 → 這次不動（下次 cron 再試）；明確查無 → 才本地取消（試用方案的 10 元驗證查不到時一併警示）。
  */
-async function abandonPendingWithoutPeriodNo(deps: SubDeps, tenant: TenantRow, s: SubscriptionRow, nowIso: string): Promise<boolean> {
+async function abandonPendingWithoutPeriodNo(deps: SubDeps, tenant: TenantRow, s: SubscriptionRow, nowIso: string, opts: { force?: boolean; by?: string } = {}): Promise<boolean> {
   const provider = await newebpay(deps, tenant.id, s.sandbox);
   const t = provider ? await provider.queryRaw(`${s.merchant_order_no}_1`, s.amount) : null;
   if (!t) {
     await deps.store.updateSubscriptionIf(tenant.id, s.id, {}, { query_failures: s.query_failures + 1 });
-    if (s.query_failures + 1 < 3) return false; // 回查失敗：下次再試
+    // 回查失敗：cron 下次再試；會員／店主主動取消（force）→ 照樣本地取消，但標 failed＋警示店主
+    if (!opts.force && s.query_failures + 1 < 3) return false;
   }
   const status = t ? String(t.Status) : "QUERY_FAILED";
   const found = status === "SUCCESS";
   const notFound = status === "TRA10021";
   const plan = await deps.store.getSubscriptionPlan(tenant.id, s.plan_id);
-  const moved = await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso, cancel_state: notFound && !(plan?.trial_days) ? "done" : "failed", cancel_error: notFound ? null : "委託可能已在藍新成立，但沒有收到委託單號（PeriodNo），請到藍新後台確認並終止" });
+  const moved = await deps.store.transitionSubscription(tenant.id, s.id, ["pending"], "cancelled", { cancelled_at: nowIso, ended_at: nowIso, cancel_state: notFound && !(plan?.trial_days) ? "not_needed" : "failed", cancel_error: notFound ? null : "委託可能已在藍新成立，但沒有收到委託單號（PeriodNo），請到藍新後台確認並終止" });
   if (!moved) return false;
   if (!notFound || (plan?.trial_days ?? 0) > 0) {
-    await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:subscriptions", action: "subscription.abandoned_unverified", payload: { subscriptionId: s.id, tradeQuery: status } });
+    await deps.store.insertAudit({ tenant_id: tenant.id, actor: opts.by ?? "system:subscriptions", action: "subscription.abandoned_unverified", payload: { subscriptionId: s.id, tradeQuery: status } });
     const owner = await ownerEmail(deps.store, tenant);
     if (owner) await mailSafe(deps, owner, `⚠️【${tenant.name}】請確認一筆未完成的訂閱是否已在藍新成立`, `委託編號 ${s.merchant_order_no} 建立後一直沒有收到藍新的結果通知，系統已在本站取消。\n${found ? "🔴 藍新查得到第一期授權：委託已成立且已扣款——請立刻到藍新後台終止這張委託並退款。" : "無法確認藍新是否已成立這張委託（試用方案或查詢失敗），請到藍新後台搜尋這個委託編號；若已成立請手動終止。"}\n之後若藍新仍送來扣款通知，系統會自動終止委託並通知你退款。`);
   }

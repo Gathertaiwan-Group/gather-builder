@@ -10,7 +10,7 @@ import { ctxFor, newStore } from "./helpers";
 import { makeShop } from "./shop-helpers";
 import { enableModule, configureModule } from "@/lib/services/modules";
 import { publishSite } from "@/lib/services/publish";
-import { placeOrder, updateProduct } from "@/lib/services/shop";
+import { createProduct, placeOrder, updateProduct } from "@/lib/services/shop";
 import { setTranslation, publishTranslations } from "@/lib/services/i18n";
 import {
   QR_CODE_RE,
@@ -145,6 +145,9 @@ describe("掃描紀錄與轉換", () => {
     expect(await recordOrderConversions(store, s.tenant, order, readScanCookie(s.tenant.id, cookie))).toBe(0); // 冪等
     await submitOverseasInquiry({ store }, { tenant: s.tenant, data: { code: s.code, lang: "ja", name: "山田", email: "y@example.com", country: "jp", address: "東京都千代田区1-1" }, scanIds: [sc!.scanId!], ipHash: "ip" });
     await expect(submitOverseasInquiry({ store }, { tenant: s.tenant, data: { code: s.code, name: "x", email: "bad", country: "JP", address: "東京都千代田区" }, scanIds: [], ipHash: "ip" })).rejects.toMatchObject({ code: "invalid" });
+    // 第八批審查 L-5：訂單還沒付款 → 報表不計入訂單轉換
+    expect((await getScanReport(s.ctx, { site: "qr-conv" })).rows).toEqual([expect.objectContaining({ productId: s.mug.id, scans: 1, orders: 0, inquiries: 1 })]);
+    await store.transitionOrder(s.tenant.id, order.id, "pending_payment", "paid", { paid_at: new Date().toISOString() });
     const rep = await getScanReport(s.ctx, { site: "qr-conv" });
     expect(rep.rows).toEqual([expect.objectContaining({ productId: s.mug.id, country: "JP", lang: "ja", scans: 1, orders: 1, inquiries: 1, conversionRate: 200 })]);
     const inq = await store.listInquiries(s.tenant.id, { limit: 5 });
@@ -162,8 +165,10 @@ describe("品牌報表", () => {
     const token = decodeURIComponent(link.url.split("/brand-report/")[1]!);
     const { order } = await placeOrder({ store, baseUrl: "http://test.local" }, { tenant: s.tenant, member: null, data: { items: [{ productId: s.mug.id, qty: 2 }], contact: { name: "買家甲", email: "buyer@example.com", phone: "0912345678" }, shipping: { name: "買家甲", phone: "0912345678", address: "台北市信義區" }, paymentMethod: "offline" } });
     await store.transitionOrder(s.tenant.id, order.id, "pending_payment", "paid", { paid_at: new Date().toISOString() });
+    // 第八批審查 L-4：同品牌但未上架（草稿）的商品不出現在品牌報表
+    await createProduct(s.ctx, { site: "qr-brand", slug: "draft-cup", name: "未上架杯", price: 100, brand: "山嵐茶行" });
     const r = (await brandReport(store, s.tenant, token))!;
-    expect(r.products.map((p) => p.name)).toEqual(["馬克杯"]); // T 恤不是這個品牌
+    expect(r.products.map((p) => p.name)).toEqual(["馬克杯"]); // T 恤不是這個品牌；草稿不列
     expect(r.products[0]).toMatchObject({ soldQty: 2, revenue: 700, paidOrders: 1 });
     expect(JSON.stringify(r)).not.toMatch(/buyer@example\.com|買家甲|0912345678|信義區/);
     expect(await brandReport(store, s.tenant, token.replace(/.$/, (c) => (c === "A" ? "B" : "A")))).toBeNull();

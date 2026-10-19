@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getMailer } from "../mail";
 import { PROVIDER_IDS } from "../pay/types";
 import type { BookingRow, BookingStatus, MemberRow, OrderRow, ProviderRow, ServiceRow, Store, TenantRow } from "../store/types";
 import type { BookingSettings } from "@/modules/booking/manifest";
@@ -7,7 +8,7 @@ import { ServiceError, activeModuleIds, audit, moduleStates, requireScope, resol
 import { parse } from "./sites";
 import { publishedModuleSettings } from "./members";
 import { mailSafe, publishedShopSettings, twd, type CheckoutDeps } from "./shop";
-import { registerOrderHooks, type HookDeps } from "./order-hooks";
+import { registerOrderHooks, type CancelDeps, type HookDeps } from "./order-hooks";
 import { cancelOrderWithHooks, expireIfDue } from "./orders";
 import { emailKey } from "./members";
 import { normalizeEmail } from "../email-normalize";
@@ -512,7 +513,27 @@ async function onBookingOrderPaid(deps: HookDeps, tenant: TenantRow, order: Orde
     if (s) await sendBookingConfirmed(deps, tenant, moved, s, "預約成功", order.total);
   }
 }
-registerOrderHooks({ name: "booking", paid: onBookingOrderPaid });
+/**
+ * 第八批審查 M-2：取消側 hook（訂單取消、sandbox 付款、已出貨訂單退款）。
+ * 名額通常已在 SQL 同一交易釋放（builder_cancel_order／builder_mark_order_refunded／builder_mark_paid_sandbox）；
+ * 這裡是冪等的安全網：這張訂單仍有效的預約 → 條件式改成 cancelled（只成功一次），真的轉換的那筆才通知客人（附取消 .ics）。
+ */
+async function onBookingOrderCancelled(store: Store, tenant: TenantRow, order: OrderRow, cd?: CancelDeps) {
+  if (order.status !== "cancelled" && !order.refunded_at && !order.payment_sandbox) return;
+  const live = (await store.listBookings(tenant.id, { orderId: order.id, status: ["held", "confirmed"], limit: 10, offset: 0 })).rows;
+  const deps = { store, sendMail: cd ? cd.sendMail : getMailer(), baseUrl: (cd?.baseUrl ?? process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "") };
+  for (const b of live) {
+    const reason = order.refunded_at ? "refunded" : (order.cancel_reason ?? "order_cancelled");
+    const moved = await store.updateBooking(tenant.id, b.id, ["held", "confirmed"], { status: "cancelled", cancelled_at: new Date().toISOString(), cancel_reason: reason, cancelled_by: "order" });
+    if (!moved) continue;
+    await store.insertAudit({ tenant_id: tenant.id, actor: "system:booking", action: "booking.cancel_by_order", payload: { bookingId: b.id, orderNo: order.order_no, reason } });
+    const s = await store.getServiceById(tenant.id, b.service_id);
+    if (!s || order.payment_sandbox) continue;
+    const ics: MailAttachment = { filename: "booking-cancel.ics", content: await bookingIcs(store, tenant, moved, s, deps.baseUrl, true), contentType: "text/calendar; charset=utf-8; method=CANCEL" };
+    await mailSafe(deps, b.contact.email, `【${tenant.name}】預約已取消：${s.name} ${fmtTaipei(b.starts_at)}`, `${b.contact.name} 你好，\n\n你的預約（${s.name} ${fmtTaipei(b.starts_at)}）因訂單 ${order.order_no} ${order.refunded_at ? "已退款" : "已取消"}而取消。`, [ics]);
+  }
+}
+registerOrderHooks({ name: "booking", paid: onBookingOrderPaid, cancelled: onBookingOrderCancelled });
 
 /** 每日 cron：寄「現在到明天結束」之間開始的已確認預約提醒（reminder_sent_at 條件式，只寄一次） */
 export async function runBookingCron(deps: { store: Store; sendMail?: CheckoutDeps["sendMail"]; baseUrl: string }, now = new Date()) {

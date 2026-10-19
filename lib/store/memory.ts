@@ -40,9 +40,10 @@ export function createMemoryStore(): Store {
   const classes = createMemoryClassesStore();
   const content = createMemoryContentStore();
   const groupBuy = createMemoryGroupBuyStore();
+  const { attachOrders: attachQrOrders, ...qrStore } = createMemoryQrStore();
   const store: Store = {
     ...groupBuy.store,
-    ...createMemoryQrStore(),
+    ...qrStore,
     ...createMemoryCommerceStore(classes.bridge, content.credits, groupBuy.bridge),
     ...createMemoryExtStore(),
     ...classes.store,
@@ -243,5 +244,9 @@ export function createMemoryStore(): Store {
   };
   classes.attach(store);
   content.attach(store);
+  attachQrOrders(async (tenantId, orderId) => {
+    const o = await store.getOrderById(tenantId, orderId);
+    return !!o && (o.status === "paid" || o.status === "fulfilled") && !o.payment_sandbox && !o.refunded_at;
+  });
   return store;
 }

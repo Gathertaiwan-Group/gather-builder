@@ -251,7 +251,7 @@ export function shipmentSummary(s: ShipmentRow, orderNo?: string) {
 /** 出貨單狀態變成「已寄出」→ 訂單 paid → fulfilled（條件式，只會一次）並通知客人 */
 async function markOrderShipped(store: Store, sendMail: ServiceContext["sendMail"], baseUrl: string, tenant: TenantRow, order: OrderRow, s: ShipmentRow) {
   await store.setOrderFields(tenant.id, order.id, { shipping_tracking: s.tracking_no, shipping_method: order.shipping_choice?.label ?? s.method_id });
-  if (order.status !== "paid") return;
+  if (order.status !== "paid" || isTopupOrder(order)) return;
   const moved = await store.transitionOrder(tenant.id, order.id, "paid", "fulfilled", { fulfilled_at: new Date().toISOString(), shipping_tracking: s.tracking_no, shipping_method: order.shipping_choice?.label ?? s.method_id });
   if (!moved) return;
   await store.insertAudit({ tenant_id: tenant.id, actor: "system:shipping", action: "order.fulfill", payload: { orderNo: order.order_no, shipment: s.id, status: s.status } });
@@ -279,6 +279,7 @@ export async function createShipment(ctx: ServiceContext, input: { site?: string
   if (!order) throw new ServiceError("not_found", "找不到訂單（請給 orderId 或 orderNo）");
   if (order.status !== "paid") throw new ServiceError("conflict", `訂單 ${order.order_no} 目前不是「已付款」，不能建立出貨單`);
   if (order.payment_sandbox) throw new ServiceError("invalid", `訂單 ${order.order_no} 是金流測試環境付款（沒有實際收款），不能出貨`);
+  if (isTopupOrder(order)) throw new ServiceError("invalid", `訂單 ${order.order_no} 是儲值訂單，不需要出貨`);
   const choice: ShippingChoice = order.shipping_choice ?? { methodId: "manual", type: "manual", provider: "manual", subType: null, label: "手動出貨", fee: order.shipping_fee, store: null, cvsSelectionId: null };
   const settings = await publishedShippingSettings(ctx.store, tenant);
   const active = await ctx.store.getActiveShipmentByOrder(tenant.id, order.id);
@@ -505,3 +506,8 @@ export async function handleLogisticsNotify(deps: { store: Store; sendMail?: Ser
 }
 
 export { shippingSettings };
+
+/** 儲值訂單（不需出貨）；不 import wallet.ts 以免循環 import */
+function isTopupOrder(o: OrderRow): boolean {
+  return o.items.some((i) => (i as { item_kind?: string }).item_kind === "topup");
+}

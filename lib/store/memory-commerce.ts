@@ -528,6 +528,8 @@ export function createMemoryCommerceStore(bridge?: ReservationBridge, credits?: 
       const next = { ...o, refunded_at: now(), updated_at: now() };
       orders.set(id, next);
       credits?.releaseSync(tenantId, next);
+      // 第八批審查 M-2：同交易釋放報名／預約（＝builder_mark_order_refunded，0037）
+      bridge?.releaseSync(tenantId, id, "refunded");
       return clone(next);
     },
     async getPaymentByShortCode(code) {

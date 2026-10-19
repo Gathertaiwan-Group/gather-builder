@@ -339,7 +339,8 @@ export async function brandReport(store: Store, tenant: TenantRow, token: string
   if (!id || !sig || !/^[0-9a-f-]{36}$/i.test(id) || !verifySigned("brandreport", id, sig)) return null;
   const link = await store.getBrandReportLink(tenant.id, id);
   if (!link || link.revoked_at || Date.parse(link.expires_at) <= Date.now()) return null;
-  const products = (await store.listProducts(tenant.id, { limit: 500, offset: 0 })).rows.filter((p) => p.brand === link.brand);
+  // 第八批審查 L-4：只列已上架商品（草稿／下架商品不出現在給品牌看的報表）
+  const products = (await store.listProducts(tenant.id, { status: "published", limit: 500, offset: 0 })).rows.filter((p) => p.brand === link.brand);
   const ids = products.map((p) => p.id);
   const since = new Date(Date.now() - sinceDays * 86400_000).toISOString();
   const [scan, sales] = await Promise.all([ids.length ? reportRows(store, tenant, since, ids) : Promise.resolve([]), ids.length ? store.brandSales(tenant.id, ids, since) : Promise.resolve([])]);

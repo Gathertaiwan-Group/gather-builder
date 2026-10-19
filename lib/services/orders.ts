@@ -374,6 +374,8 @@ export async function fulfillOrder(
   // H1：測試環境（sandbox）付款的訂單沒有真的收到錢，絕不能出貨
   const sandboxPaid = o.payment_sandbox || (await ctx.store.listPaymentsForOrder(tenant.id, o.id)).some((p) => p.sandbox && p.status === "paid");
   if (sandboxPaid) throw new ServiceError("invalid", `訂單 ${o.order_no} 是 PChomePay 測試環境（sandbox）付款，沒有實際收款，不能出貨。請取消這張訂單。`);
+  // 第八批審查 M-1：儲值訂單不是實體商品、不需出貨；標成已出貨會讓退款走「先退錢」路徑（違反先收回儲值金再退款）
+  if (isTopupOrder(o)) throw new ServiceError("invalid", `訂單 ${o.order_no} 是儲值訂單，不需要出貨（付款後儲值金已自動入帳）`);
   // shipping 模組：已建立綠界物流單的訂單，出貨狀態以物流通知為準
   const active = await ctx.store.getActiveShipmentByOrder(tenant.id, o.id);
   if (active?.provider === "ecpay") throw new ServiceError("conflict", `訂單 ${o.order_no} 已建立綠界物流單（${active.logistics_id ?? "建立中"}），出貨狀態以物流通知為準，不能手動標記`);
@@ -1078,6 +1080,8 @@ export async function refundOrder(ctx: ServiceContext, input: { site?: string | 
   const topupOrder = isTopupOrder(o);
   const topup = topupOrder ? await topupReversalPreview(ctx.store, tenant, o) : null;
   if (topupOrder) {
+    // 第八批審查 M-1：儲值訂單一律走「先收回儲值金（取消訂單）→ 全數收回才退款」；已標成出貨的（第八批前的舊資料）無法用取消收回 → 不自動退款
+    if (o.status === "fulfilled") throw new ServiceError("invalid", `儲值訂單 ${o.order_no} 被標成已出貨，無法先收回儲值金，不提供自動退款：請先調整儲值金（adjust_balance）收回，再到 ${label} 商家後台人工退款。`);
     if (topup && topup.used > 0) {
       throw new ServiceError("invalid", `儲值訂單 ${o.order_no}：${topupReversalText(topup)}。客人已用掉一部分，不提供自動全額退款（部分退款本版不做）：請先用 cancel_order（confirm）收回可收回的 ${twd(topup.reclaimable)}，再到 ${label} 商家後台人工退款（只退可收回部分對應的金額）。`);
     }
@@ -1144,6 +1148,8 @@ export async function resolveRefund(ctx: ServiceContext, input: { site?: string 
   const rf = await ctx.store.getRefund(tenant.id, input.refundId);
   if (!rf) throw new ServiceError("not_found", "找不到退款紀錄");
   if (rf.status !== "requested" && rf.status !== "unknown") throw new ServiceError("conflict", `這筆退款已是「${rf.status}」，不能再標記`);
+  // 第八批審查 L-3：requested＝可能還在等金流回應；超過 REFUND_STALE_MINUTES 才允許人工標記（避免與進行中的退款請求互相覆蓋）
+  if (rf.status === "requested" && Date.parse(rf.created_at) > Date.now() - REFUND_STALE_MINUTES * 60_000) throw new ServiceError("conflict", `這筆退款送出不到 ${REFUND_STALE_MINUTES} 分鐘，可能還在處理中；請稍後再確認（超過 ${REFUND_STALE_MINUTES} 分鐘仍無結果會轉為「結果不明」）`);
   if (input.outcome !== "succeeded" && input.outcome !== "failed") throw new ServiceError("invalid", "outcome 需為 succeeded 或 failed");
   const order = await ctx.store.getOrderById(tenant.id, rf.order_id);
   requireConfirm(input.confirm, `把退款（${twd(rf.amount)}，${PROVIDER_LABEL[rf.provider]}）標記為「${input.outcome === "succeeded" ? "已退款成功" : "退款失敗"}」——請先到金流商家後台確認${input.outcome === "succeeded" && order ? `。${refundEffectsText(order)}` : ""}`);
