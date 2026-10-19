@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { siteBase } from "../site-url";
 import { merchandiseNet } from "../loyalty/rules";
 import type { MemberRow, OrderRow, ReferralCodeRow, Store, TenantRow } from "../store/types";
 import type { ReferralSettings } from "@/modules/referral/manifest";
@@ -33,7 +34,7 @@ export async function getOrCreateReferralCode(store: Store, tenant: TenantRow, m
 }
 
 export function shareUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, code: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/api/ref/${code}`;
+  return `${siteBase(tenant, baseUrl)}/api/ref/${code}`;
 }
 
 /**
@@ -115,7 +116,7 @@ export async function onReferralOrderPaid(deps: HookDeps, tenant: TenantRow, ord
       await deps.sendMail(
         referrer.email,
         `【${tenant.name}】感謝推薦！送你一張回饋券`,
-        `${referrer.name ?? ""} 你好，\n\n你推薦的朋友完成了第一筆訂單，送你一張回饋券：${coupon.code}（${rw.kind === "fixed" ? `折 NT$${rw.value}` : `${rw.value}% 折扣`}，${rw.validDays ?? 90} 天內有效，限本人登入使用）。\n\n${deps.baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/shop`,
+        `${referrer.name ?? ""} 你好，\n\n你推薦的朋友完成了第一筆訂單，送你一張回饋券：${coupon.code}（${rw.kind === "fixed" ? `折 NT$${rw.value}` : `${rw.value}% 折扣`}，${rw.validDays ?? 90} 天內有效，限本人登入使用）。\n\n${siteBase(tenant, deps.baseUrl)}/shop`,
       );
     } catch (e) {
       console.error("[referral] 寄回饋通知失敗", e instanceof Error ? e.message : e);

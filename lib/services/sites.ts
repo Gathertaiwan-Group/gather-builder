@@ -114,8 +114,8 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
     siteId: tenant.id,
     slug: tenant.slug,
     modules: statuses,
-    previewUrl: previewUrl(ctx, tenant.slug, createPreviewToken(tenant.id, ctx.previewSecret)),
-    publicUrl: publicUrl(ctx, tenant.slug),
+    previewUrl: previewUrl(ctx, tenant, createPreviewToken(tenant.id, ctx.previewSecret)),
+    publicUrl: publicUrl(ctx, tenant),
     token: tok?.raw ?? null,
     tokenScopes: grantScopes,
     note: tok
@@ -155,7 +155,7 @@ export async function getSite(ctx: ServiceContext, site?: string | null) {
     publishedRevision: current?.number ?? null,
     revisionCount: revisions.length,
     draftHasUnpublishedChanges: dirty,
-    publicUrl: publicUrl(ctx, tenant.slug),
+    publicUrl: publicUrl(ctx, tenant),
   };
 }
 

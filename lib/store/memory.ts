@@ -7,6 +7,7 @@ import { createMemoryContentStore } from "./memory-content";
 import { createMemoryPayStore } from "./memory-pay";
 import { createMemoryGroupBuyStore } from "./memory-groupbuy";
 import { createMemoryQrStore } from "./memory-qr";
+import { createMemoryPlatformStore } from "./memory-platform";
 import type {
   AuditRow,
   DraftRow,
@@ -41,7 +42,9 @@ export function createMemoryStore(): Store {
   const content = createMemoryContentStore();
   const groupBuy = createMemoryGroupBuyStore();
   const { attachOrders: attachQrOrders, ...qrStore } = createMemoryQrStore();
+  const platform = createMemoryPlatformStore();
   const store: Store = {
+    ...platform.store,
     ...groupBuy.store,
     ...qrStore,
     ...createMemoryCommerceStore(classes.bridge, content.credits, groupBuy.bridge),
@@ -55,12 +58,16 @@ export function createMemoryStore(): Store {
     async getTenantById(id) {
       return clone(tenants.get(id) ?? null);
     },
+    async getTenantByPlatformOrder(orderId) {
+      return clone([...tenants.values()].find((t) => t.platform_order_id === orderId) ?? null);
+    },
     async listTenants() {
       return clone([...tenants.values()]);
     },
     async insertTenant(t) {
+      if (t.platform_order_id && [...tenants.values()].some((x) => x.platform_order_id === t.platform_order_id)) throw new ServiceError("conflict", "資料重複：這張平台訂單已開過站");
       if ([...tenants.values()].some((x) => x.slug === t.slug)) throw new ServiceError("conflict", "資料重複：同名的 slug 或識別碼已存在，請換一個");
-      const row: TenantRow = { ...t, id: randomUUID(), published_revision_id: null, created_at: now() };
+      const row: TenantRow = { primary_domain: null, platform_order_id: null, ...t, id: randomUUID(), published_revision_id: null, created_at: now() };
       tenants.set(row.id, row);
       return clone(row);
     },
@@ -244,6 +251,7 @@ export function createMemoryStore(): Store {
   };
   classes.attach(store);
   content.attach(store);
+  platform.attach(store);
   attachQrOrders(async (tenantId, orderId) => {
     const o = await store.getOrderById(tenantId, orderId);
     return !!o && (o.status === "paid" || o.status === "fulfilled") && !o.payment_sandbox && !o.refunded_at;

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { siteUrl } from "./site-url";
 import { getStore } from "./store";
 import type { Store } from "./store/types";
 import { getMailer } from "./mail";
@@ -104,5 +105,5 @@ export async function handleShortSubReturn(req: Request, code: string, kind: "re
   const tenant = sub ? await store.getTenantById(sub.tenant_id) : null;
   if (!tenant) return text("not found", 404);
   const msg = kind === "return" ? `?ok=${encodeURIComponent("已送出訂閱，確認扣款結果後會寄信通知你（約一分鐘內）")}` : "";
-  return NextResponse.redirect(`${baseUrlFrom(req).replace(/\/$/, "")}/s/${tenant.slug}/account${msg}`, 303);
+  return NextResponse.redirect(siteUrl(tenant, `/account${msg}`, baseUrlFrom(req)), 303);
 }

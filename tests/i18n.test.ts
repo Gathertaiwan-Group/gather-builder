@@ -95,7 +95,7 @@ describe("頁面翻譯：進草稿、發布才上線、缺翻譯 fallback", () =
     const store = newStore();
     await i18nSite(store, "tea-href");
     const site = (await loadSite("tea-href", null, store, { lang: "en" }))!;
-    const m = pageMetadata(site, { path: "/about", title: "關於我們", seo: {} }, "https://b.test/s/tea-href/about");
+    const m = pageMetadata({ ...site, canonicalBase: "https://b.test/s/tea-href" }, { path: "/about", title: "關於我們", seo: {} }, "/about");
     expect(m.alternates?.canonical).toBe("https://b.test/s/tea-href/en/about");
     expect(m.alternates?.languages).toMatchObject({ "zh-Hant-TW": "https://b.test/s/tea-href/about", en: "https://b.test/s/tea-href/en/about", ja: "https://b.test/s/tea-href/ja/about", "x-default": "https://b.test/s/tea-href/about" });
   });

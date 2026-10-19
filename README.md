@@ -50,6 +50,10 @@ npm run dev                  # http://localhost:3000
 | `AMEGO_RELAY_URL` / `AMEGO_RELAY_SECRET` | invoice 正式使用必要 | Amego 固定 IP 中繼網址與共享密鑰（header `x-relay-secret`）。沒設＝直連（Amego 會擋浮動 IP） |
 | `GEMINI_API_KEY` | ai-chat、i18n AI 翻譯必要 | 沒設時 ai-chat 為 pending_setup、前台不顯示；i18n 只能手動翻譯（is_test 網站用 mock 翻譯供 e2e） |
 | `GEMINI_MODEL` | 選填 | 預設 `gemini-2.5-flash`；新 key 若 404 改 `gemini-3.5-flash` |
+| `PLATFORM_SITES_DOMAIN` | 選填（第九批） | 租戶子網域的根網域，例如 `sites.gathertaiwan.com`。🔴 要先設好 wildcard DNS 與 Vercel wildcard 網域才設，否則信件與預覽連結會指到打不開的網址。沒設＝維持 `/s/<slug>` |
+| `PLATFORM_EXTRA_HOSTS` | 選填 | 其他也算「平台」的 host（逗號分隔），例如 `builder.gathertaiwan.com` |
+| `VERCEL_DOMAINS_TOKEN` / `VERCEL_DOMAINS_PROJECT_ID` / `VERCEL_DOMAINS_TEAM_ID` | 自有網域 | Vercel API token 與專案／team id（自有網域加到專案、查驗證狀態）。沒設＝後台無法新增自有網域 |
+| `DOMAIN_ADAPTER` | 只給本機／e2e | `mock`＝自有網域不打 Vercel（`.test` 網域自動驗證） |
 | `SUPABASE_ACCESS_TOKEN` | 只給 migrate 腳本 | Management API token，**不要**放進 Vercel 或 repo |
 | `GB_PLATFORM_TOKEN` | 只給 e2e 腳本 | 平台級 MCP token |
 

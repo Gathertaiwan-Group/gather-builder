@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requestSiteBase, siteCookiePath } from "./site-url";
 import { getStore } from "./store";
 import type { Store } from "./store/types";
 import { requireSecret } from "./secrets";
@@ -27,12 +28,12 @@ export async function handleScan(req: Request, rawSlug: string, code: string, st
   if (!site || !moduleActive(site, "qr-catalog")) return new NextResponse("not found", { status: 404 });
   const r = await recordScan(store, site.tenant, { code, acceptLanguage: req.headers.get("accept-language"), headers: req.headers, ipHash: hashIp(clientIp(req), requireSecret("PREVIEW_SECRET")), enabledLangs: site.languages });
   if (!r) return new NextResponse("not found", { status: 404 });
-  const res = NextResponse.redirect(new URL(`/s/${slug}${langPrefix(r.lang)}/q/${code}/view`, baseUrlFrom(req)), 303);
+  const res = NextResponse.redirect(new URL(`${requestSiteBase(req.headers, slug, baseUrlFrom(req))}${langPrefix(r.lang)}/q/${code}/view`), 303);
   res.headers.set("cache-control", "no-store");
   if (r.scanId) {
     const name = scanCookieName(site.tenant.id);
     const ids = [...readScanCookie(site.tenant.id, cookieValue(req, name)), r.scanId];
-    res.cookies.set(name, signScanCookie(site.tenant.id, ids), { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: `/s/${slug}`, maxAge: 30 * 86400 });
+    res.cookies.set(name, signScanCookie(site.tenant.id, ids), { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: siteCookiePath(req.headers, slug), maxAge: 30 * 86400 });
   }
   return res;
 }
@@ -49,7 +50,7 @@ export async function handleOverseasInquiry(req: Request, rawSlug: string, store
   const code = QR_CODE_RE.test(f.code ?? "") ? f.code! : "";
   const lang = f.lang && (f.lang === DEFAULT_LANG || isLangCode(f.lang)) ? f.lang : DEFAULT_LANG;
   const back = (msg: Record<string, string>) => {
-    const u = new URL(`/s/${slug}${langPrefix(lang)}/q/${code}/view`, baseUrlFrom(req));
+    const u = new URL(`${requestSiteBase(req.headers, slug, baseUrlFrom(req))}${langPrefix(lang)}/q/${code}/view`);
     for (const [k, v] of Object.entries(msg)) u.searchParams.set(k, v.slice(0, 300));
     return NextResponse.redirect(u, 303);
   };

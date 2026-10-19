@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { siteBase } from "../site-url";
 import { z } from "zod";
 import type { BroadcastRow, Store, TenantRow } from "../store/types";
 
@@ -37,7 +38,7 @@ async function newsletterActive(store: Store, tenantId: string) {
   return activeModuleIds(await moduleStates({ store }, tenantId)).has("newsletter");
 }
 function siteUrl(baseUrl: string, tenant: TenantRow, path: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}${path}`;
+  return `${siteBase(tenant, baseUrl)}${path}`;
 }
 
 /** 退訂 token：HMAC(secret, broadcastId:subscriberId)。DB 只存 sha256；寄信時重算原文放進連結。 */

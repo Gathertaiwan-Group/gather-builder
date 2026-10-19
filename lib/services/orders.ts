@@ -1,4 +1,5 @@
 import type { OrderRow, OrderStatus, PaymentRow, Store, TenantRow } from "../store/types";
+import { siteBase } from "../site-url";
 import { ORDER_STATUS_LABEL, assertTransition, canTransition, sourcesFor } from "../shop/machine";
 import { classifyPchomepayQuery, createPchomepayClient, genGatewayOrderNo, type PchomepayClient, type PchomepayQuery } from "../pay/pchomepay";
 import { getMailer } from "../mail";
@@ -543,7 +544,7 @@ export async function startPchomepayPayment(
     orderNo: gatewayOrderNo,
     amount: order.total,
     itemName: `${tenant.name} 訂單 ${order.order_no}`,
-    itemUrl: `${base}/s/${tenant.slug}/shop`,
+    itemUrl: `${siteBase(tenant, base)}/shop`,
     returnUrl: orderPageUrl(base, tenant, order.order_no, input.accessKey),
     notifyUrl: `${base}/api/pay/pchomepay/notify/${tenant.id}`,
     buyerEmail: order.contact.email,

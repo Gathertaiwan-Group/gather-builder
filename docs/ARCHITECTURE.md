@@ -15,8 +15,24 @@
 ## 多租戶
 
 - `builder_tenants` 一列一個網站；所有資料表都帶 `tenant_id`。
-- 「這個 request 是哪個租戶」集中在 `lib/tenant-resolve.ts`（目前只認 `/s/<slug>`）。
+- 「這個 request 是哪個租戶」集中在 `lib/host-routing.ts`（`decideRoute`，middleware 呼叫）＋`lib/tenant-resolve.ts`，見下方「網址：子網域與自有網域」。
 - 服務層 `resolveTenant(ctx, site)` 強制隔離：租戶 token 只能操作自己的網站（帶別的 slug 直接 `forbidden`）；平台 token／後台必須指定 slug。
+
+## 網址：子網域與自有網域（第九批）
+
+三種網址對應到同一套渲染（`app/s/[site]/…`）：
+
+| 網址 | 怎麼對應 | 生效條件 |
+|---|---|---|
+| `<平台>/s/<slug>/…`（相容） | 頁面參數 | 一直可用；啟用子網域後 GET（非 API、非 `?preview=`）**301** 到正式網址 |
+| `<slug>.<PLATFORM_SITES_DOMAIN>/…` | middleware 依 Host 改寫成 `/s/<slug>/…` | env 有設、wildcard DNS 已指到 Vercel、Vercel 專案已加 wildcard 網域 |
+| 自有網域 | `builder_tenant_domains` 查 `status=active` | 店主加入 → DNS 生效 → 驗證（verified）→ 店主按「啟用」（active）；**pending／verified 一律不生效（404）** |
+
+- **解析（`lib/host-routing.ts` `decideRoute`，純函式、單元測試直接測）**：🔴 只信 `host` header（Vercel 依實際路由的網域設定；不讀 `x-forwarded-host`）。平台 host＝`APP_URL` 的 host＋`PLATFORM_EXTRA_HOSTS`＋localhost＋`*.vercel.app`。租戶 host 上：任何路徑 → `/s/<slug><路徑>`（舊的 `/s/<自己>/…` 連結照常可用），`/s/<別人>/…` 與 `/api/s/<別人>/…` → 404；**平台專用路徑（`/admin`、`/owner`、`/build`、`/oauth`、`/api/*`、`/.well-known`、`/p/*`）一律 404**。middleware 設 `x-gb-host-slug`／`x-gb-origin`（客戶端送來的 `x-gb-*` 一律先刪掉）。自有網域查詢在 edge 直接打 PostgREST（`lib/edge-routing.ts`，service role，命中／未命中都快取 30 秒）。保留子網域（www、admin、api、mcp、oauth…）不能當 slug。
+- **正式網址只有一個產生處**（`lib/site-url.ts`）：已啟用的自有網域（`builder_tenants.primary_domain`）→ 子網域 → `/s/<slug>`。信件連結、預覽網址（`preview_changes`）、`publish_site` 回傳網址、付款／訂閱導回（`/p/r`、`/p/sr`）、sitemap、robots、canonical、hreflang、og:url 都用它。站內連結用 `site.basePath`（租戶 host 上是空字串）。子網域／自有網域的協定與 port 跟著平台網址（本機 `http://<slug>.sites.test:3250`）。啟用自有網域後，子網域 GET 也 301 過去。
+- **cookie**：會員 session、推薦碼、選店 binding、QR 歸因 cookie 在租戶 host 上一律 **host-only（不帶 Domain）、path `/`**；路徑模式維持 `path=/s/<slug>`（`siteCookiePath`）。
+- **自有網域流程**（`lib/services/domains.ts`；只有平台後台或店主 owner 角色，`requireFormCredential`）：`addDomain` → adapter 加到 Vercel 專案、回傳要設定的 DNS（根網域 A `76.76.21.21`、子網域 CNAME `cname.vercel-dns.com`、必要時 TXT 所有權驗證）→ pending → 後台「重新檢查」或每日 cron（`sweepPendingDomains`）→ Vercel 回報 verified 且 DNS 沒有 misconfigured → verified → `activateDomain`（confirm）呼叫 `builder_activate_domain`（單一交易：舊的 active 降回 verified、這筆 active、寫 `primary_domain`）。移除會從 Vercel 專案移掉並清掉 `primary_domain`。同一網域只能屬於一個租戶（unique），每租戶只有一個 active（partial unique）。
+- **adapter**（`lib/domains/adapter.ts`）：`createVercelDomainAdapter`（`VERCEL_DOMAINS_TOKEN`、`VERCEL_DOMAINS_PROJECT_ID`、`VERCEL_DOMAINS_TEAM_ID`）與 `createMockDomainAdapter`（`DOMAIN_ADAPTER=mock`，本機／e2e）。🔴 測試與驗收從未呼叫 Vercel API（Vercel adapter 只用假 fetch 測請求形狀）。沒設 env 時後台顯示「平台尚未設定網域 API」，新增會被拒。
 
 ## 內容模型：草稿／發布快照／版本
 
@@ -311,10 +327,10 @@
 | 風險 | 現況 | 日後方案 |
 |---|---|---|
 | 後台 session 無法單獨撤銷 | cookie 是無狀態 HMAC（12 小時），登出只刪自己瀏覽器的 cookie；外洩的 cookie 在到期前都有效。緊急時只能換 `ADMIN_SESSION_SECRET`（全部登出）。 | 改成 DB session 表（`builder_admin_sessions`，cookie 只放隨機 id），可逐筆撤銷；或換成正式身分系統（多使用者＋2FA）。 |
-| 前台與後台同源 | 租戶網站 `/s/<slug>` 與 `/admin` 同一個 origin。租戶內容雖然不能放程式碼（Markdown 轉義、URL 白名單、props strict），但若未來區塊出現 XSS，就能直接帶著後台 cookie 呼叫 `/api/admin`。 | 後台移到獨立子網域（例如 `admin.builder.gather.tw`，cookie 不設 Domain），租戶網站走子網域／自有網域；再加 CSP。 |
+| 前台與後台同源 | **第九批起程式已支援分開**：啟用子網域後，租戶網站只在 `<slug>.<網域>`／自有網域上服務（平台 host 的 `/s/<slug>` GET 301 過去），平台後台、店主後台、OAuth、MCP 只在平台 host；租戶 host 上這些路徑 404，後台 cookie（host-only）也不會送到租戶 host。**但正式站要等老闆設好 wildcard DNS＋Vercel wildcard 網域＋`PLATFORM_SITES_DOMAIN` 才生效**；在那之前仍是 `/s/<slug>` 與後台同源。仍未做：`?preview=` 的 `/s/<slug>` 在平台 host 上仍可開（相容舊預覽連結）、POST 到平台 host 的 `/s/<slug>/api/…`（舊表單）仍會處理。 | 設好 env 後再加 CSP；過渡期結束後讓平台 host 的 `/s/*` 只剩 301。 |
 | 未付款訂單佔庫存 | 訪客下單即扣庫存，保留到逾期（預設 72h）；每 IP 每小時 20 單限流，但多 IP 仍可凍結限量商品。 | 線上付款縮短保留時間、每 email/電話限制同時 pending 單數、提高 cron 頻率。 |
 | 更換 PChomePay 憑證後舊單回查失敗 | notify 回查用「目前」的憑證；正式帳號 A→B 更換後，A 帳號的未完成付款回查會失敗（回 500 讓對方重試），可能逾期取消且不會警示。 | payments 記錄建單時的 app_id、或有 pending 線上付款時禁止更換憑證、回查連續失敗寄警示。 |
-| 所有租戶同源 | `/s/<slug>` 共用一個 origin：cookie 的 path／名稱隔離只防瀏覽器自動帶 cookie，防不了同源 JS。目前租戶無法放自訂程式碼（只允許 G- 格式 GA、Markdown 已消毒）。 | 開放任何自訂 HTML/script/GTM 之前，必須先改子網域或自有網域隔離。 |
+| 所有租戶同源 | **第九批起每個租戶可以是獨立 origin**（子網域或自有網域；cookie host-only），啟用子網域後各租戶互不同源。未啟用前（正式站現況）仍是 `/s/<slug>` 共用一個 origin。另：子網域都在同一個可註冊網域底下（`*.sites.gathertaiwan.com`），彼此是 same-site（不同 origin）：SameSite=Lax cookie 擋不了 same-site 請求，但 host-only cookie 不會互相送出。 | 開放自訂 HTML/script/GTM 前：確認子網域已啟用並且平台 host 的 `/s/*` 只剩 301；考慮把租戶子網域放到獨立的可註冊網域（例如另買 `gathersites.tw`）以避免 same-site。 |
 | 登入限流 | 已改為 email＋IP 組合（10 次／15 分）為主、每 IP 30 次；email 單獨超過 100 次／15 分只延遲 1.5 秒不鎖死。分散式大量 IP 仍可慢速猜測。 | 加 CAPTCHA 或裝置指紋。 |
 | 會員信件依賴 Resend | 正式站已設 `RESEND_API_KEY`／`RESEND_FROM`（2026-10-19，寄件者 `noreply@gathertaiwan.com`）。所有租戶共用同一個寄件網域；沒設時驗證／重設連結只寫 server log。 | 長期改成每個租戶自己的寄件網域。 |
 | 已付款訂單取消不會退款 | `cancel_order` 只改狀態與回補庫存。第七批起藍新、LINE Pay、PAYUNi、黑貓（有退刷密碼）可用 `refund_order` 全額退款；PChomePay、綠界仍需到商家後台人工退款。 | 部分退款、綠界 DoAction（需正式環境驗證）。 |
@@ -368,8 +384,6 @@
 
 | 需求 | 改哪裡 |
 |---|---|
-| 子網域 `<slug>.builder.gather.tw` | `lib/tenant-resolve.ts` 依 host 解析；middleware 把 host rewrite 到 `/s/<slug>`；`siteBasePath()` 回空字串 |
-| 自有網域 | 新表 `builder_tenant_domains(domain, tenant_id, verified_at)`；`resolveSiteSlug` 查表；Vercel Domains API 加網域 |
 | OAuth 2.1 | 只換 `authenticateBearer()`：驗 access token → 同一個 `Actor` 形狀；scope 字串不變。屆時才提供 `/.well-known/oauth-protected-resource` |
 | 付款開通模組 | `builder_tenant_modules.status` 已有 `pending_setup`；加 `billing_status`／訂閱表，`enableModule` 前檢查付款；manifest 已有 `priceSetup/priceMonthly` |
 | 改用獨立 schema | 所有存取都經 `lib/store/supabase.ts`；換 schema 只需 `db.schema("builder")` ＋ migration 搬表（需在 PostgREST 暴露該 schema，屬專案層級設定，需另行協調） |

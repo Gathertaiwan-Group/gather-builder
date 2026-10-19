@@ -55,7 +55,7 @@ export async function previewChanges(ctx: ServiceContext, input: { site?: string
     hasChanges: published ? changes.length > 0 : true,
     changes,
     validationErrors: validateForPublish(draft, activeModuleIds(states)),
-    previewUrl: previewUrl(ctx, tenant.slug, token, input.path ?? "/"),
+    previewUrl: previewUrl(ctx, tenant, token, input.path ?? "/"),
     previewExpiresInSeconds: PREVIEW_TTL_SECONDS,
     next: `請使用者打開 previewUrl 確認；確認後呼叫 publish_site 並帶 confirm: true 與 expectedDraftVersion: ${draftRow.version}（確保發布的就是預覽的這一份）。`,
   };
@@ -88,7 +88,7 @@ export async function publishSite(ctx: ServiceContext, input: { site?: string | 
   // 一律帶入「剛剛驗證過的那一份」的版本：RPC 內若版本已變就拒絕（驗證與凍結必定是同一份）
   const rev = await ctx.store.publish(tenant.id, input.note?.slice(0, 300) ?? null, ctx.actor.label, draftRow.version);
   await audit(ctx, tenant.id, "site.publish", { revision: rev.number, changes: changes.length, note: input.note ?? null });
-  return { revision: rev.number, draftVersion: rev.draftVersion, url: publicUrl(ctx, tenant.slug), changes };
+  return { revision: rev.number, draftVersion: rev.draftVersion, url: publicUrl(ctx, tenant), changes };
 }
 
 export async function listRevisions(ctx: ServiceContext, input: { site?: string | null }) {
@@ -119,5 +119,5 @@ export async function rollback(ctx: ServiceContext, input: { site?: string | nul
     throw new ServiceError("not_found", `沒有第 ${input.number} 版。現有版本：${revs.map((x) => x.number).join(", ") || "（尚未發布）"}`);
   }
   await audit(ctx, tenant.id, "site.rollback", { revision: r.number });
-  return { publishedRevision: r.number, draftSyncedToRevision: r.number, url: publicUrl(ctx, tenant.slug) };
+  return { publishedRevision: r.number, draftSyncedToRevision: r.number, url: publicUrl(ctx, tenant) };
 }

@@ -3,6 +3,8 @@ import { verifyPreviewToken } from "./preview";
 import { getStore } from "./store";
 import type { Store, TenantModuleRow, TenantRow } from "./store/types";
 import { DEFAULT_LANG, isLangCode } from "./i18n/langs";
+import { hostModeFor, siteBase } from "./site-url";
+import { baseUrlFrom } from "./runtime";
 
 export interface LoadedSite {
   tenant: TenantRow;
@@ -16,17 +18,22 @@ export interface LoadedSite {
   /** 目前顯示的語言（i18n；預設 zh-TW）與網站啟用的其他語言 */
   lang: string;
   languages: string[];
+  /** 站內連結前綴：租戶 host（子網域／自有網域）上是 ""，路徑模式是 /s/<slug> */
+  basePath: string;
+  /** 正式網址的網站根（canonical、hreflang、sitemap 用；lib/site-url.ts） */
+  canonicalBase: string;
 }
 
-/** middleware 設定的語言（/s/<slug>/<lang>/… 改寫而來）；不在 request scope（測試、cron）時回 null */
-async function requestLang(): Promise<string | null> {
+/** 目前 request 的 header（middleware 設的 x-gb-*）；不在 request scope（測試、cron）時回 null */
+async function requestHeaders(): Promise<Headers | null> {
   try {
     const { headers } = await import("next/headers");
-    return (await headers()).get("x-gb-lang");
+    return new Headers(await headers());
   } catch {
     return null;
   }
 }
+
 
 /** 網站啟用的其他語言（i18n 模組啟用＋目前顯示內容的設定） */
 export function enabledLanguages(content: SiteContent, modules: Map<string, TenantModuleRow>): string[] {
@@ -45,7 +52,7 @@ export async function loadSite(slug: string, previewToken?: string | null, store
   if (!tenant || tenant.status === "suspended") return null;
   const modules = new Map((await store.listTenantModules(tenant.id)).map((m) => [m.module_id, m]));
 
-  let loaded: Omit<LoadedSite, "lang" | "languages"> | null = null;
+  let loaded: Omit<LoadedSite, "lang" | "languages" | "basePath" | "canonicalBase"> | null = null;
   if (previewToken) {
     const secret = process.env.PREVIEW_SECRET;
     if (secret && verifyPreviewToken(previewToken, tenant.id, secret).ok) {
@@ -60,10 +67,18 @@ export async function loadSite(slug: string, previewToken?: string | null, store
     loaded = { tenant, content: rev.content, modules, mode: "published", revision: rev.number, previewToken: null, previewRejected: !!previewToken };
   }
   const languages = enabledLanguages(loaded.content, modules);
-  const want = opts.lang !== undefined ? opts.lang : await requestLang();
+  const h = await requestHeaders();
+  const want = opts.lang !== undefined ? opts.lang : (h?.get("x-gb-lang") ?? null);
   // 語言前綴沒有啟用（或 i18n 沒開）→ 當作找不到頁面
   if (want && want !== DEFAULT_LANG && !languages.includes(want)) return null;
-  return { ...loaded, lang: want && languages.includes(want) ? want : DEFAULT_LANG, languages };
+  const hostMode = h ? hostModeFor(h, tenant.slug) : null;
+  return {
+    ...loaded,
+    lang: want && languages.includes(want) ? want : DEFAULT_LANG,
+    languages,
+    basePath: hostMode ? "" : `/s/${tenant.slug}`,
+    canonicalBase: siteBase(tenant, baseUrlFrom(h ? { headers: h } : null)),
+  };
 }
 
 export function moduleActive(site: LoadedSite, id: string): boolean {

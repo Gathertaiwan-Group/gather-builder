@@ -3,13 +3,20 @@ import type { Store } from "./store/types";
 import { isScope, type Scope } from "./scopes";
 
 export interface Actor {
-  kind: "admin" | "token";
+  /** admin＝平台擁有者後台；token＝MCP（手動 token 或 OAuth access token）；owner＝店主後台登入的店主帳號 */
+  kind: "admin" | "token" | "owner";
   /** 寫進稽核紀錄的身分字串 */
   label: string;
   /** null = 平台級（可跨租戶） */
   tenantId: string | null;
   scopes: Scope[];
   tokenId?: string;
+  /** 店主後台的角色（kind=owner 才有） */
+  role?: "owner" | "editor" | "viewer";
+  /** 店主帳號 id（kind=owner） */
+  userId?: string;
+  /** OAuth access token 的授權紀錄 id（kind=token 且經 OAuth） */
+  oauthGrantId?: string;
 }
 
 export const ADMIN_ACTOR_SCOPES: Scope[] = [

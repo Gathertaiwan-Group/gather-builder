@@ -6,12 +6,14 @@ import type { ClassesStore } from "./types-classes";
 import type { ContentStore } from "./types-content";
 import type { GroupBuyOrderInput, GroupBuyStore } from "./types-groupbuy";
 import type { QrStore } from "./types-qr";
+import type { PlatformStore } from "./types-platform";
 export type * from "./types-ext";
 export type * from "./types-classes";
 export type * from "./types-content";
 export type * from "./types-pay";
 export type * from "./types-groupbuy";
 export type * from "./types-qr";
+export type * from "./types-platform";
 
 export type TenantStatus = "trial" | "active" | "suspended";
 export type ModuleStatus = "enabled" | "pending_setup" | "disabled";
@@ -25,6 +27,10 @@ export interface TenantRow {
   settings: Record<string, unknown>;
   is_test: boolean;
   published_revision_id: string | null;
+  /** 已啟用的自有網域（正式網址）；null＝子網域或路徑模式（lib/site-url.ts） */
+  primary_domain: string | null;
+  /** 由平台訂單自動開站時的訂單 id（unique：一張平台訂單只開一個站） */
+  platform_order_id?: string | null;
   created_at: string;
 }
 
@@ -418,13 +424,14 @@ export interface PaymentRow {
   updated_at: string;
 }
 
-export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore, GroupBuyStore, QrStore {
+export interface Store extends ExtStore, ClassesStore, ContentStore, PayStore, GroupBuyStore, QrStore, PlatformStore {
   // tenants
   getTenantBySlug(slug: string): Promise<TenantRow | null>;
   getTenantById(id: string): Promise<TenantRow | null>;
   listTenants(): Promise<TenantRow[]>;
-  insertTenant(t: Pick<TenantRow, "slug" | "name" | "status" | "theme" | "settings" | "is_test">): Promise<TenantRow>;
-  updateTenant(id: string, patch: Partial<Pick<TenantRow, "name" | "status" | "settings" | "is_test">>): Promise<void>;
+  insertTenant(t: Pick<TenantRow, "slug" | "name" | "status" | "theme" | "settings" | "is_test"> & { platform_order_id?: string | null }): Promise<TenantRow>;
+  getTenantByPlatformOrder(orderId: string): Promise<TenantRow | null>;
+  updateTenant(id: string, patch: Partial<Pick<TenantRow, "name" | "status" | "settings" | "is_test" | "primary_domain">>): Promise<void>;
 
   // modules
   listTenantModules(tenantId: string): Promise<TenantModuleRow[]>;

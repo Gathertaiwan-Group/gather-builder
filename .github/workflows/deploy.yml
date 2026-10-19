@@ -53,11 +53,12 @@ jobs:
           npx --yes vercel@54.4.1 deploy --prod --yes --token "${{ secrets.VERCEL_TOKEN }}"
 
       # 部署後探針：平台首頁與示範租戶頁必須 200，否則 workflow 失敗（GitHub 會寄信）。
+      # 第九批：啟用子網域（PLATFORM_SITES_DOMAIN）後 /s/<slug> 會 301 到正式網址 → -L 跟隨，最後必須 200。
       - name: Post-deploy smoke
         run: |
           sleep 10
           for p in / /s/demo-coffee-local; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "https://gather-builder.vercel.app$p")
+            code=$(curl -sL -o /dev/null -w "%{http_code}" "https://gather-builder.vercel.app$p")
             echo "$p -> $code"
             [ "$code" = "200" ] || exit 1
           done

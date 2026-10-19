@@ -2,7 +2,8 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { getStore } from "./store";
 import type { MemberRow, TenantRow } from "./store/types";
-import { getSessionMember, memberCookieName, memberCookiePath, SESSION_TTL_SECONDS } from "./services/members";
+import { getSessionMember, memberCookieName, SESSION_TTL_SECONDS } from "./services/members";
+import { requestSiteBase, siteCookiePath } from "./site-url";
 import { ServiceError } from "./errors";
 import { baseUrlFrom } from "./runtime";
 
@@ -25,10 +26,11 @@ export function originOk(req: Request): boolean {
   }
 }
 
-/** 303 回到站內某頁並帶訊息（只接受 /s/<slug> 底下的路徑） */
+/** 303 回到站內某頁並帶訊息（只接受站內路徑；租戶 host 上回到同一個 host，路徑模式回到 /s/<slug>） */
 export function siteRedirect(req: Request, slug: string, path: string, msg?: { ok?: string; err?: string }, extra?: Record<string, string>) {
   const safe = path.startsWith("/") && !path.startsWith("//") ? path : "/";
-  const u = new URL(`/s/${slug}${safe === "/" ? "" : safe}`, baseUrlFrom(req));
+  const base = requestSiteBase(req.headers, slug, baseUrlFrom(req));
+  const u = new URL(`${base}${safe === "/" ? (base.includes("/s/") ? "" : "/") : safe}`);
   if (msg?.ok) u.searchParams.set("ok", msg.ok.slice(0, 300));
   if (msg?.err) u.searchParams.set("err", msg.err.slice(0, 300));
   for (const [k, v] of Object.entries(extra ?? {})) u.searchParams.set(k, v);
@@ -40,23 +42,27 @@ export function safeNext(v: unknown, fallback: string): string {
   return typeof v === "string" && /^\/(?!\/)[\w\-/.?=&%]*$/.test(v) && v.length < 300 ? v : fallback;
 }
 
-export function setMemberCookie(res: NextResponse, tenant: TenantRow, token: string, expires: Date) {
+/**
+ * 會員 session cookie：HttpOnly、SameSite=Lax、prod Secure，**不帶 Domain（host-only）**。
+ * 租戶 host（子網域／自有網域）上 path 是 /；路徑模式 /s/<slug>（lib/site-url.ts siteCookiePath）。
+ */
+export function setMemberCookie(res: NextResponse, tenant: TenantRow, token: string, expires: Date, req: Request) {
   res.cookies.set(memberCookieName(tenant.id), token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    path: memberCookiePath(tenant.slug),
+    path: siteCookiePath(req.headers, tenant.slug),
     expires,
     maxAge: SESSION_TTL_SECONDS,
   });
 }
 
-export function clearMemberCookie(res: NextResponse, tenant: TenantRow) {
+export function clearMemberCookie(res: NextResponse, tenant: TenantRow, req: Request) {
   res.cookies.set(memberCookieName(tenant.id), "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    path: memberCookiePath(tenant.slug),
+    path: siteCookiePath(req.headers, tenant.slug),
     maxAge: 0,
   });
 }

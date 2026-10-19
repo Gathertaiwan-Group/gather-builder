@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { siteBase } from "../site-url";
 import { z } from "zod";
 import { shopSettings, type ShopSettings } from "@/modules/shop/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
@@ -593,7 +594,7 @@ export function creditLines(o: Pick<OrderRow, "tier_discount" | "points_redeemed
 }
 
 export function orderPageUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, orderNo: string, accessKey?: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/orders/${encodeURIComponent(orderNo)}${accessKey ? `?k=${encodeURIComponent(accessKey)}` : ""}`;
+  return `${siteBase(tenant, baseUrl)}/orders/${encodeURIComponent(orderNo)}${accessKey ? `?k=${encodeURIComponent(accessKey)}` : ""}`;
 }
 
 export async function mailSafe(deps: { sendMail?: CheckoutDeps["sendMail"] }, to: string, subject: string, body: string, attachments?: Parameters<Mailer>[3]) {

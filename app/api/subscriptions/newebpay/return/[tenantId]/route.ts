@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { siteUrl } from "@/lib/site-url";
 import { getStore } from "@/lib/store";
 import { baseUrlFrom } from "@/lib/runtime";
 import { verifyPayToken } from "@/lib/pay/notify-token";
@@ -16,7 +17,7 @@ async function handle(req: Request, { params }: { params: Promise<{ tenantId: st
   if (!UUID.test(tenantId) || !verifyPayToken("return", `sub:${s}`, url.searchParams.get("t"))) return new Response("invalid", { status: 400 });
   const tenant = await getStore().getTenantById(tenantId);
   if (!tenant) return new Response("not found", { status: 404 });
-  return NextResponse.redirect(`${baseUrlFrom(req).replace(/\/$/, "")}/s/${tenant.slug}/account?ok=${encodeURIComponent("已送出訂閱，確認扣款結果後會寄信通知你（約一分鐘內）")}`, 303);
+  return NextResponse.redirect(`${siteUrl(tenant, "/account", baseUrlFrom(req))}?ok=${encodeURIComponent("已送出訂閱，確認扣款結果後會寄信通知你（約一分鐘內）")}`, 303);
 }
 
 export const POST = handle;

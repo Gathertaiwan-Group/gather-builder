@@ -3,19 +3,18 @@ import { resolveTheme, themeCssVars } from "@/lib/themes";
 import { moduleActive, moduleConfig, type LoadedSite } from "@/lib/site-loader";
 import { siteHref, type RenderCtx } from "@/modules/render-types";
 import { LineFloating } from "@/modules/line/sections";
-import { siteBasePath } from "@/lib/tenant-resolve";
 import { ChatWidget } from "@/modules/ai-chat/ChatWidget";
 import { DEFAULT_LANG, langLabel, ui } from "@/lib/i18n/langs";
 import { MustReadBanner } from "@/modules/announcements/sections";
 
 export function makeRenderCtx(site: LoadedSite, path: string): RenderCtx {
   // 多語：非預設語言的站內連結一律帶 /<lang> 前綴
-  return { site, basePath: `${siteBasePath(site.tenant.slug)}${site.lang && site.lang !== DEFAULT_LANG ? `/${site.lang}` : ""}`, path };
+  return { site, basePath: `${site.basePath}${site.lang && site.lang !== DEFAULT_LANG ? `/${site.lang}` : ""}`, path };
 }
 
 /** 同一頁在各語言的網址（語言切換、hreflang 用）；path 為站內路徑 */
 export function langHref(site: LoadedSite, lang: string, path: string): string {
-  const base = `${siteBasePath(site.tenant.slug)}${lang === DEFAULT_LANG ? "" : `/${lang}`}`;
+  const base = `${site.basePath}${lang === DEFAULT_LANG ? "" : `/${lang}`}`;
   const q = site.mode === "preview" && site.previewToken ? `?preview=${encodeURIComponent(site.previewToken)}` : "";
   return `${base}${path === "/" ? "" : path}${q}` || "/";
 }

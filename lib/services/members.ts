@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { siteBase } from "../site-url";
 import { z } from "zod";
 import { getModule } from "@/modules/registry";
 import type { MemberRow, Store, TenantRow } from "../store/types";
@@ -118,7 +119,7 @@ async function limit(deps: MemberDeps, bucket: string, key: string, rule: { limi
 }
 
 function siteUrl(deps: MemberDeps, tenant: TenantRow, path: string) {
-  return `${deps.baseUrl.replace(/\/$/, "")}/s/${tenant.slug}${path}`;
+  return `${siteBase(tenant, deps.baseUrl)}${path}`;
 }
 
 /** 寄信；沒設 RESEND_API_KEY 時不報錯，把內容（含連結）寫進 server log 方便本機測試 */

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { siteBase } from "../site-url";
 import { z } from "zod";
 import type { GroupBuySettings } from "@/modules/group-buy/manifest";
 import { imageUrl, optText, postSlug, text } from "../validators";
@@ -59,7 +60,7 @@ function requireLiveConfirm(ctx: ServiceContext, what: string, confirm: boolean 
 const isOpen = (g: GroupBuyRow, now = Date.now()) => g.status === "published" && (!g.starts_at || Date.parse(g.starts_at) <= now) && Date.parse(g.ends_at) > now;
 
 export function groupBuyUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, gb: Pick<GroupBuyRow, "slug">, leaderCode?: string | null) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/groupbuy/${gb.slug}${leaderCode ? `?leader=${encodeURIComponent(leaderCode)}` : ""}`;
+  return `${siteBase(tenant, baseUrl)}/groupbuy/${gb.slug}${leaderCode ? `?leader=${encodeURIComponent(leaderCode)}` : ""}`;
 }
 
 /** 團主報表簽章連結：HMAC(PREVIEW_SECRET, gbleader:<id>:<版本>)，不存原文；版本 +1 讓舊連結失效 */
@@ -67,7 +68,7 @@ export function leaderReportToken(leader: Pick<GroupBuyLeaderRow, "id" | "report
   return signFor("gbleader", `${leader.id}:${leader.report_version}`);
 }
 export function leaderReportUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, leader: Pick<GroupBuyLeaderRow, "id" | "report_version">) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/groupbuy/leader?l=${leader.id}&t=${leaderReportToken(leader)}`;
+  return `${siteBase(tenant, baseUrl)}/groupbuy/leader?l=${leader.id}&t=${leaderReportToken(leader)}`;
 }
 
 const pickupInput = z

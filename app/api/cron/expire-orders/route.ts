@@ -10,6 +10,7 @@ import { runWalletCron } from "@/lib/services/wallet";
 import { sweepSubscriptions } from "@/lib/services/subscriptions";
 import { sweepGroupBuys } from "@/lib/services/groupbuy";
 import { getMailer } from "@/lib/mail";
+import { sweepPendingDomains } from "@/lib/services/domains";
 import { baseUrlFrom } from "@/lib/runtime";
 
 // 每日 cron（Vercel Hobby 只能每日）：逾期未付訂單 → 取消並回補庫存（冪等）；發票重試。平常由讀取時 lazy 處理。
@@ -44,9 +45,11 @@ export async function GET(req: Request) {
   const refunds = await sweepStaleRefunds(deps).catch((e) => (console.error("[cron] refunds", e), { scanned: -1, marked: 0 }));
   // 第八批：截止的團購自動結團（未達門檻取消訂單並通知；冪等、可接續）
   const groupBuys = await sweepGroupBuys(deps).catch((e) => (console.error("[cron] group-buy", e), { scanned: -1, settled: 0 }));
-  console.log(`[cron/expire-orders] groupBuys=${JSON.stringify(groupBuys)}`);
+  // 第九批：自有網域驗證狀態輪詢（pending → verified；啟用仍由店主按）
+  const domains = await sweepPendingDomains(getStore()).catch((e) => (console.error("[cron] domains", e), { checked: -1, verified: 0 }));
+  console.log(`[cron/expire-orders] groupBuys=${JSON.stringify(groupBuys)} domains=${JSON.stringify(domains)}`);
   console.log(`[cron/expire-orders] subscriptions=${JSON.stringify(subs)} refunds=${JSON.stringify(refunds)}`);
   console.log(`[cron/expire-orders] loyalty=${JSON.stringify(loyalty)} wallet=${JSON.stringify(wallet)}`);
   console.log(`[cron/expire-orders] scanned=${r.scanned} expired=${r.expired} invoices=${inv.scanned}/${inv.issued} events=${JSON.stringify(ev)} booking=${JSON.stringify(bk)} hooks=${JSON.stringify(hooks)}`);
-  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs, refunds, groupBuys });
+  return json({ ...r, invoices: inv, events: ev, booking: bk, hooks, loyalty, wallet, subscriptions: subs, refunds, groupBuys, domains });
 }

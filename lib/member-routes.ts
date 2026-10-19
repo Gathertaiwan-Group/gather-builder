@@ -47,13 +47,13 @@ export async function handleMemberPost(req: Request, rawSlug: string, action: Me
       case "login": {
         const r = await loginMember(deps, { tenant, ip, ua: req.headers.get("user-agent"), email: form.email, password: form.password });
         const res = siteRedirect(req, slug, safeNext(form.next, "/account"));
-        setMemberCookie(res, tenant, r.token, r.expiresAt);
+        setMemberCookie(res, tenant, r.token, r.expiresAt, req);
         return res;
       }
       case "logout": {
         await logoutMember(store, tenant, memberTokenFromRequest(req, tenant));
         const res = siteRedirect(req, slug, "/account/login", { ok: "已登出" });
-        clearMemberCookie(res, tenant);
+        clearMemberCookie(res, tenant, req);
         return res;
       }
       case "forgot": {
@@ -63,7 +63,7 @@ export async function handleMemberPost(req: Request, rawSlug: string, action: Me
       case "reset": {
         const r = await resetPassword(deps, { tenant, ip, token: form.token, password: form.password });
         const res = siteRedirect(req, slug, "/account/login", { ok: r.message });
-        clearMemberCookie(res, tenant);
+        clearMemberCookie(res, tenant, req);
         return res;
       }
       case "profile": {

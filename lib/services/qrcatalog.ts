@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { siteBase } from "../site-url";
 import { z } from "zod";
 import type { QrCatalogSettings } from "@/modules/qr-catalog/manifest";
 import type { OrderRow, ProductRow, QrCodeRow, Store, TenantRow } from "../store/types";
@@ -43,7 +44,7 @@ export async function publishedQrSettings(store: Store, tenant: TenantRow): Prom
 }
 
 export function qrShortUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, code: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/q/${code}`;
+  return `${siteBase(tenant, baseUrl)}/q/${code}`;
 }
 
 function secret(): string {
@@ -297,7 +298,7 @@ export function brandReportToken(id: string) {
   return `${id}.${signFor("brandreport", id)}`;
 }
 export function brandReportUrl(baseUrl: string, tenant: Pick<TenantRow, "slug">, id: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/brand-report/${brandReportToken(id)}`;
+  return `${siteBase(tenant, baseUrl)}/brand-report/${brandReportToken(id)}`;
 }
 
 export async function createBrandReportLink(ctx: ServiceContext, input: { site?: string | null; brand: string; label?: string; expiresInDays?: number; confirm?: boolean }) {

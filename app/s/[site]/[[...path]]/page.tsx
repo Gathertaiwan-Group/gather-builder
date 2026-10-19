@@ -7,7 +7,6 @@ import { resolveSiteSlug } from "@/lib/tenant-resolve";
 import { SiteShell, makeRenderCtx } from "@/components/site/SiteShell";
 import { SectionList } from "@/components/site/SectionRenderer";
 import { pageMetadata } from "@/lib/site-meta";
-import { baseUrlFrom } from "@/lib/runtime";
 
 // 前台永遠即時讀取：發布後馬上看到新版（Supabase client 另外強制 no-store）
 export const dynamic = "force-dynamic";
@@ -25,13 +24,13 @@ async function load(props: Props) {
   const pagePath = `/${(path ?? []).map(decodeURIComponent).join("/")}`;
   const page = findPage(site.content, pagePath);
   if (!page) return null;
-  return { site, page, pagePath, base: baseUrlFrom({ headers: h }) };
+  return { site, page, pagePath };
 }
 
 export async function generateMetadata(props: Props): Promise<Metadata> {
   const r = await load(props);
   if (!r) return { title: "找不到頁面" };
-  return pageMetadata(r.site, r.page, `${r.base}/s/${r.site.tenant.slug}${r.pagePath === "/" ? "" : r.pagePath}`);
+  return pageMetadata(r.site, r.page, r.pagePath);
 }
 
 export default async function SitePage(props: Props) {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getMailer } from "../mail";
+import { siteBase } from "../site-url";
 import { PROVIDER_IDS } from "../pay/types";
 import type { BookingRow, BookingStatus, MemberRow, OrderRow, ProviderRow, ServiceRow, Store, TenantRow } from "../store/types";
 import type { BookingSettings } from "@/modules/booking/manifest";
@@ -339,7 +340,7 @@ export async function bookSlot(deps: CheckoutDeps, input: { tenant: TenantRow; m
 
 export const manageToken = (b: Pick<BookingRow, "id">) => signFor("booking", b.id);
 export function manageUrl(baseUrl: string, tenant: TenantRow, b: Pick<BookingRow, "id">) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/book/manage?b=${encodeURIComponent(b.id)}&t=${encodeURIComponent(manageToken(b))}`;
+  return `${siteBase(tenant, baseUrl)}/book/manage?b=${encodeURIComponent(b.id)}&t=${encodeURIComponent(manageToken(b))}`;
 }
 
 export async function managedBooking(store: Store, tenant: TenantRow, id: unknown, token: unknown) {

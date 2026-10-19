@@ -1,4 +1,5 @@
 import type { Mailer } from "../mail";
+import { siteUrl, type SiteRef } from "../site-url";
 import type { Store, TenantRow, TenantModuleRow } from "../store/types";
 import type { Actor } from "../tokens";
 import type { Scope } from "../scopes";
@@ -25,6 +26,16 @@ export function requireScope(ctx: ServiceContext, scope: Scope): void {
   if (!ctx.actor.scopes.includes(scope)) {
     throw new ServiceError("forbidden", `權限不足：這個動作需要 scope「${scope}」，目前 token 只有：${ctx.actor.scopes.join(", ") || "（無）"}`);
   }
+}
+
+/**
+ * 金流／發票／物流憑證、自有網域、店主成員這類「只能從後台表單操作、不經過 agent 對話」的動作：
+ * 平台擁有者後台（admin），或店主後台的 owner 角色（租戶隔離仍由 resolveTenant 負責）。editor／viewer、MCP token 一律拒絕。
+ */
+export function requireFormCredential(ctx: ServiceContext, what: string): void {
+  if (ctx.actor.kind === "admin") return;
+  if (ctx.actor.kind === "owner" && ctx.actor.role === "owner" && ctx.actor.tenantId) return;
+  throw new ServiceError("forbidden", `${what}只能由平台後台或店主（owner）在後台表單操作（不經過 agent 對話）`);
 }
 
 export function requirePlatform(ctx: ServiceContext): void {
@@ -104,11 +115,11 @@ export function activeModuleIds(states: Map<string, TenantModuleRow>): Set<strin
   return new Set([...states.values()].filter((r) => r.status !== "disabled").map((r) => r.module_id));
 }
 
-export function previewUrl(ctx: ServiceContext, slug: string, token: string, path = "/"): string {
-  const p = path === "/" ? "" : path;
-  return `${ctx.baseUrl.replace(/\/$/, "")}/s/${slug}${p}?preview=${encodeURIComponent(token)}`;
+/** 預覽網址：開在租戶的正式網址上（子網域／自有網域；沒有就 /s/<slug>），lib/site-url.ts */
+export function previewUrl(ctx: ServiceContext, tenant: SiteRef, token: string, path = "/"): string {
+  return `${siteUrl(tenant, path, ctx.baseUrl)}?preview=${encodeURIComponent(token)}`;
 }
 
-export function publicUrl(ctx: ServiceContext, slug: string, path = "/"): string {
-  return `${ctx.baseUrl.replace(/\/$/, "")}/s/${slug}${path === "/" ? "" : path}`;
+export function publicUrl(ctx: ServiceContext, tenant: SiteRef, path = "/"): string {
+  return siteUrl(tenant, path, ctx.baseUrl);
 }

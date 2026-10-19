@@ -1,16 +1,14 @@
 /**
  * 「這個 request 是哪個租戶」集中在這裡。
- * 第一版只認路徑 /s/<slug>；日後子網域（<slug>.builder.gather.tw）與自有網域
- * （查 builder_tenant_domains）都只改這支，頁面與服務層不用動。
+ * - 路徑模式 /s/<slug>：頁面參數直接帶 slug。
+ * - 子網域 <slug>.<PLATFORM_SITES_DOMAIN> 與自有網域（builder_tenant_domains, status=active）：
+ *   middleware 依 Host 解析（lib/host-routing.ts decideRoute）後改寫到 /s/<slug>/…，並設 x-gb-host-slug。
+ *   所以頁面拿到的 slug 一定是 middleware 決定的那一個；租戶 host 上帶別的 /s/<slug> 會被改寫成不存在的路徑（404）。
  */
+import { SLUG_RE } from "./host-routing";
+
 export function resolveSiteSlug(input: { pathSlug?: string | null; host?: string | null }): string | null {
   const slug = input.pathSlug?.toLowerCase() ?? null;
-  if (slug && /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(slug)) return slug;
-  // TODO(subdomain/custom-domain): 依 input.host 對應租戶
+  if (slug && SLUG_RE.test(slug)) return slug;
   return null;
-}
-
-/** 租戶網站內部連結的前綴（路徑模式為 /s/<slug>；子網域模式會是空字串） */
-export function siteBasePath(slug: string): string {
-  return `/s/${slug}`;
 }

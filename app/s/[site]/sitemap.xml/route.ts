@@ -1,6 +1,5 @@
 import { loadSite, moduleActive } from "@/lib/site-loader";
 import { getStore } from "@/lib/store";
-import { baseUrlFrom } from "@/lib/runtime";
 import { resolveSiteSlug } from "@/lib/tenant-resolve";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +10,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ site: st
   const slug = resolveSiteSlug({ pathSlug: (await params).site });
   const site = slug ? await loadSite(slug) : null;
   if (!site) return new Response("Not found", { status: 404 });
-  const base = `${baseUrlFrom(req)}/s/${site.tenant.slug}`;
+  const base = site.canonicalBase;
   const urls = site.content.pages.map((p) => ({ loc: `${base}${p.path === "/" ? "" : p.path}`, lastmod: undefined as string | undefined }));
   if (moduleActive(site, "blog")) {
     urls.push({ loc: `${base}/blog`, lastmod: undefined });

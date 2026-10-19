@@ -6,15 +6,14 @@ import { DEFAULT_LANG, ogLocale } from "./i18n/langs";
 import { localizePage } from "./i18n/render";
 
 /**
- * 頁面 metadata。url＝預設語言的完整網址（https://…/s/<slug>/<path>）；
- * 多語網站加 canonical（目前語言）＋ hreflang（每個語言＋x-default）。
+ * 頁面 metadata。canonical／hreflang／og:url 一律用租戶的正式網址（site.canonicalBase：自有網域 → 子網域 → /s/<slug>）；
+ * pagePath＝站內路徑（/、/about）。多語網站加 canonical（目前語言）＋ hreflang（每個語言＋x-default）。
  */
-export function pageMetadata(site: LoadedSite, pageIn: Pick<Page, "path" | "title" | "seo">, url: string): Metadata {
+export function pageMetadata(site: LoadedSite, pageIn: Pick<Page, "path" | "title" | "seo">, pagePath: string): Metadata {
   const page = localizePage(site, pageIn);
-  const u = new URL(url);
-  const prefix = `/s/${site.tenant.slug}`;
-  const rest = u.pathname.startsWith(prefix) ? u.pathname.slice(prefix.length) : u.pathname;
-  const href = (l: string) => `${u.origin}${prefix}${l === DEFAULT_LANG ? "" : `/${l}`}${rest}`;
+  const rest = pagePath === "/" ? "" : pagePath;
+  const href = (l: string) => `${site.canonicalBase}${l === DEFAULT_LANG ? "" : `/${l}`}${rest}` || "/";
+  let url: string;
   const languages = site.languages.length ? Object.fromEntries([["zh-Hant-TW", href(DEFAULT_LANG)], ...site.languages.map((l) => [l, href(l)]), ["x-default", href(DEFAULT_LANG)]]) : undefined;
   url = href(site.lang);
   const core = moduleConfig<{ siteDescription?: string; defaultOgImage?: string }>(site, "core");

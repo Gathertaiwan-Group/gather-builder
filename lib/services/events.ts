@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { siteBase } from "../site-url";
 import { PROVIDER_IDS } from "../pay/types";
 import { RESERVE_ERRORS } from "../store/reserve-errors";
 import type { EventRow, EventSessionRow, MemberRow, OrderRow, RegistrationRow, RegistrationStatus, Store, TenantRow, TicketTypeRow, WaitlistRow } from "../store/types";
@@ -450,7 +451,7 @@ export const DEFAULT_UNCONFIRMED_HOLD_PERCENT = 20;
 
 /** email 確認連結：kind r＝報名、w＝候補；簽章 HMAC(PREVIEW_SECRET, event-confirm-<kind>:id)，不存原文 */
 export function confirmUrl(baseUrl: string, tenant: TenantRow, kind: "r" | "w", id: string) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/events/confirm?${kind}=${encodeURIComponent(id)}&t=${encodeURIComponent(signFor(`event-confirm-${kind}`, id))}`;
+  return `${siteBase(tenant, baseUrl)}/events/confirm?${kind}=${encodeURIComponent(id)}&t=${encodeURIComponent(signFor(`event-confirm-${kind}`, id))}`;
 }
 
 /**
@@ -595,7 +596,7 @@ async function sendConfirmedMail(deps: { sendMail?: CheckoutDeps["sendMail"]; ba
     deps,
     r.contact.email,
     `【${tenant.name}】報名成功：${e.title}`,
-    `${r.contact.name} 你好，\n\n你已完成報名：\n${e.title}\n時間：${fmtTaipei(s.starts_at)}–${fmtTaipei(s.ends_at).slice(-5)}\n地點：${where}${online}\n票種：${t.name} × ${r.qty}${t.price ? `（${twd(t.price * r.qty)}）` : "（免費）"}\n\n簽到碼：${checkinCode(r.id)}\n（活動當天出示給工作人員即可）\n\n活動頁：${deps.baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/events/${e.slug}`,
+    `${r.contact.name} 你好，\n\n你已完成報名：\n${e.title}\n時間：${fmtTaipei(s.starts_at)}–${fmtTaipei(s.ends_at).slice(-5)}\n地點：${where}${online}\n票種：${t.name} × ${r.qty}${t.price ? `（${twd(t.price * r.qty)}）` : "（免費）"}\n\n簽到碼：${checkinCode(r.id)}\n（活動當天出示給工作人員即可）\n\n活動頁：${siteBase(tenant, deps.baseUrl)}/events/${e.slug}`,
   );
   const owner = (await ownerEmailFor(deps as CheckoutDeps, tenant)) ?? null;
   if (owner) await mailSafe(deps, owner, `【${tenant.name}】新報名：${e.title}（${fmtTaipei(s.starts_at)}）`, `${t.name} × ${r.qty}\n報名者：${maskContact(r.contact).name}（完整資料請到後台查看）`);
@@ -661,7 +662,7 @@ export async function joinWaitlist(deps: CheckoutDeps, input: { tenant: TenantRo
 }
 
 export function offerUrl(baseUrl: string, tenant: TenantRow, e: EventRow, w: WaitlistRow) {
-  return `${baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/events/${e.slug}?offer=${encodeURIComponent(w.id)}&t=${encodeURIComponent(signFor("offer", w.id))}`;
+  return `${siteBase(tenant, baseUrl)}/events/${e.slug}?offer=${encodeURIComponent(w.id)}&t=${encodeURIComponent(signFor("offer", w.id))}`;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { siteCookiePath } from "./site-url";
 import { getStore } from "./store";
 import type { Store } from "./store/types";
 import { requireSecret } from "./secrets";
@@ -31,7 +32,7 @@ export async function handleCvsStart(req: Request, rawSlug: string, store: Store
       .join("");
     const html = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>前往選擇門市</title></head><body style="font-family:system-ui;padding:24px"><form id="f" method="post" action="${esc(r.form.action)}">${inputs}<p>正在前往超商電子地圖…</p><button type="submit">若沒有自動跳轉，請按這裡</button></form><script>document.getElementById("f").submit()</script></body></html>`;
     const res = new NextResponse(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
-    res.cookies.set(cvsCookieName(tenant.id), r.binding, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: `/s/${slug}`, maxAge: r.maxAgeSeconds });
+    res.cookies.set(cvsCookieName(tenant.id), r.binding, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: siteCookiePath(req.headers, slug), maxAge: r.maxAgeSeconds });
     return res;
   } catch (e) {
     return siteRedirect(req, slug, back, { err: messageOf(e) });

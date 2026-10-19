@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { siteBase } from "../site-url";
 import { PROVIDER_IDS } from "../pay/types";
 import type { CourseRow, EnrollmentRow, LessonRow, MemberRow, OrderRow, Store, TenantRow } from "../store/types";
 import type { CoursesSettings } from "@/modules/courses/manifest";
@@ -317,7 +318,7 @@ export async function onCourseOrderPaid(deps: HookDeps, tenant: TenantRow, order
     await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:courses", action: "course.grant_paid", payload: { orderNo: order.order_no, courseId: it.ref_id } });
     const c = await deps.store.getCourseById(tenant.id, it.ref_id!);
     if (c) {
-      await mailSafe(deps, order.contact.email, `【${tenant.name}】課程已開通：${c.title}`, `${order.contact.name} 你好，\n\n「${c.title}」已開通，登入會員中心即可開始上課：\n${deps.baseUrl.replace(/\/$/, "")}/s/${tenant.slug}/account`);
+      await mailSafe(deps, order.contact.email, `【${tenant.name}】課程已開通：${c.title}`, `${order.contact.name} 你好，\n\n「${c.title}」已開通，登入會員中心即可開始上課：\n${siteBase(tenant, deps.baseUrl)}/account`);
       const owner = ((await publishedModuleSettings(deps.store, tenant, "courses")) as CoursesSettings).ownerEmail ?? (await publishedShopSettings(deps.store, tenant)).ownerEmail;
       if (owner) await mailSafe(deps, owner, `【${tenant.name}】課程售出：${c.title}（${order.order_no}）`, `學員：${maskEmail(order.contact.email)}`);
     }
