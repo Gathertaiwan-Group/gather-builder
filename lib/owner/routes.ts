@@ -32,9 +32,12 @@ export function ownerDeps(req: Request): OwnerDeps {
   return { store: getStore(), ipSecret: requireSecret("PREVIEW_SECRET"), baseUrl: baseUrlFrom(req), sendMail: getMailer() };
 }
 
-/** 只接受 /owner 底下的站內路徑（防 open redirect） */
+/** 只接受 /owner 底下的站內路徑，或 OAuth 授權頁 /oauth/authorize?…（防 open redirect） */
 export function safeOwnerNext(v: unknown): string {
-  return typeof v === "string" && /^\/owner(\/[\w\-/.?=&%]*)?$/.test(v) && !v.startsWith("//") && v.length < 300 ? v : "/owner";
+  if (typeof v !== "string" || v.startsWith("//")) return "/owner";
+  if (/^\/owner(\/[\w\-/.?=&%]*)?$/.test(v) && v.length < 300) return v;
+  if (/^\/oauth\/authorize\?[\w\-.~%=&+:/]*$/.test(v) && v.length < 4000) return v;
+  return "/owner";
 }
 
 function to(req: Request, path: string, msg?: { ok?: string; err?: string }) {

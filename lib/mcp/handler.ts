@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { authenticateBearer } from "../tokens";
+import { authenticateOAuthAccess, isOAuthAccessToken, oauthConfig, wwwAuthenticate } from "../services/oauth";
 import type { Store } from "../store/types";
 import { makeContext, baseUrlFrom } from "../runtime";
 import { registerTools } from "./tools";
@@ -8,14 +9,16 @@ import { registerTools } from "./tools";
 /**
  * MCP server（Streamable HTTP，無狀態：每個 request 建一個 server＋transport）。
  *
- * 認證：自己驗 `Authorization: Bearer <token>`（lib/tokens.ts authenticateBearer）。
- * 🔴 刻意不用 withMcpAuth、不提供 /.well-known/oauth-*、401 不帶 resource_metadata：
- *    靜態 token 沒有 authorization server，吐 OAuth discovery 會讓客戶端誤走 OAuth 而連不上。
+ * 認證（第九批起兩種都可以）：
+ * 1. 手動 Bearer token（gbt_／gbp_，lib/tokens.ts authenticateBearer）：帶上來就直接通過，**不會觸發任何 OAuth 流程**（不回 401）。
+ * 2. OAuth 2.1 access token（gboa_，lib/services/oauth.ts）：驗 audience（resource＝這個端點）、授權未撤銷、店主成員仍啟用。
+ * 沒帶或無效 → 401＋WWW-Authenticate resource_metadata（RFC 9728），支援 OAuth 的客戶端由此開始 discovery。
+ * 🔴 仍不用 withMcpAuth（快樂手的教訓：它會讓靜態 token 也被導去 OAuth）；兩種 token 前綴不同，互不干擾。
  */
-function unauthorized() {
-  return new Response(JSON.stringify({ error: "unauthorized", message: "缺少或無效的 Bearer token" }), {
+function unauthorized(req: Request, invalid: boolean) {
+  return new Response(JSON.stringify({ error: invalid ? "invalid_token" : "unauthorized", message: "缺少或無效的 token（可用手動 Bearer token，或依 WWW-Authenticate 走 OAuth）" }), {
     status: 401,
-    headers: { "content-type": "application/json", "www-authenticate": "Bearer" },
+    headers: { "content-type": "application/json", "www-authenticate": wwwAuthenticate(oauthConfig(baseUrlFrom(req)), invalid ? "invalid_token" : undefined) },
   });
 }
 
@@ -33,8 +36,10 @@ export async function handleMcp(req: Request, store: Store): Promise<Response> {
   if (!originAllowed(req)) {
     return new Response(JSON.stringify({ error: "forbidden_origin" }), { status: 403, headers: { "content-type": "application/json" } });
   }
-  const actor = await authenticateBearer(store, req.headers.get("authorization"));
-  if (!actor) return unauthorized();
+  const authz = req.headers.get("authorization");
+  const raw = /^Bearer\s+(\S+)$/i.exec(authz?.trim() ?? "")?.[1] ?? "";
+  const actor = raw && isOAuthAccessToken(raw) ? await authenticateOAuthAccess(store, raw, oauthConfig(baseUrlFrom(req)).resource) : await authenticateBearer(store, authz);
+  if (!actor) return unauthorized(req, !!authz);
 
   if (req.method !== "POST") {
     // 無狀態模式不提供 GET SSE 串流與 session 刪除

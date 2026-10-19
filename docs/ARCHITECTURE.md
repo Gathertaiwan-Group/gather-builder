@@ -3,13 +3,13 @@
 ## 總覽
 
 ```
-            ┌────────── /admin（平台擁有者後台，HMAC cookie）──┐
-            │                                                 │
- Browser ───┤                                                 ├──► lib/services/*（唯一的業務邏輯）──► Store ──► Supabase (public.builder_*)
-            │                                                 │        權限 scope／租戶隔離／zod 驗證／稽核
- AI agent ──┴────────── /api/mcp（MCP Streamable HTTP，Bearer）┘
+            ┌────────── /admin（平台擁有者後台，HMAC cookie）─────────────┐
+ Browser ───┼────────── /owner（店主後台，DB session＋TOTP，角色 scopes）──┼──► lib/services/*（唯一的業務邏輯）──► Store ──► Supabase (public.builder_*)
+            │                                                            │        權限 scope／租戶隔離／zod 驗證／稽核
+ AI agent ──┴────────── /api/mcp（MCP Streamable HTTP，Bearer token 或 OAuth 2.1）┘
 
- 訪客 ──► /s/<slug>/…（前台，讀已發布快照；?preview=<簽章> 讀草稿）
+ 訪客 ──► <slug>.<網域>／自有網域／<平台>/s/<slug>（前台，讀已發布快照；?preview=<簽章> 讀草稿）
+ 客人 ──► <平台>/build（選模組 → 平台收費 → 自動開站）
 ```
 
 ## 多租戶
@@ -34,6 +34,19 @@
 - **自有網域流程**（`lib/services/domains.ts`；只有平台後台或店主 owner 角色，`requireFormCredential`）：`addDomain` → adapter 加到 Vercel 專案、回傳要設定的 DNS（根網域 A `76.76.21.21`、子網域 CNAME `cname.vercel-dns.com`、必要時 TXT 所有權驗證）→ pending → 後台「重新檢查」或每日 cron（`sweepPendingDomains`）→ Vercel 回報 verified 且 DNS 沒有 misconfigured → verified → `activateDomain`（confirm）呼叫 `builder_activate_domain`（單一交易：舊的 active 降回 verified、這筆 active、寫 `primary_domain`）。移除會從 Vercel 專案移掉並清掉 `primary_domain`。同一網域只能屬於一個租戶（unique），每租戶只有一個 active（partial unique）。
 - **adapter**（`lib/domains/adapter.ts`）：`createVercelDomainAdapter`（`VERCEL_DOMAINS_TOKEN`、`VERCEL_DOMAINS_PROJECT_ID`、`VERCEL_DOMAINS_TEAM_ID`）與 `createMockDomainAdapter`（`DOMAIN_ADAPTER=mock`，本機／e2e）。🔴 測試與驗收從未呼叫 Vercel API（Vercel adapter 只用假 fetch 測請求形狀）。沒設 env 時後台顯示「平台尚未設定網域 API」，新增會被拒。
 
+## MCP OAuth 2.1（第九批）
+
+- 規格：MCP Authorization **2026-07-28**（https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization ）；OAuth 2.1 draft-13、RFC 9728（PRM）、RFC 8414（AS metadata）、RFC 7591（DCR）、RFC 8707（resource）、RFC 9207（iss）、RFC 7009（revoke）、Client ID Metadata Documents draft-00。
+- 角色：資源伺服器＝`/api/mcp`（canonical resource `<平台>/api/mcp`）；授權伺服器同站（issuer＝`<平台>`，無路徑）。端點見 `docs/MCP.md`。實作 `lib/services/oauth.ts`（純服務層，記憶體 Store 單元測試）＋`lib/oauth/routes.ts`。
+- 資料：`builder_oauth_clients`（DCR／CIMD）、`builder_oauth_grants`（同意紀錄：client × 店主帳號 × 網站 × scopes × resource；撤銷＝底下 token 全部失效）、`builder_oauth_codes`、`builder_oauth_tokens`（access／refresh）；**code 與 token 只存 sha256**，原文不進 log。
+- 授權：店主必須登入店主後台（沒登入 → `/owner/login?next=/oauth/authorize?…`）→ 同意頁選一個網站與 scopes（實際授權＝請求 ∩ 勾選 ∩ 該網站角色的 scopes；檢視者只能授權讀取）→ 同意表單有同源 Origin 檢查＋綁 session 與這次請求（client、redirect_uri、challenge）的 HMAC CSRF token；每位店主每 10 分鐘 30 次。client 不明或 redirect_uri 不符時不導回（防 open redirect），其他錯誤帶 `error`＋`state`＋`iss` 導回。
+- 授權碼：一次性（條件更新 `used_at is null`）、2 分鐘；token 端點核對 client_id、redirect_uri、PKCE（S256，常數時間比較）、resource；**重用 → 撤銷整個授權**（真 DB：併發 5 次兌換只成功 1 次）。
+- access token：1 小時、綁 resource（audience，驗證時比對 canonical）、網站、scopes。每次 MCP 請求都重查：授權未撤銷、店主帳號與成員資格仍啟用、scopes ∩ **目前角色**的 scopes（降級立即生效）。
+- refresh token：30 天、每次使用就輪替（條件更新只成功一次）；已輪替的再出現（或 client 不符）→ 視為外洩、撤銷整個授權（真 DB：併發 5 次只成功 1 次、其餘觸發撤銷）。
+- 撤銷：店主後台「MCP 連線」列出這個網站的授權（client 名稱、店主、scopes、最後使用）可撤銷；`/oauth/revoke`；成員停用立即失效。
+- 限流：註冊每 IP 每小時 20、token 每 IP 每 10 分鐘 120（`builder_rate_hit`）。CORS：metadata、register、token、revoke 允許任意 origin（不帶 credentials）。
+- 已知限制：scope 不足時回工具錯誤而不是 HTTP 403 `insufficient_scope`（無狀態 server 在解析工具前不知道需要哪個 scope）；CIMD 的 DNS 檢查與實際連線之間有 DNS rebinding 的時間差（另有不跟隨轉址、5 秒、16KB 限制）。
+
 ## 內容模型：草稿／發布快照／版本
 
 - `builder_site_drafts.content`：可編輯草稿 `{ theme, pages:[{ path, title, seo, sections:[{ id, type, props }] }], nav }`，schema 在 `lib/content.ts`。
@@ -54,7 +67,7 @@
 ## 認證與權限
 
 - MCP：`Authorization: Bearer <token>` → `authenticateBearer()` 比對 `builder_api_tokens.token_hash`（sha256，原文只在建立時顯示一次）、未撤銷 → `Actor { tenantId, scopes }`，更新 `last_used_at`。
-- 刻意不做 OAuth 流程、不提供 `/.well-known/oauth-*`、401 不帶 `resource_metadata`（避免客戶端誤走 OAuth discovery）。
+- **第九批起另支援 MCP OAuth 2.1**（見下方「MCP OAuth 2.1」）：`gboa_` 開頭的 access token 走 OAuth 驗證，其他（`gbt_`／`gbp_`）照舊查 `builder_api_tokens`；手動 token 有效就直接通過、不回 401，所以不會觸發 OAuth。只有沒帶或無效的 token 回 401＋`resource_metadata`。仍不用 `withMcpAuth`（快樂手的教訓：它會讓靜態 token 也被導去 OAuth）。
 - scopes：`platform:sites`、`site:read`、`content:write`、`design:write`、`modules:write`、`publish`、`inquiries:read`、`members:read`、`members:write`、`commerce:write`、`orders:read`、`orders:write`、`invoices:write`、`shipping:write`、`marketing:write`、`newsletter:read`、`newsletter:write`、`classes:write`、`attendees:read`、`attendees:write`、`certificates:read`、`certificates:write`、`reviews:write`、`points:adjust`、`wallet:adjust`（`lib/scopes.ts`）。既有 token 不會自動拿到新 scope，要重新發行。
 - 預覽連結：HMAC-SHA256 簽 `{ tenantId, exp }`，1 小時有效（`lib/preview.ts`）。
 - 後台：單一密碼 → HMAC cookie（`lib/adminAuth.ts`），middleware 擋 `/admin` 與 `/api/admin`，頁面與 API 再驗一次；後台 POST 檢查 Origin 防 CSRF。
@@ -424,6 +437,5 @@
 
 | 需求 | 改哪裡 |
 |---|---|
-| OAuth 2.1 | 只換 `authenticateBearer()`：驗 access token → 同一個 `Actor` 形狀；scope 字串不變。屆時才提供 `/.well-known/oauth-protected-resource` |
 | 改用獨立 schema | 所有存取都經 `lib/store/supabase.ts`；換 schema 只需 `db.schema("builder")` ＋ migration 搬表（需在 PostgREST 暴露該 schema，屬專案層級設定，需另行協調） |
 | 草稿併發 | 目前最後寫入者勝；可在 `builder_site_drafts` 加 `version` 欄位做樂觀鎖 |

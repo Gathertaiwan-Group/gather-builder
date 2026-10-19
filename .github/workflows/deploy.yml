@@ -57,8 +57,10 @@ jobs:
       - name: Post-deploy smoke
         run: |
           sleep 10
-          for p in / /s/demo-coffee-local; do
+          for p in / /s/demo-coffee-local /.well-known/oauth-protected-resource; do
             code=$(curl -sL -o /dev/null -w "%{http_code}" "https://gather-builder.vercel.app$p")
             echo "$p -> $code"
             [ "$code" = "200" ] || exit 1
           done
+          # MCP OAuth：PRM 要是正確 JSON（resource＝MCP 端點、authorization_servers 有平台）
+          curl -s "https://gather-builder.vercel.app/.well-known/oauth-protected-resource" | grep -q '"resource":"https://gather-builder.vercel.app/api/mcp"' || exit 1

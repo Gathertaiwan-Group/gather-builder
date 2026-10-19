@@ -351,8 +351,9 @@ async function alertPlatform(deps: PlatformDeps, order: PlatformOrderRow, reason
 export async function provisionPlatformOrder(deps: PlatformDeps, orderId: string): Promise<{ ok: boolean; tenant?: TenantRow; error?: string }> {
   const claimed = await deps.store.claimPlatformProvision(orderId, new Date(Date.now() - PROVISION_STALE_MS).toISOString());
   if (!claimed) {
+    // 沒宣告到：已完成，或另一個 notify／cron 正在開（併發）→ 都不算失敗（整合測試抓到：併發時誤報 provision_failed）
     const cur = await deps.store.getPlatformOrderById(orderId);
-    return { ok: cur?.provision_state === "done", tenant: cur?.tenant_id ? ((await deps.store.getTenantById(cur.tenant_id)) ?? undefined) : undefined };
+    return { ok: cur?.provision_state === "done" || cur?.provision_state === "provisioning", tenant: cur?.tenant_id ? ((await deps.store.getTenantById(cur.tenant_id)) ?? undefined) : undefined };
   }
   try {
     const tenant = claimed.kind === "new_site" ? await provisionNewSite(deps, claimed) : claimed.kind === "add_modules" ? await provisionAddon(deps, claimed) : await provisionRenewal(deps, claimed);

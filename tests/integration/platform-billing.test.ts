@@ -57,7 +57,8 @@ describe.skipIf(!enabled)("平台訂單與自動開站（整合）", () => {
     paid.set(gw, r.order.amount_total);
     const body = new URLSearchParams({ notify_type: "order_confirm", notify_message: JSON.stringify({ order_id: gw }) }).toString();
     const outs = await Promise.all(Array.from({ length: 6 }, () => handlePlatformNotify(deps, body)));
-    expect(outs.filter((o) => o.outcome === "paid")).toHaveLength(1);
+    const afterNotify = await store.getPlatformOrderByNo(r.order.order_no);
+    expect(outs.filter((o) => o.outcome === "paid"), JSON.stringify([outs.map((o) => o.outcome), afterNotify?.provision_error])).toHaveLength(1);
     const tenants = (await db.from("builder_tenants").select("id, is_test, platform_order_id").eq("slug", slug)).data!;
     expect(tenants).toHaveLength(1);
     expect(tenants[0]).toMatchObject({ is_test: true, platform_order_id: r.order.id });

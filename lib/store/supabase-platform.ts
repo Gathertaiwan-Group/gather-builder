@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
+import type { OAuthClientRow, OAuthCodeRow, OAuthGrantRow, OAuthTokenRow, OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 function must<T>(r: Res<T>, what: string): T {
@@ -74,6 +74,7 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
       return must(await db.from("builder_tenant_users").insert(row).select("*").single(), "insertTenantUser") as TenantUserRow;
     },
     async getTenantUser(tenantId, userId) {
+      if (!isUuid(tenantId) || !isUuid(userId)) return null;
       return must(await db.from("builder_tenant_users").select("*").eq("tenant_id", tenantId).eq("user_id", userId).maybeSingle(), "getTenantUser") as TenantUserRow | null;
     },
     async getTenantUserById(tenantId, id) {
@@ -192,6 +193,66 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
     },
     async listBillingDue(horizonIso, limit) {
       return (must(await db.from("builder_tenant_billing").select("*").neq("status", "suspended").lte("paid_until", horizonIso).order("paid_until").limit(limit), "listBillingDue") ?? []) as TenantBillingRow[];
+    },
+    async insertOAuthClient(row) {
+      return must(await db.from("builder_oauth_clients").insert(row).select("*").single(), "insertOAuthClient") as OAuthClientRow;
+    },
+    async getOAuthClient(clientId) {
+      if (!clientId || clientId.length > 500) return null;
+      return must(await db.from("builder_oauth_clients").select("*").eq("client_id", clientId).maybeSingle(), "getOAuthClient") as OAuthClientRow | null;
+    },
+    async updateOAuthClient(clientId, patch) {
+      must(await db.from("builder_oauth_clients").update(patch).eq("client_id", clientId), "updateOAuthClient");
+    },
+    async insertOAuthGrant(row) {
+      return must(await db.from("builder_oauth_grants").insert(row).select("*").single(), "insertOAuthGrant") as OAuthGrantRow;
+    },
+    async getOAuthGrant(id) {
+      if (!isUuid(id)) return null;
+      return must(await db.from("builder_oauth_grants").select("*").eq("id", id).maybeSingle(), "getOAuthGrant") as OAuthGrantRow | null;
+    },
+    async listOAuthGrants(opts) {
+      let q = db.from("builder_oauth_grants").select("*");
+      if (opts.tenantId) q = q.eq("tenant_id", opts.tenantId);
+      if (opts.userId) q = q.eq("user_id", opts.userId);
+      return (must(await q.order("created_at", { ascending: false }).limit(opts.limit), "listOAuthGrants") ?? []) as OAuthGrantRow[];
+    },
+    async touchOAuthGrant(id, nowIso) {
+      must(await db.from("builder_oauth_grants").update({ last_used_at: nowIso }).eq("id", id), "touchOAuthGrant");
+    },
+    async revokeOAuthGrant(id, reason) {
+      if (!isUuid(id)) return false;
+      const nowIso = new Date().toISOString();
+      must(await db.from("builder_oauth_tokens").update({ revoked_at: nowIso }).eq("grant_id", id).is("revoked_at", null), "revokeGrantTokens");
+      const rows = (must(await db.from("builder_oauth_grants").update({ revoked_at: nowIso, revoked_reason: reason }).eq("id", id).is("revoked_at", null).select("id"), "revokeOAuthGrant") ?? []) as { id: string }[];
+      return rows.length === 1;
+    },
+    async insertOAuthCode(row) {
+      must(await db.from("builder_oauth_codes").insert(row), "insertOAuthCode");
+    },
+    async getOAuthCodeByHash(hash) {
+      if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+      return must(await db.from("builder_oauth_codes").select("*").eq("code_hash", hash).maybeSingle(), "getOAuthCodeByHash") as OAuthCodeRow | null;
+    },
+    async consumeOAuthCode(hash, nowIso) {
+      if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+      const rows = (must(await db.from("builder_oauth_codes").update({ used_at: nowIso }).eq("code_hash", hash).is("used_at", null).gt("expires_at", nowIso).select("*"), "consumeOAuthCode") ?? []) as OAuthCodeRow[];
+      return rows[0] ?? null;
+    },
+    async insertOAuthToken(row) {
+      return must(await db.from("builder_oauth_tokens").insert(row).select("*").single(), "insertOAuthToken") as OAuthTokenRow;
+    },
+    async getOAuthTokenByHash(hash) {
+      if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+      return must(await db.from("builder_oauth_tokens").select("*").eq("token_hash", hash).maybeSingle(), "getOAuthTokenByHash") as OAuthTokenRow | null;
+    },
+    async consumeRefreshToken(hash, nowIso) {
+      if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+      const rows = (must(await db.from("builder_oauth_tokens").update({ used_at: nowIso }).eq("token_hash", hash).eq("kind", "refresh").is("used_at", null).is("revoked_at", null).gt("expires_at", nowIso).select("*"), "consumeRefreshToken") ?? []) as OAuthTokenRow[];
+      return rows[0] ?? null;
+    },
+    async revokeOAuthToken(id) {
+      must(await db.from("builder_oauth_tokens").update({ revoked_at: new Date().toISOString() }).eq("id", id).is("revoked_at", null), "revokeOAuthToken");
     },
     async listPendingDomains(limit) {
       return (must(await db.from("builder_tenant_domains").select("*").eq("status", "pending").order("last_checked_at", { ascending: true, nullsFirst: true }).limit(limit), "listPendingDomains") ?? []) as TenantDomainRow[];

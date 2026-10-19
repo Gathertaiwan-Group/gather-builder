@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import type { Store } from "./types";
-import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
+import type { OAuthClientRow, OAuthCodeRow, OAuthGrantRow, OAuthTokenRow, OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
 
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
@@ -15,6 +15,10 @@ export function createMemoryPlatformStore() {
   const tokens = new Map<string, OwnerTokenRow>();
   const porders = new Map<string, PlatformOrderRow>();
   const billing = new Map<string, TenantBillingRow>();
+  const oclients = new Map<string, OAuthClientRow>();
+  const ogrants = new Map<string, OAuthGrantRow>();
+  const ocodes = new Map<string, OAuthCodeRow>();
+  const otokens = new Map<string, OAuthTokenRow>();
   let root: Store | null = null;
   const store: PlatformStore = {
     async insertTenantDomain(row) {
@@ -215,6 +219,75 @@ export function createMemoryPlatformStore() {
     },
     async listBillingDue(horizonIso, limit) {
       return clone([...billing.values()].filter((b) => b.status !== "suspended" && b.paid_until <= horizonIso).slice(0, limit));
+    },
+    async insertOAuthClient(row) {
+      if (oclients.has(row.client_id)) throw new ServiceError("conflict", "資料重複");
+      const r: OAuthClientRow = { ...clone(row), id: randomUUID(), disabled_at: null, created_at: now() };
+      oclients.set(r.client_id, r);
+      return clone(r);
+    },
+    async getOAuthClient(clientId) {
+      return clone(oclients.get(clientId) ?? null);
+    },
+    async updateOAuthClient(clientId, patch) {
+      const c = oclients.get(clientId);
+      if (c) oclients.set(clientId, { ...c, ...clone(patch) });
+    },
+    async insertOAuthGrant(row) {
+      const r: OAuthGrantRow = { ...clone(row), id: randomUUID(), created_at: now(), last_used_at: null, revoked_at: null, revoked_reason: null };
+      ogrants.set(r.id, r);
+      return clone(r);
+    },
+    async getOAuthGrant(id) {
+      return clone(ogrants.get(id) ?? null);
+    },
+    async listOAuthGrants(opts) {
+      return clone([...ogrants.values()].filter((g) => (!opts.tenantId || g.tenant_id === opts.tenantId) && (!opts.userId || g.user_id === opts.userId)).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, opts.limit));
+    },
+    async touchOAuthGrant(id, nowIso) {
+      const g = ogrants.get(id);
+      if (g) ogrants.set(id, { ...g, last_used_at: nowIso });
+    },
+    async revokeOAuthGrant(id, reason) {
+      const g = ogrants.get(id);
+      if (!g) return false;
+      for (const t of otokens.values()) if (t.grant_id === id && !t.revoked_at) otokens.set(t.id, { ...t, revoked_at: now() });
+      if (g.revoked_at) return false;
+      ogrants.set(id, { ...g, revoked_at: now(), revoked_reason: reason });
+      return true;
+    },
+    async insertOAuthCode(row) {
+      const r: OAuthCodeRow = { ...clone(row), id: randomUUID(), used_at: null, created_at: now() };
+      ocodes.set(r.code_hash, r);
+    },
+    async getOAuthCodeByHash(hash) {
+      return clone(ocodes.get(hash) ?? null);
+    },
+    async consumeOAuthCode(hash, nowIso) {
+      const c = ocodes.get(hash);
+      if (!c || c.used_at || c.expires_at <= nowIso) return null;
+      const next = { ...c, used_at: nowIso };
+      ocodes.set(hash, next);
+      return clone(next);
+    },
+    async insertOAuthToken(row) {
+      const r: OAuthTokenRow = { ...clone(row), id: randomUUID(), used_at: null, revoked_at: null, created_at: now() };
+      otokens.set(r.id, r);
+      return clone(r);
+    },
+    async getOAuthTokenByHash(hash) {
+      return clone([...otokens.values()].find((t) => t.token_hash === hash) ?? null);
+    },
+    async consumeRefreshToken(hash, nowIso) {
+      const t = [...otokens.values()].find((x) => x.token_hash === hash);
+      if (!t || t.kind !== "refresh" || t.used_at || t.revoked_at || t.expires_at <= nowIso) return null;
+      const next = { ...t, used_at: nowIso };
+      otokens.set(t.id, next);
+      return clone(next);
+    },
+    async revokeOAuthToken(id) {
+      const t = otokens.get(id);
+      if (t && !t.revoked_at) otokens.set(id, { ...t, revoked_at: now() });
     },
     async invalidateOwnerTokens(userId, purpose) {
       for (const t of tokens.values()) if (t.user_id === userId && t.purpose === purpose && !t.used_at) tokens.set(t.id, { ...t, used_at: now() });

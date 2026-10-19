@@ -1,7 +1,57 @@
 # MCP 連線與工具
 
-端點：`https://<網域>/api/mcp`（Streamable HTTP、無狀態、JSON 回應）
-認證：`Authorization: Bearer <token>`。沒帶或錯誤回 401。**沒有 OAuth 流程**，也不提供 `/.well-known/oauth-*`。
+端點：`https://<平台網域>/api/mcp`（Streamable HTTP、無狀態、JSON 回應；正式站 `https://gather-builder.vercel.app/api/mcp`）。只在平台網域提供（租戶子網域／自有網域上 404）。
+
+## 兩種連線方式（第九批起並存）
+
+| | ① OAuth 2.1（建議給店主） | ② 手動 Bearer token |
+|---|---|---|
+| 適合 | Claude Desktop、claude.ai 自訂連接器、Claude Code、任何支援 MCP OAuth 的客戶端 | 腳本、CI、不支援 OAuth 的客戶端、平台內部（平台 token） |
+| 怎麼拿 | 客戶端加入端點網址 → 自動 discovery → 瀏覽器開店主登入頁 → 選網站與權限 → 同意 | 店主後台「MCP 連線」發行（`gbt_`），或平台後台／`issue_site_token`；平台 token（`gbp_`）只有平台後台能發 |
+| 綁定 | 一個網站＋你勾選的 scopes＋這個 MCP 端點（audience）；權限不會超過你在該網站的角色（檢視者只能讀） | 一個網站（或平台）＋發行時選的 scopes |
+| 有效期 | access token 1 小時（客戶端自動用 refresh token 換新，refresh 30 天、每次輪替） | 直到撤銷 |
+| 撤銷 | 店主後台「MCP 連線 → OAuth 授權 → 撤銷授權」（立即 401）；成員被停用也立即失效 | 後台撤銷，立即 401 |
+
+**兩者不互相干擾**：手動 token 帶上來就直接 200，伺服器不回 401，客戶端不會走 OAuth；只有沒帶或無效的 token 才回 401＋`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp", scope="…"`（RFC 9728），支援 OAuth 的客戶端從這裡開始。⚠️ 少數客戶端（曾有 Cursor 的回報）只要偵測到 OAuth discovery 就會忽略自訂 header：遇到這種客戶端請改用 OAuth 連線。
+
+### OAuth 規格與端點
+
+依 MCP Authorization 規格 **2026-07-28**（https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization ；用戶端註冊 https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration ；discovery https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery ）。
+
+| 端點 | 說明 |
+|---|---|
+| `GET /.well-known/oauth-protected-resource/api/mcp`（也有根路徑版） | RFC 9728：`resource`＝`<平台>/api/mcp`、`authorization_servers`＝[`<平台>`]、`scopes_supported`（網站 scopes，不含 platform:sites） |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414：`code_challenge_methods_supported: ["S256"]`、`client_id_metadata_document_supported: true`、`registration_endpoint`、`authorization_response_iss_parameter_supported: true`、public client（`none`） |
+| `POST /oauth/register` | RFC 7591 動態註冊（規格標為向下相容；只收 public client，redirect_uri 只接受 https、`http://localhost／127.0.0.1／[::1]`、原生 app scheme） |
+| `GET /oauth/authorize` | 授權＋PKCE（只接受 S256，沒帶拒絕）；`resource` 必須是本端點；client_id 可以是 Client ID Metadata Document 的 https 網址（伺服器取回文件，SSRF 防護：只連公開位址、不跟隨轉址、5 秒、16KB）。redirect_uri 精確比對（loopback IP 127.0.0.1／[::1] 的 port 依 OAuth 2.1 §8.4.2 可變）；client 或 redirect_uri 不對時**不導回** |
+| `POST /oauth/authorize/decision` | 店主同意／拒絕（同源 Origin＋綁 session 的 CSRF token）；回應帶 `code`、`state`、`iss`（RFC 9207） |
+| `POST /oauth/token` | `authorization_code`（一次性、2 分鐘、client／redirect_uri／PKCE 都要相符；重用 → 撤銷整個授權）、`refresh_token`（輪替；舊的再出現＝重用 → 撤銷整個授權） |
+| `POST /oauth/revoke` | RFC 7009；refresh token → 撤銷整個授權、access token → 撤銷那一個 |
+
+scope 名稱與手動 token 完全一樣（見下表）。工具因 scope 不足而失敗時回工具錯誤 `[forbidden]`（不是 HTTP 403 step-up），需要更多權限時請到店主後台撤銷後重新授權並勾選。
+
+### 在 Claude Code 連線
+
+```bash
+# ① OAuth（店主）：加入後在 Claude Code 裡執行 /mcp，選這個 server → Authenticate，瀏覽器會開店主登入與同意頁
+claude mcp add --transport http gather-builder https://gather-builder.vercel.app/api/mcp
+
+# ② 手動 token
+claude mcp add --transport http lin-bakery https://gather-builder.vercel.app/api/mcp \
+  --header "Authorization: Bearer gbt_xxxxxxxx"
+
+claude mcp list          # 確認狀態 ✓ Connected
+```
+
+`--transport http` 不能省（預設是 stdio）。加 `-s user` 可讓所有專案共用。
+
+### 在 Claude Desktop／claude.ai 連線
+
+設定 → 連接器（Connectors）→ 新增自訂連接器 → URL 填 `https://gather-builder.vercel.app/api/mcp` → 連線 → 瀏覽器開店主登入頁 → 選網站、勾權限 → 同意。之後在店主後台「MCP 連線」看得到這筆授權，可隨時撤銷。（claude.ai 的回呼網址 `https://claude.ai/api/mcp/auth_callback` 由動態註冊自動帶入。）
+
+---
+
+以下為手動 token 的說明（原本的方式，完全不變）。
 
 ## token 種類
 
@@ -48,24 +98,17 @@ token 原文只在建立時顯示一次，資料庫只存 sha256。後台可隨�
 > 第五六批審查（2026-10-19）：`points:adjust`、`wallet:adjust` 新增；原本靠 `members:write` 調整點數／儲值金的 token 需重新發行並明確給這兩個 scope。
 > 第六批（certificates:read／certificates:write／reviews:write）於 2026-10-19 加入，需要重新發行 token（平台 token 也是：`scripts/issue-platform-token.mjs`）。
 
-## 在 Claude Code 連線
+## 手動 token 連線（Claude Code）
 
 （Claude Code 2.1.214 實測語法）
 
 ```bash
 # 平台 token（給 Gather 內部用，可開站）
-claude mcp add --transport http gather-builder https://<網域>/api/mcp \
+claude mcp add --transport http gather-builder-platform https://<平台網域>/api/mcp \
   --header "Authorization: Bearer gbp_xxxxxxxx"
-
-# 某個客戶網站的 token（只能動那個站）
-claude mcp add --transport http lin-bakery https://<網域>/api/mcp \
-  --header "Authorization: Bearer gbt_xxxxxxxx"
-
-claude mcp list          # 確認狀態 ✓ Connected
 ```
 
-`--transport http` 不能省（預設是 stdio）。加 `-s user` 可讓所有專案共用。
-其他客戶端（Cursor、claude.ai 自訂連接器等）：URL 填 `/api/mcp`，自訂 header 填 `Authorization: Bearer …`；若客戶端只支援 OAuth 則目前無法連（見 ARCHITECTURE 的 OAuth 擴充點）。
+其他客戶端（Cursor 等）：URL 填 `/api/mcp`，自訂 header 填 `Authorization: Bearer …`；只支援 OAuth 的客戶端用上面的 OAuth 方式。
 
 ## 典型對話流程
 

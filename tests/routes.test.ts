@@ -26,15 +26,17 @@ function mcpReq(token?: string, body: unknown = init, extra: Record<string, stri
 }
 
 describe("MCP 路由認證", () => {
-  it("無 token／錯 token／撤銷的 token → 401（不帶 resource_metadata）；有效 → 200", async () => {
+  it("無 token／錯 token／撤銷的 token → 401（第九批起帶 RFC 9728 resource_metadata）；有效的手動 token → 200（不觸發 OAuth）", async () => {
     const store = newStore();
     const admin = ctxFor(store);
     const site = await createSite(admin, { slug: "mcp-auth", name: "M" });
 
     const r0 = await handleMcp(mcpReq(), store);
     expect(r0.status).toBe(401);
-    expect(r0.headers.get("www-authenticate")).toBe("Bearer");
-    expect((await handleMcp(mcpReq("gbt_wrongwrongwrongwrongwrong"), store)).status).toBe(401);
+    expect(r0.headers.get("www-authenticate")).toMatch(/^Bearer resource_metadata="http:\/\/test\.local\/\.well-known\/oauth-protected-resource\/api\/mcp", scope="site:read /);
+    const bad = await handleMcp(mcpReq("gbt_wrongwrongwrongwrongwrong"), store);
+    expect(bad.status).toBe(401);
+    expect(bad.headers.get("www-authenticate")).toMatch(/^Bearer error="invalid_token", resource_metadata=/);
 
     const ok = await handleMcp(mcpReq(site.token!), store);
     expect(ok.status).toBe(200);

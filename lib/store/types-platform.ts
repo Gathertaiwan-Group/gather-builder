@@ -196,4 +196,82 @@ export interface PlatformBillingStore {
   listBillingDue(horizonIso: string, limit: number): Promise<TenantBillingRow[]>;
 }
 
-export interface PlatformStore extends DomainStore, OwnerStore, PlatformBillingStore {}
+/* ------------------------------------------------------------------ OAuth 2.1 */
+
+export interface OAuthClientRow {
+  id: string;
+  client_id: string;
+  kind: "dcr" | "cimd";
+  client_name: string | null;
+  redirect_uris: string[];
+  metadata: Record<string, unknown>;
+  created_ip_hash: string | null;
+  fetched_at: string | null;
+  disabled_at: string | null;
+  created_at: string;
+}
+
+export interface OAuthGrantRow {
+  id: string;
+  client_id: string;
+  user_id: string;
+  tenant_id: string;
+  scopes: string[];
+  resource: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: string | null;
+}
+
+export interface OAuthCodeRow {
+  id: string;
+  code_hash: string;
+  grant_id: string;
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scopes: string[];
+  resource: string;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
+}
+
+export interface OAuthTokenRow {
+  id: string;
+  token_hash: string;
+  kind: "access" | "refresh";
+  grant_id: string;
+  client_id: string;
+  scopes: string[];
+  resource: string;
+  parent_id: string | null;
+  expires_at: string;
+  used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface OAuthStore {
+  insertOAuthClient(row: Pick<OAuthClientRow, "client_id" | "kind" | "client_name" | "redirect_uris" | "metadata" | "created_ip_hash" | "fetched_at">): Promise<OAuthClientRow>;
+  getOAuthClient(clientId: string): Promise<OAuthClientRow | null>;
+  updateOAuthClient(clientId: string, patch: Partial<Pick<OAuthClientRow, "client_name" | "redirect_uris" | "metadata" | "fetched_at" | "disabled_at">>): Promise<void>;
+  insertOAuthGrant(row: Pick<OAuthGrantRow, "client_id" | "user_id" | "tenant_id" | "scopes" | "resource">): Promise<OAuthGrantRow>;
+  getOAuthGrant(id: string): Promise<OAuthGrantRow | null>;
+  listOAuthGrants(opts: { tenantId?: string; userId?: string; limit: number }): Promise<OAuthGrantRow[]>;
+  touchOAuthGrant(id: string, nowIso: string): Promise<void>;
+  /** 撤銷授權＋底下所有 token（冪等）；回傳是否真的由未撤銷改為撤銷 */
+  revokeOAuthGrant(id: string, reason: string): Promise<boolean>;
+  insertOAuthCode(row: Pick<OAuthCodeRow, "code_hash" | "grant_id" | "client_id" | "redirect_uri" | "code_challenge" | "scopes" | "resource" | "expires_at">): Promise<void>;
+  getOAuthCodeByHash(hash: string): Promise<OAuthCodeRow | null>;
+  /** 原子：未使用、未過期才標 used_at 並回傳（一次性） */
+  consumeOAuthCode(hash: string, nowIso: string): Promise<OAuthCodeRow | null>;
+  insertOAuthToken(row: Pick<OAuthTokenRow, "token_hash" | "kind" | "grant_id" | "client_id" | "scopes" | "resource" | "parent_id" | "expires_at">): Promise<OAuthTokenRow>;
+  getOAuthTokenByHash(hash: string): Promise<OAuthTokenRow | null>;
+  /** 原子：refresh token 未使用、未撤銷、未過期才標 used_at（輪替；同一個只能換一次） */
+  consumeRefreshToken(hash: string, nowIso: string): Promise<OAuthTokenRow | null>;
+  revokeOAuthToken(id: string): Promise<void>;
+}
+
+export interface PlatformStore extends DomainStore, OwnerStore, PlatformBillingStore, OAuthStore {}

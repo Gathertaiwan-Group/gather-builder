@@ -2,6 +2,7 @@ import { AdminShell, Card, fmt } from "@/components/admin/AdminShell";
 import { TenantTabs } from "@/components/admin/TenantTabs";
 import { requireBackoffice } from "@/lib/backoffice";
 import { listOwnerSiteTokens } from "@/lib/services/owners";
+import { listOAuthGrantsForTenant } from "@/lib/services/oauth-grants";
 import { TENANT_SCOPES } from "@/lib/scopes";
 import { ServiceError } from "@/lib/services/context";
 import { baseUrlFrom } from "@/lib/runtime";
@@ -13,6 +14,7 @@ export default async function TokensPage({ params, searchParams }: { params: Pro
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
   const bo = await requireBackoffice(slug);
   const toks = await listOwnerSiteTokens(bo.ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? null : Promise.reject(e)));
+  const grants = await listOAuthGrantsForTenant(bo.ctx, { site: slug }).catch((e) => (e instanceof ServiceError ? null : Promise.reject(e)));
   const act = `${bo.api}/site-tokens`;
   const mcpUrl = `${baseUrlFrom(null)}/api/mcp`;
   return (
@@ -58,6 +60,30 @@ export default async function TokensPage({ params, searchParams }: { params: Pro
               <button className="rounded bg-neutral-900 px-3 py-1 text-white" type="submit">發行 token</button>
             </div>
           </form>
+        </Card>
+      )}
+      {grants && (
+        <Card title={`OAuth 授權（${grants.filter((g) => !g.revokedAt).length} 個有效）`}>
+          <ul className="m-0 flex flex-col gap-2 p-0 text-sm" data-admin="oauth-grants">
+            {grants.map((g) => (
+              <li key={g.id} className="list-none border-b pb-2" data-admin="oauth-grant" data-revoked={g.revokedAt ? "1" : "0"}>
+                <b>{g.clientName}</b> · {g.userEmail} · <span className="text-xs">{g.scopes.join(" ")}</span> · 授權於 {fmt(g.createdAt)} · 最後使用 {fmt(g.lastUsedAt)}
+                {g.revokedAt ? (
+                  <span className="text-neutral-500">
+                    {" "}
+                    · 已撤銷 {fmt(g.revokedAt)}
+                    {g.revokedReason ? `（${g.revokedReason}）` : ""}
+                  </span>
+                ) : (
+                  <form action={act} method="post" className="ml-2 inline">
+                    <input type="hidden" name="action" value="revoke_grant" />
+                    <input type="hidden" name="grantId" value={g.id} />
+                    <button className="rounded border px-2 text-xs" type="submit">撤銷授權</button>
+                  </form>
+                )}
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
     </AdminShell>

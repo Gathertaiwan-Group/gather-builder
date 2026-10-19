@@ -98,6 +98,7 @@ async function cleanup() {
   if (t?.[0]) await rest(`builder_tenants?id=eq.${t[0].id}`, { method: "DELETE" });
   await rest(`builder_platform_orders?contact_email=eq.${encodeURIComponent(email)}`, { method: "DELETE" });
   await rest(`builder_owner_users?email=eq.${encodeURIComponent(email)}`, { method: "DELETE" });
+  await rest(`builder_oauth_clients?client_name=eq.${encodeURIComponent("e2e MCP SDK client")}`, { method: "DELETE" });
   const left = await rest(`builder_tenants?select=id&slug=eq.${slug}`);
   ok("清理測試資料", Array.isArray(left) && left.length === 0);
 }
