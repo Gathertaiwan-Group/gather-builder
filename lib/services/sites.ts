@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { defaultContent, findPage, normalizePath, type NavItem, type SiteContent } from "../content";
+import { defaultContent, findPage, normalizePath, siteContentSchema, type NavItem, type SiteContent } from "../content";
 import { MODULES, findSectionType, getModule, resolveDependencies, validateSectionProps, DependencyError } from "@/modules/registry";
 import { THEME_PRESETS, themeOverridesSchema } from "../themes";
 import { generateToken } from "../tokens";
@@ -52,7 +52,11 @@ export const createSiteInput = z.object({
   test: z.boolean().optional(),
 });
 
-export async function createSite(ctx: ServiceContext, input: z.input<typeof createSiteInput>) {
+/**
+ * opts（不經 MCP）：platformOrderId＝平台訂單自動開站（builder_tenants.platform_order_id unique：一張單只開一個站）；
+ * issueToken=false＝不發預設 token；content＝自訂首頁草稿（AI 或模板產生，仍會整份 zod 驗證）。
+ */
+export async function createSite(ctx: ServiceContext, input: z.input<typeof createSiteInput>, opts: { platformOrderId?: string; issueToken?: boolean; content?: (base: SiteContent) => SiteContent } = {}) {
   requirePlatform(ctx);
   const data = parse(createSiteInput, input);
   let moduleIds: string[];
@@ -71,6 +75,7 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
     theme: {},
     settings: {},
     is_test: !!data.test,
+    ...(opts.platformOrderId ? { platform_order_id: opts.platformOrderId } : {}),
   });
 
   const now = new Date().toISOString();
@@ -82,8 +87,11 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
     statuses.push({ id, status });
   }
 
-  const content = defaultContent(data.name, data.themePreset);
-  if (moduleIds.includes("sections-basic")) {
+  let content = defaultContent(data.name, data.themePreset);
+  if (opts.content) {
+    const c = siteContentSchema.safeParse(opts.content(structuredClone(content)));
+    if (c.success) content = c.data;
+  } else if (moduleIds.includes("sections-basic")) {
     content.pages[0]!.sections.push({
       id: newSectionId(),
       type: "hero",
@@ -93,7 +101,7 @@ export async function createSite(ctx: ServiceContext, input: z.input<typeof crea
   await ctx.store.createDraft(tenant.id, content, ctx.actor.label);
 
   // 發出去的 token 不能比呼叫者大：取 TENANT_SCOPES 與呼叫者 scopes 的交集
-  const grantScopes = TENANT_SCOPES.filter((sc) => ctx.actor.scopes.includes(sc));
+  const grantScopes = opts.issueToken === false ? [] : TENANT_SCOPES.filter((sc) => ctx.actor.scopes.includes(sc));
   let tok: { raw: string } | null = null;
   let tokenId: string | null = null;
   if (grantScopes.length) {

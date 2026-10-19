@@ -18,7 +18,7 @@ modules/<id>/
 | `id` | 小寫英數與連字號，全平台唯一 |
 | `name` / `description` | 給人與 agent 看（`list_modules` 會回傳） |
 | `category` | foundation / content / engagement / commerce |
-| `priceSetup` / `priceMonthly` | 新台幣 |
+| `priceSetup` / `priceMonthly` | 新台幣。**第九批起是 /build 的實際收費依據**（`lib/platform/pricing.ts`，建置費＋月費；依賴的價格一併計入）。經 /build 開的站，付費模組（任一價格 > 0）要先購買才能 `enable_module`（平台後台不受限）；改價格只影響之後的新訂單 |
 | `requires` | 依賴模組 id；開啟時自動帶入，循環會被拒 |
 | `settingsSchema` | zod；`configure_module` 依它驗證，設定存進草稿 `moduleSettings`、發布後生效。渲染時用 `moduleConfig(site, id)` 讀（讀的是目前顯示的快照）。`{}` 不通過 → 啟用後狀態為 `pending_setup` |
 | `sectionTypes` | `{ type, label, description, schema, example }[]`；`schema` 是 props 的 zod（`.strict()`），`example` 必須通過 schema |
@@ -38,6 +38,8 @@ modules/<id>/
 9. 手機 375px 無水平捲動。
 
 10. 模組固定路徑（例如 `/shop`、`/account`）要加進 `lib/validators.ts` 的 `RESERVED_PATHS`，避免租戶自建同名頁面。
+11. 站內連結、信件連結、cookie（第九批）：信件或回傳給 agent 的網址一律用 `siteBase(tenant, baseUrl)`／`siteUrl()`（`lib/site-url.ts`，會是自有網域、子網域或 `/s/<slug>`），不要自己拼 `/s/${slug}`；設 cookie 的 path 用 `siteCookiePath(req.headers, slug)`（租戶 host 上是 `/`、host-only）；頁面內連結用 `siteHref(ctx, …)`（`ctx.basePath` 在租戶 host 上是空字串）。
+12. 後台頁面（第九批）：寫在 `app/admin/t/[slug]/<頁>/page.tsx`，用 `requireBackoffice(slug)` 取得 `bo.ctx`（平台擁有者或店主角色的 Actor），連結用 `bo.base`／`bo.api`；route 用 `backofficeForm(req, slug, "/<頁>", …)`。再在 `app/owner/t/[slug]/` 與 `app/api/owner/tenants/[slug]/` 放一支 re-export（`tests/owners.test.ts` 會檢查）。只給 owner 的動作（憑證、網域、成員、token）在服務層用 `requireFormCredential`／`requireTeamAdmin`。
 11. 需要讀「目前登入的會員」的公開 POST：路由放在 `app/s/[site]/api/…`（會員 cookie 的 path 是 `/s/<slug>`，放 `/api/…` 收不到），用 `originOk()` 檢查 Origin、`memberTokenFromRequest()` 讀 cookie。
 12. 有錢、庫存、狀態轉換的寫入：一律 DB 條件式更新或 SQL 函式（單一交易），memory store 要實作同語意；並在 `tests/integration/` 補一支打真 DB 的併發測試。
 

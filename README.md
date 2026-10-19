@@ -54,6 +54,8 @@ npm run dev                  # http://localhost:3000
 | `PLATFORM_EXTRA_HOSTS` | 選填 | 其他也算「平台」的 host（逗號分隔），例如 `builder.gathertaiwan.com` |
 | `VERCEL_DOMAINS_TOKEN` / `VERCEL_DOMAINS_PROJECT_ID` / `VERCEL_DOMAINS_TEAM_ID` | 自有網域 | Vercel API token 與專案／team id（自有網域加到專案、查驗證狀態）。沒設＝後台無法新增自有網域 |
 | `DOMAIN_ADAPTER` | 只給本機／e2e | `mock`＝自有網域不打 Vercel（`.test` 網域自動驗證） |
+| `PLATFORM_PCHOMEPAY_APP_ID` / `PLATFORM_PCHOMEPAY_SECRET` / `PLATFORM_PCHOMEPAY_SANDBOX` | /build 收費 | 平台自己的 PChomePay 帳號（向店主收建置費與月費）。🔴 沒設＝/build 只能試算、顯示「尚未開放付款」；`SANDBOX=true` 時只有本機或帶後台測試簽章能結帳，且一律開 is_test 網站 |
+| `PLATFORM_NOTIFY_EMAIL` | 選填 | 平台訂單異常（金額不符、開站失敗）警示信收件人，預設 gathertaiwan@gmail.com |
 | `SUPABASE_ACCESS_TOKEN` | 只給 migrate 腳本 | Management API token，**不要**放進 Vercel 或 repo |
 | `GB_PLATFORM_TOKEN` | 只給 e2e 腳本 | 平台級 MCP token |
 
@@ -82,6 +84,11 @@ D=$(mktemp -d) && git archive HEAD | tar -x -C "$D" && mkdir -p "$D/.vercel" && 
 ```
 
 有 DB 變更時：先 `npm run migrate`，再部署。若變更會讓線上舊版程式壞掉（例如改函式簽章），要先放相容層（參考 migrations 0004/0005）。
+
+## 第九批：平台化（子網域／自有網域、店主後台、/build 收費與自動開站、MCP OAuth）
+
+- 網址：`docs/ARCHITECTURE.md`「網址：子網域與自有網域」。店主後台：`/owner`（「店主後台」）。收費與自動開站：`/build`（「平台收費與自動開站」）。OAuth：`docs/MCP.md`。
+- 端到端（只限本機 next start）：`APP_URL=http://localhost:3250 PLATFORM_SITES_DOMAIN=sites.test DOMAIN_ADAPTER=mock` ＋ 平台 sandbox 金鑰（`PLATFORM_PCHOMEPAY_*`）啟動後，`node --env-file=.env.local scripts/e2e-platform.mjs http://localhost:3250`。開站用 `scripts/e2e-platform-settle.mts` 模擬權威回查成功（不打金流）。
 
 ## 第八批：團購與 QR 多語商品頁
 

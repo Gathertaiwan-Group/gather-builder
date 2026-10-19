@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ServiceError } from "../errors";
 import type { Store } from "./types";
-import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformStore, TenantDomainRow, TenantUserRow } from "./types-platform";
+import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
 
 const clone = <T>(v: T): T => structuredClone(v);
 const now = () => new Date().toISOString();
@@ -13,6 +13,8 @@ export function createMemoryPlatformStore() {
   const members = new Map<string, TenantUserRow>();
   const sessions = new Map<string, OwnerSessionRow>();
   const tokens = new Map<string, OwnerTokenRow>();
+  const porders = new Map<string, PlatformOrderRow>();
+  const billing = new Map<string, TenantBillingRow>();
   let root: Store | null = null;
   const store: PlatformStore = {
     async insertTenantDomain(row) {
@@ -147,6 +149,72 @@ export function createMemoryPlatformStore() {
       const next = { ...t, used_at: nowIso };
       tokens.set(t.id, next);
       return clone(next);
+    },
+    async insertPlatformOrder(row) {
+      const live = (o: PlatformOrderRow) => o.status === "pending_payment" || o.status === "paid";
+      for (const o of porders.values()) {
+        if (o.order_no === row.order_no) throw new ServiceError("conflict", "資料重複");
+        if (row.kind === "new_site" && o.kind === "new_site" && row.slug && o.slug === row.slug && live(o)) throw new ServiceError("conflict", "資料重複");
+        if (row.kind === "renewal" && o.kind === "renewal" && o.tenant_id === row.tenant_id && o.period_start === row.period_start && live(o)) throw new ServiceError("conflict", "資料重複");
+      }
+      const r: PlatformOrderRow = { ...clone(row), id: randomUUID(), status: "pending_payment", gateway_order_no: null, payment_url: null, paid_at: null, paid_amount: null, query_failures: 0, provision_state: "none", provision_claimed_at: null, provision_attempts: 0, provision_error: null, provisioned_at: null, alerted_at: null, created_at: now(), updated_at: now() };
+      porders.set(r.id, r);
+      return clone(r);
+    },
+    async getPlatformOrderById(id) {
+      return clone(porders.get(id) ?? null);
+    },
+    async getPlatformOrderByNo(no) {
+      return clone([...porders.values()].find((o) => o.order_no === no) ?? null);
+    },
+    async getPlatformOrderByGatewayNo(no) {
+      return clone([...porders.values()].find((o) => o.gateway_order_no === no) ?? null);
+    },
+    async updatePlatformOrder(id, patch, where) {
+      const o = porders.get(id);
+      if (!o) return null;
+      if (where?.status && !where.status.includes(o.status)) return null;
+      if (where?.provision_state && !where.provision_state.includes(o.provision_state)) return null;
+      if (where?.gatewayIsNull && o.gateway_order_no) return null;
+      if (where?.alertedIsNull && o.alerted_at) return null;
+      if (patch.gateway_order_no && [...porders.values()].some((x) => x.id !== id && x.gateway_order_no === patch.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
+      const next = { ...o, ...clone(patch), updated_at: now() };
+      porders.set(id, next);
+      return clone(next);
+    },
+    async claimPlatformProvision(id, staleBeforeIso) {
+      const o = porders.get(id);
+      if (!o || o.status !== "paid") return null;
+      const ok = o.provision_state === "none" || o.provision_state === "failed" || (o.provision_state === "provisioning" && (o.provision_claimed_at ?? "") < staleBeforeIso);
+      if (!ok) return null;
+      const next: PlatformOrderRow = { ...o, provision_state: "provisioning", provision_claimed_at: now(), provision_attempts: o.provision_attempts + 1, updated_at: now() };
+      porders.set(id, next);
+      return clone(next);
+    },
+    async listPlatformOrders(opts) {
+      return clone([...porders.values()].filter((o) => (!opts.tenantId || o.tenant_id === opts.tenantId) && (!opts.status || opts.status.includes(o.status)) && (!opts.kind || o.kind === opts.kind)).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, opts.limit));
+    },
+    async listPlatformOrdersForSweep(nowIso, staleBeforeIso, limit) {
+      return clone([...porders.values()].filter((o) => (o.status === "pending_payment" && o.expires_at <= nowIso) || (o.status === "paid" && o.provision_attempts < 10 && (o.provision_state === "none" || o.provision_state === "failed" || (o.provision_state === "provisioning" && (o.provision_claimed_at ?? "") < staleBeforeIso)))).slice(0, limit));
+    },
+    async getTenantBilling(tenantId) {
+      return clone(billing.get(tenantId) ?? null);
+    },
+    async insertTenantBilling(row) {
+      if (billing.has(row.tenant_id)) return null;
+      const r: TenantBillingRow = { ...clone(row), status: "active", grace_until: null, cancel_at_period_end: false, suspended_at: null, created_at: now(), updated_at: now() };
+      billing.set(row.tenant_id, r);
+      return clone(r);
+    },
+    async updateTenantBilling(tenantId, patch, whereStatus) {
+      const b = billing.get(tenantId);
+      if (!b || (whereStatus && !whereStatus.includes(b.status))) return null;
+      const next = { ...b, ...clone(patch), updated_at: now() };
+      billing.set(tenantId, next);
+      return clone(next);
+    },
+    async listBillingDue(horizonIso, limit) {
+      return clone([...billing.values()].filter((b) => b.status !== "suspended" && b.paid_until <= horizonIso).slice(0, limit));
     },
     async invalidateOwnerTokens(userId, purpose) {
       for (const t of tokens.values()) if (t.user_id === userId && t.purpose === purpose && !t.used_at) tokens.set(t.id, { ...t, used_at: now() });

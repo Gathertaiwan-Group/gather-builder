@@ -79,6 +79,26 @@
 - **以店主身分檢視**：平台擁有者帶 admin cookie 開 `/owner/t/<slug>` → viewer 權限、頁面顯示唯讀橫幅、每次檢視寫稽核 `admin.view_as_owner`；所有表單送出一律拒絕。
 - **CSRF／cookie**：`/owner`、`/api/owner` 的 POST 由 middleware 檢查 Origin（同 `/admin`）；店主與平台後台 cookie 都是 host-only，啟用子網域後租戶網站拿不到。
 
+## 平台收費與自動開站（第九批：/build）
+
+```
+/build（勾模組，依賴自動帶入，即時試算）─POST─► builder_platform_orders（pending_payment，2h）─► 平台 PChomePay 付款頁（人付款；agent 不能代付）
+                                                         ▲                                         │
+                        cron 逾期前先回查 ───────────────┤                                         ▼ notify（無簽章，只取 order_id）
+                                                         └──── 權威回查 GET /v1/payment/{id}（環境＝建單環境、金額＝訂單）
+                                                                     │ 條件式 pending_payment|expired → paid（只成功一次）
+                                                                     ▼
+                                    claimPlatformProvision（同時只有一個在跑）→ 開站／加購開通／續費（每步冪等、失敗可重試）
+```
+
+- **計價**（`lib/platform/pricing.ts`，唯一入口）：必備 `core`（月費＝平台基本費）＋`sections-basic`；勾選的模組依 `requires` 自動帶入依賴；建置費＝`priceSetup` 合計、月費＝`priceMonthly` 合計；首次付款＝建置費＋第一個月。加購只算租戶還沒有的模組。🔴 價格只由 server 算：/build 表單只讀 modules／brandName／slug／themePreset／email，JSON 輸入是 strict（多送 price／total 直接拒絕）。
+- **平台訂單** `builder_platform_orders`（與租戶的 `builder_orders` 完全分開）：kind `new_site`／`add_modules`／`renewal`；`order_no` GP-台北日期-6 碼；存取金鑰只存 sha256（付款頁 `/build/orders/<編號>?k=`，no-referrer、noindex）。同一個網址代號同時只能有一張進行中的開站單（partial unique）、同一期續費單只一張（partial unique）。代號檢查：格式、保留字、已存在網站、進行中訂單；過期的待付款單在新單建立前先處理掉（有付款紀錄的先回查）。
+- **平台金流**（`lib/platform/payment.ts`）：平台自己的 PChomePay 帳號，env `PLATFORM_PCHOMEPAY_APP_ID`／`_SECRET`／`_SANDBOX`。🔴 沒設＝/build 只能試算、顯示「尚未開放付款」（正式站現況，老闆決定後才設）。sandbox 金鑰只在平台網址是 localhost，或帶後台產生的 1 小時測試簽章（`/build?t=`）時能結帳，**sandbox 訂單一律開 is_test 網站**。付款只開信用卡（holdHours 1，不給 ATM）。notify `/api/platform/pay/notify`：只取 `order_id` → 用平台憑證權威回查（回查環境必須等於建單環境）→ `status`=S 且金額相符才標記；回查失敗／無法辨識回 500 讓 PChomePay 重送；金額不符警示平台（每張只警示一次）。逾期前（cron）先回查：已付照常開站、失敗／處理中才標 expired、回查失敗這次不動。逾期後才付款也會接受並開站（代號被占用 → 開站失敗＋警示，人工處理）。
+- **自動開站**（`provisionPlatformOrder`）：`claimPlatformProvision` 條件式宣告（樂觀鎖 attempts＋狀態；10 分鐘未完成可重新宣告）。開站：`createSite`（系統身分、`platform_order_id` 寫進 `builder_tenants`，**unique＝一張平台訂單只開一個站**；重試時先用訂單找回已建的站）→ 開所選模組＋版型 → 首頁草稿（有 `GEMINI_API_KEY` 用 AI 產生標語／介紹／特色，否則模板文字；每個區塊 props 都經 schema 驗證，**不自動發布**，店主確認後發布）→ `builder_tenant_billing`（已購模組、月費、付到）→ 店主 owner 帳號邀請信（設定密碼，7 天）＋「網站已開好」信（網址、店主後台、MCP 連線說明）。**不發 MCP token**：引導店主在後台用 OAuth 連線或自己發行 token。失敗 → `failed`＋錯誤，cron 與付款頁重新整理會重試，第 3 次起（或代號被占用）警示平台。真 DB 測：同一張單併發 6 次 notify 只開一站。
+- **加購**（店主後台「方案與加購」、MCP `create_build_checkout` 帶 site）：同樣走平台訂單 → 付款 → `provisionAddon` 開通（已開的不動）＋月費與已購模組只加一次（以已購清單判斷，重試冪等）。🔴 經 /build 開的站，店主／token 不能直接 `enable_module` 未購買的付費模組（`enableModule` 檢查 `builder_tenant_billing.modules`，提示去加購）；平台後台不受限。
+- **月費（第一版：每月寄帳單連結）**：PChomePay 沒有定期定額扣款，所以不做自動扣款。到期前 7 天 cron 建續費單（kind=renewal，涵蓋下一期）並寄付款連結給店主；過期 → `past_due`（寬限 7 天，網站照常）→ 寬限結束 → `suspended`：`builder_tenants.status=suspended`（前台 404、資料全部保留）。店主到後台「付月費並恢復網站」（新的一期從付款時起算）→ 付款後恢復。停止續費（confirm）→ 不再寄帳單、到期後停站。
+- **MCP**：`get_build_quote`（報價，帶 site＝加購試算）、`create_build_checkout`（回傳付款連結，🔴 agent 不能代付）、`get_build_status`（訂單編號＋存取金鑰；平台 token 或該網站 token 免金鑰）。
+
 ## 會員（members 模組）
 
 平台自管帳號，**不用 Supabase Auth**（共用專案還住著其他客戶站）。
@@ -395,6 +415,9 @@
 | 團主自分潤判斷是盡力而為 | 比對 email、電話、收件地址（團主會員帳號與其歷史訂單）；團主用別人的資料下單無法辨識（第八批審查 L-2）。 | 團主需實名、付款帳號比對。 |
 | 銀行對帳只比金額＋末五碼／訂單號 | 同金額同末五碼的多張單（同一人買兩次）一律多重候選交人工；客人沒回報末五碼、備註也沒寫訂單號的轉帳不會配對。 | 每單產生獨特金額尾數或虛擬帳號（需銀行合作）。 |
 | ATM 虛擬帳號 | 只有 PChomePay 的 ATM（`pchomepayAtm`）；綠界／藍新的 ATM 第七批 adapter 未串。 | 依 adapter 能力加綠界 ATM。 |
+| 平台月費沒有自動扣款 | PChomePay 不支援定期扣款：每月寄帳單連結，店主要自己點付款；忘了付會在寬限 7 天後停站。 | 平台改用藍新信用卡定期定額（已有 adapter，`lib/services/subscriptions.ts` 的委託流程可複用）或年繳。 |
+| 平台訂單逾期後才付款 | 會接受並開站；代號若已被別人用掉 → 開站失敗＋警示，需人工改代號或退款（PChomePay 退款不支援 API）。 | 付款頁倒數＋付款前再檢查代號。 |
+| 退款與發票 | 平台收費沒有自動退款、沒有開平台自己的電子發票。 | 平台也接 Amego。 |
 | 模組啟用／停用即時生效 | 停用模組會讓已發布網站上該模組的區塊立即消失（`disable_module` 已拒絕草稿仍在使用的情況）。 | 把模組啟用狀態也納入快照。 |
 
 ## 擴充點
@@ -402,6 +425,5 @@
 | 需求 | 改哪裡 |
 |---|---|
 | OAuth 2.1 | 只換 `authenticateBearer()`：驗 access token → 同一個 `Actor` 形狀；scope 字串不變。屆時才提供 `/.well-known/oauth-protected-resource` |
-| 付款開通模組 | `builder_tenant_modules.status` 已有 `pending_setup`；加 `billing_status`／訂閱表，`enableModule` 前檢查付款；manifest 已有 `priceSetup/priceMonthly` |
 | 改用獨立 schema | 所有存取都經 `lib/store/supabase.ts`；換 schema 只需 `db.schema("builder")` ＋ migration 搬表（需在 PostgREST 暴露該 schema，屬專案層級設定，需另行協調） |
 | 草稿併發 | 目前最後寫入者勝；可在 `builder_site_drafts` 加 `version` 欄位做樂觀鎖 |

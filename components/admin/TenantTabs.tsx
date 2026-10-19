@@ -28,12 +28,13 @@ const OWNER_TABS = [
   { path: "/content", label: "內容編輯" },
   { path: "/team", label: "成員" },
   { path: "/tokens", label: "MCP 連線" },
+  { path: "/billing", label: "方案與加購" },
   { path: "/audit", label: "稽核紀錄" },
 ];
 
 export function TenantTabs({ bo, active, name }: { bo: Backoffice; active: string; name?: string }) {
   const slug = bo.slug;
-  const tabs = bo.mode === "owner" ? [...TABS, ...OWNER_TABS] : [...TABS, { path: "/content", label: "內容編輯" }, { path: "/team", label: "店主成員" }];
+  const tabs = bo.mode === "owner" ? [...TABS, ...OWNER_TABS] : [...TABS, { path: "/content", label: "內容編輯" }, { path: "/team", label: "店主成員" }, { path: "/billing", label: "平台月費" }];
   return (
     <>
       {name && (

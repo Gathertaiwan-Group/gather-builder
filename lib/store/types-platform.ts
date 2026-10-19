@@ -118,4 +118,82 @@ export interface OwnerStore {
   invalidateOwnerTokens(userId: string, purpose: OwnerTokenPurpose): Promise<void>;
 }
 
-export interface PlatformStore extends DomainStore, OwnerStore {}
+/* ------------------------------------------------------------------ 平台訂單與月費 */
+
+export type PlatformOrderKind = "new_site" | "add_modules" | "renewal";
+export type PlatformOrderStatus = "pending_payment" | "paid" | "expired" | "cancelled";
+export type ProvisionState = "none" | "provisioning" | "done" | "failed";
+
+export interface PlatformOrderRow {
+  id: string;
+  order_no: string;
+  kind: PlatformOrderKind;
+  tenant_id: string | null;
+  slug: string | null;
+  brand_name: string | null;
+  theme_preset: string | null;
+  contact_email: string;
+  modules: string[];
+  amount_setup: number;
+  amount_monthly: number;
+  amount_total: number;
+  period_start: string | null;
+  period_end: string | null;
+  status: PlatformOrderStatus;
+  sandbox: boolean;
+  is_test: boolean;
+  access_key_hash: string;
+  gateway_order_no: string | null;
+  payment_url: string | null;
+  paid_at: string | null;
+  paid_amount: number | null;
+  query_failures: number;
+  provision_state: ProvisionState;
+  provision_claimed_at: string | null;
+  provision_attempts: number;
+  provision_error: string | null;
+  provisioned_at: string | null;
+  alerted_at: string | null;
+  expires_at: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PlatformOrderInsert = Pick<PlatformOrderRow, "order_no" | "kind" | "tenant_id" | "slug" | "brand_name" | "theme_preset" | "contact_email" | "modules" | "amount_setup" | "amount_monthly" | "amount_total" | "period_start" | "period_end" | "sandbox" | "is_test" | "access_key_hash" | "expires_at" | "created_by">;
+export type PlatformOrderPatch = Partial<Pick<PlatformOrderRow, "access_key_hash" | "status" | "gateway_order_no" | "payment_url" | "paid_at" | "paid_amount" | "query_failures" | "provision_state" | "provision_error" | "provisioned_at" | "alerted_at" | "tenant_id" | "expires_at">>;
+
+export interface TenantBillingRow {
+  tenant_id: string;
+  modules: string[];
+  monthly_amount: number;
+  status: "active" | "past_due" | "suspended" | "cancelled";
+  paid_until: string;
+  grace_until: string | null;
+  cancel_at_period_end: boolean;
+  suspended_at: string | null;
+  is_test: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformBillingStore {
+  insertPlatformOrder(row: PlatformOrderInsert): Promise<PlatformOrderRow>;
+  getPlatformOrderById(id: string): Promise<PlatformOrderRow | null>;
+  getPlatformOrderByNo(orderNo: string): Promise<PlatformOrderRow | null>;
+  getPlatformOrderByGatewayNo(gatewayOrderNo: string): Promise<PlatformOrderRow | null>;
+  /** 條件式更新：where 的每個欄位都要相符（status 可給陣列；gatewayIsNull＝gateway_order_no 必須為 null） */
+  updatePlatformOrder(id: string, patch: PlatformOrderPatch, where?: { status?: PlatformOrderStatus[]; provision_state?: ProvisionState[]; gatewayIsNull?: boolean; alertedIsNull?: boolean }): Promise<PlatformOrderRow | null>;
+  /** 宣告開站／開通（已付款且 none／failed，或 provisioning 超過 staleBefore）：attempts+1、state=provisioning；同時只會有一個成功 */
+  claimPlatformProvision(id: string, staleBeforeIso: string): Promise<PlatformOrderRow | null>;
+  listPlatformOrders(opts: { tenantId?: string; status?: PlatformOrderStatus[]; kind?: PlatformOrderKind; limit: number }): Promise<PlatformOrderRow[]>;
+  /** cron：逾期的待付款單＋還沒開好站的已付款單 */
+  listPlatformOrdersForSweep(nowIso: string, staleBeforeIso: string, limit: number): Promise<PlatformOrderRow[]>;
+  getTenantBilling(tenantId: string): Promise<TenantBillingRow | null>;
+  insertTenantBilling(row: Pick<TenantBillingRow, "tenant_id" | "modules" | "monthly_amount" | "paid_until" | "is_test">): Promise<TenantBillingRow | null>;
+  updateTenantBilling(tenantId: string, patch: Partial<Pick<TenantBillingRow, "modules" | "monthly_amount" | "status" | "paid_until" | "grace_until" | "cancel_at_period_end" | "suspended_at">>, whereStatus?: TenantBillingRow["status"][]): Promise<TenantBillingRow | null>;
+  /** paid_until 早於 horizon 的（續費提醒、逾期、停權） */
+  listBillingDue(horizonIso: string, limit: number): Promise<TenantBillingRow[]>;
+}
+
+export interface PlatformStore extends DomainStore, OwnerStore, PlatformBillingStore {}

@@ -3,6 +3,10 @@ import { adminContext, requireAdminPage } from "@/lib/adminServer";
 import { listTenants } from "@/lib/services/sites";
 import { MODULES } from "@/modules/registry";
 import { THEME_PRESETS } from "@/lib/themes";
+import { platformPayConfig } from "@/lib/platform/payment";
+import { buildTestToken } from "@/lib/services/platform-billing";
+import { requireSecret } from "@/lib/secrets";
+import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +14,8 @@ export default async function AdminHome({ searchParams }: { searchParams: Promis
   await requireAdminPage();
   const sp = await searchParams;
   const tenants = await listTenants(adminContext());
+  const pay = platformPayConfig();
+  const porders = await getStore().listPlatformOrders({ limit: 20 });
   return (
     <AdminShell sp={sp}>
       <Card title={`網站（${tenants.length}）`}>
@@ -78,6 +84,26 @@ export default async function AdminHome({ searchParams }: { searchParams: Promis
             </button>
           </div>
         </form>
+      </Card>
+      <Card title="平台收費（/build）">
+        <p className="mt-0 text-sm" data-admin="platform-pay">
+          平台金流：{pay ? `PChomePay ${pay.sandbox ? "測試環境（sandbox）" : "正式"}` : "未設定（/build 只能試算、顯示尚未開放付款）"}
+          {pay?.sandbox && (
+            <>
+              {" "}
+              · <a href={`/build?t=${encodeURIComponent(buildTestToken(requireSecret("PREVIEW_SECRET")))}`}>測試結帳連結（1 小時，只會開 is_test 網站）</a>
+            </>
+          )}
+        </p>
+        <ul className="m-0 p-0 text-xs">
+          {porders.map((o) => (
+            <li key={o.id} className="list-none border-t py-1">
+              {o.order_no} · {o.kind} · {o.slug ?? o.brand_name} · NT${o.amount_total} · {o.status} · 開通 {o.provision_state}
+              {o.sandbox && "（sandbox）"}
+              {o.provision_error && ` · ${o.provision_error}`}
+            </li>
+          ))}
+        </ul>
       </Card>
     </AdminShell>
   );

@@ -209,6 +209,10 @@ claude mcp list          # 確認狀態 ✓ Connected
 | `get_scan_report` | orders:read | 掃描報表：商品 × 國家 × 語言的掃描、線上訂單、海外詢價與轉換率（國家只來自 Vercel geo、不存 IP） |
 | `create_brand_report_link` | marketing:write | 品牌唯讀報表連結（簽章、1–365 天到期、不含顧客資料）。**必須** `confirm: true` |
 | `revoke_brand_report_link` / `list_brand_report_links` | marketing:write | 撤銷（之後 404）／列出品牌報表連結 |
+| `get_build_quote` | — | 開站／加購報價（server 依註冊表算：依賴自動帶入、建置費、月費、首次付款）；帶 site＝只算該站還沒有的模組 |
+| `create_build_checkout` | — | 建平台訂單並回傳付款連結 `checkoutUrl`。🔴 **agent 不能代付**：把連結交給使用者本人付款。開新站帶 brandName／slug／email／modules；加購帶 site（或網站 token）＋modules。付款後自動開站／開通 |
+| `get_build_status` | — | 平台訂單狀態與開站進度（開新站的單要 accessKey；平台 token 或該網站 token 免） |
+| `list_domains` | site:read | 正式網址、子網域是否啟用、自有網域與要設定的 DNS（新增／啟用只能由店主在後台操作） |
 | `preview_changes` | site:read | 草稿 vs 已發布差異、發布前驗證、預覽網址 |
 | `publish_site` | publish | 發布草稿為新版本（**必須** `confirm: true`；建議帶 `expectedDraftVersion`，預覽後草稿被改過就拒絕） |
 | `list_revisions` | site:read | 版本列表 |

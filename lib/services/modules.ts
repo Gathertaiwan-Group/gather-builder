@@ -17,6 +17,15 @@ export async function enableModule(ctx: ServiceContext, input: { site?: string |
     throw e;
   }
   const target = getModule(input.moduleId)!;
+  // 第九批：經 /build 開的站（有平台月費）→ 付費模組要先購買（後台「方案與加購」／create_build_checkout），平台後台不受限
+  if (ctx.actor.kind !== "admin") {
+    const billing = await ctx.store.getTenantBilling(tenant.id);
+    if (billing) {
+      const enabledNow = new Set((await ctx.store.listTenantModules(tenant.id)).filter((m) => m.status !== "disabled").map((m) => m.module_id));
+      const unpaid = ids.filter((id) => !billing.modules.includes(id) && !enabledNow.has(id) && ((getModule(id)?.priceSetup ?? 0) > 0 || (getModule(id)?.priceMonthly ?? 0) > 0));
+      if (unpaid.length) throw new ServiceError("forbidden", `模組 ${unpaid.join(", ")} 需要先購買：請到店主後台「方案與加購」付款（或 MCP create_build_checkout 帶 site 產生付款連結），付款後會自動開通。`);
+    }
+  }
   if (input.config) {
     const r = target.settingsSchema.safeParse(input.config);
     if (!r.success) throw new ServiceError("invalid", `模組 ${input.moduleId} 設定不合法：${issues(r.error)}`);

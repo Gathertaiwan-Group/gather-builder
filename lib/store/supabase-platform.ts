@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ServiceError } from "../errors";
-import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformStore, TenantDomainRow, TenantUserRow } from "./types-platform";
+import type { OwnerSessionRow, OwnerTokenRow, OwnerUserRow, PlatformOrderRow, PlatformStore, TenantBillingRow, TenantDomainRow, TenantUserRow } from "./types-platform";
 
 type Res<T> = { data: T | null; error: { message: string; code?: string } | null };
 function must<T>(r: Res<T>, what: string): T {
@@ -13,6 +13,10 @@ function must<T>(r: Res<T>, what: string): T {
 const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 
 export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
+  const orderById = async (id: string) => {
+    if (!isUuid(id)) return null;
+    return must(await db.from("builder_platform_orders").select("*").eq("id", id).maybeSingle(), "getPlatformOrderById") as PlatformOrderRow | null;
+  };
   return {
     async insertTenantDomain(row) {
       const r = await db.from("builder_tenant_domains").insert(row).select("*").single();
@@ -117,6 +121,77 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
     },
     async invalidateOwnerTokens(userId, purpose) {
       must(await db.from("builder_owner_tokens").update({ used_at: new Date().toISOString() }).eq("user_id", userId).eq("purpose", purpose).is("used_at", null), "invalidateOwnerTokens");
+    },
+    async insertPlatformOrder(row) {
+      return must(await db.from("builder_platform_orders").insert(row).select("*").single(), "insertPlatformOrder") as PlatformOrderRow;
+    },
+    getPlatformOrderById: orderById,
+    async getPlatformOrderByNo(no) {
+      if (!/^GP-\d{8}-[A-Z0-9]{6}$/.test(no)) return null;
+      return must(await db.from("builder_platform_orders").select("*").eq("order_no", no).maybeSingle(), "getPlatformOrderByNo") as PlatformOrderRow | null;
+    },
+    async getPlatformOrderByGatewayNo(no) {
+      if (!/^[A-Za-z0-9]{1,20}$/.test(no)) return null;
+      return must(await db.from("builder_platform_orders").select("*").eq("gateway_order_no", no).maybeSingle(), "getPlatformOrderByGatewayNo") as PlatformOrderRow | null;
+    },
+    async updatePlatformOrder(id, patch, where) {
+      if (!isUuid(id)) return null;
+      let q = db.from("builder_platform_orders").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+      if (where?.status) q = q.in("status", where.status);
+      if (where?.provision_state) q = q.in("provision_state", where.provision_state);
+      if (where?.gatewayIsNull) q = q.is("gateway_order_no", null);
+      if (where?.alertedIsNull) q = q.is("alerted_at", null);
+      const rows = (must(await q.select("*"), "updatePlatformOrder") ?? []) as PlatformOrderRow[];
+      return rows[0] ?? null;
+    },
+    async claimPlatformProvision(id, staleBeforeIso) {
+      const cur = await orderById(id);
+      if (!cur || cur.status !== "paid") return null;
+      // 樂觀鎖：attempts 必須還是讀到的值＋狀態條件，同時只有一個宣告成功
+      const rows = (must(
+        await db
+          .from("builder_platform_orders")
+          .update({ provision_state: "provisioning", provision_claimed_at: new Date().toISOString(), provision_attempts: cur.provision_attempts + 1, updated_at: new Date().toISOString() })
+          .eq("id", id)
+          .eq("status", "paid")
+          .eq("provision_attempts", cur.provision_attempts)
+          .or(`provision_state.in.(none,failed),and(provision_state.eq.provisioning,provision_claimed_at.lt.${staleBeforeIso})`)
+          .select("*"),
+        "claimPlatformProvision",
+      ) ?? []) as PlatformOrderRow[];
+      return rows[0] ?? null;
+    },
+    async listPlatformOrders(opts) {
+      let q = db.from("builder_platform_orders").select("*");
+      if (opts.tenantId) q = q.eq("tenant_id", opts.tenantId);
+      if (opts.status) q = q.in("status", opts.status);
+      if (opts.kind) q = q.eq("kind", opts.kind);
+      return (must(await q.order("created_at", { ascending: false }).limit(opts.limit), "listPlatformOrders") ?? []) as PlatformOrderRow[];
+    },
+    async listPlatformOrdersForSweep(nowIso, staleBeforeIso, limit) {
+      const a = (must(await db.from("builder_platform_orders").select("*").eq("status", "pending_payment").lte("expires_at", nowIso).limit(limit), "sweepPending") ?? []) as PlatformOrderRow[];
+      const b = (must(
+        await db.from("builder_platform_orders").select("*").eq("status", "paid").lt("provision_attempts", 10).or(`provision_state.in.(none,failed),and(provision_state.eq.provisioning,provision_claimed_at.lt.${staleBeforeIso})`).limit(limit),
+        "sweepProvision",
+      ) ?? []) as PlatformOrderRow[];
+      return [...a, ...b];
+    },
+    async getTenantBilling(tenantId) {
+      return must(await db.from("builder_tenant_billing").select("*").eq("tenant_id", tenantId).maybeSingle(), "getTenantBilling") as TenantBillingRow | null;
+    },
+    async insertTenantBilling(row) {
+      const r = await db.from("builder_tenant_billing").insert(row).select("*").single();
+      if (r.error?.code === "23505") return null;
+      return must(r, "insertTenantBilling") as TenantBillingRow;
+    },
+    async updateTenantBilling(tenantId, patch, whereStatus) {
+      let q = db.from("builder_tenant_billing").update({ ...patch, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId);
+      if (whereStatus) q = q.in("status", whereStatus);
+      const rows = (must(await q.select("*"), "updateTenantBilling") ?? []) as TenantBillingRow[];
+      return rows[0] ?? null;
+    },
+    async listBillingDue(horizonIso, limit) {
+      return (must(await db.from("builder_tenant_billing").select("*").neq("status", "suspended").lte("paid_until", horizonIso).order("paid_until").limit(limit), "listBillingDue") ?? []) as TenantBillingRow[];
     },
     async listPendingDomains(limit) {
       return (must(await db.from("builder_tenant_domains").select("*").eq("status", "pending").order("last_checked_at", { ascending: true, nullsFirst: true }).limit(limit), "listPendingDomains") ?? []) as TenantDomainRow[];
