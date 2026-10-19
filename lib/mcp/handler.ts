@@ -57,7 +57,19 @@ export async function handleMcp(req: Request, store: Store): Promise<Response> {
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   try {
-    return await transport.handleRequest(req);
+    const res = await transport.handleRequest(req);
+    // 第九批審查 M4：OAuth token 的 scope 不足 → HTTP 403＋WWW-Authenticate insufficient_scope（step-up）；手動 token 維持工具錯誤
+    if (actor.oauthGrantId && res.status === 200 && (res.headers.get("content-type") ?? "").includes("application/json")) {
+      const text = await res.text();
+      const need = /\[forbidden\] 權限不足：這個動作需要 scope「([a-z:]+)」/.exec(text)?.[1];
+      const headers = new Headers(res.headers);
+      if (need) {
+        headers.set("www-authenticate", wwwAuthenticate(oauthConfig(baseUrlFrom(req)), "insufficient_scope", [need]));
+        return new Response(text, { status: 403, headers });
+      }
+      return new Response(text, { status: res.status, headers });
+    }
+    return res;
   } finally {
     void server.close().catch(() => undefined);
   }

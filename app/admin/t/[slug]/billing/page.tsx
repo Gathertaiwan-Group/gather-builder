@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 const STATUS = { active: "使用中", past_due: "逾期（寬限期）", suspended: "已停站", cancelled: "已停止續費" } as const;
-const OSTATUS = { pending_payment: "待付款", paid: "已付款", expired: "已逾期", cancelled: "已取消" } as const;
+const OSTATUS = { pending_payment: "待付款", paid: "已付款", expired: "已逾期", cancelled: "已取消", paid_needs_attention: "已付款（需人工處理）" } as const;
 
 /** 方案與加購：平台月費狀態、加購模組（付款後自動開通）、停止／恢復續費、待付款單付款 */
 export default async function BillingPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<{ ok?: string; err?: string }> }) {

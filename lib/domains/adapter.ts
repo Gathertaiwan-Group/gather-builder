@@ -136,3 +136,29 @@ export function getDomainAdapter(env: Record<string, string | undefined> = proce
   if (env.VERCEL_DOMAINS_TOKEN && env.VERCEL_DOMAINS_PROJECT_ID) return createVercelDomainAdapter({ token: env.VERCEL_DOMAINS_TOKEN, projectId: env.VERCEL_DOMAINS_PROJECT_ID, teamId: env.VERCEL_DOMAINS_TEAM_ID });
   return null;
 }
+
+/**
+ * 所有權驗證（第九批審查 M1）：除了 Vercel verified，**還要**在網域放這個租戶專屬的 TXT
+ * `_gather-verify.<網域>` = `gather-verify=<token>`，證明加網域的人真的控制 DNS（避免別人先加走你的網域）。
+ */
+export type TxtVerifier = (name: string, expected: string) => Promise<boolean>;
+
+export const OWNERSHIP_TXT_PREFIX = "_gather-verify";
+export const ownershipTxt = (domain: string, token: string): DnsRecord => ({ type: "TXT", name: `${OWNERSHIP_TXT_PREFIX}.${domain}`, value: `gather-verify=${token}`, reason: "證明你擁有這個網域（Gather 專屬，每個網站不同）" });
+
+export const dnsTxtVerifier: TxtVerifier = async (name, expected) => {
+  const { resolveTxt } = await import("node:dns/promises");
+  try {
+    const rows = await resolveTxt(name);
+    return rows.some((parts) => parts.join("") === `gather-verify=${expected}`);
+  } catch {
+    return false;
+  }
+};
+
+/** mock（本機／e2e）：.test／.localhost／.example 結尾的網域一律通過，其他不通過 */
+export const mockTxtVerifier: TxtVerifier = async (name) => /\.(test|localhost|example)$/.test(name);
+
+export function getTxtVerifier(env: Record<string, string | undefined> = process.env): TxtVerifier {
+  return env.DOMAIN_ADAPTER === "mock" ? mockTxtVerifier : dnsTxtVerifier;
+}

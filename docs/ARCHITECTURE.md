@@ -32,6 +32,7 @@
 - **正式網址只有一個產生處**（`lib/site-url.ts`）：已啟用的自有網域（`builder_tenants.primary_domain`）→ 子網域 → `/s/<slug>`。信件連結、預覽網址（`preview_changes`）、`publish_site` 回傳網址、付款／訂閱導回（`/p/r`、`/p/sr`）、sitemap、robots、canonical、hreflang、og:url 都用它。站內連結用 `site.basePath`（租戶 host 上是空字串）。子網域／自有網域的協定與 port 跟著平台網址（本機 `http://<slug>.sites.test:3250`）。啟用自有網域後，子網域 GET 也 301 過去。
 - **cookie**：會員 session、推薦碼、選店 binding、QR 歸因 cookie 在租戶 host 上一律 **host-only（不帶 Domain）、path `/`**；路徑模式維持 `path=/s/<slug>`（`siteCookiePath`）。
 - **自有網域流程**（`lib/services/domains.ts`；只有平台後台或店主 owner 角色，`requireFormCredential`）：`addDomain` → adapter 加到 Vercel 專案、回傳要設定的 DNS（根網域 A `76.76.21.21`、子網域 CNAME `cname.vercel-dns.com`、必要時 TXT 所有權驗證）→ pending → 後台「重新檢查」或每日 cron（`sweepPendingDomains`）→ Vercel 回報 verified 且 DNS 沒有 misconfigured → verified → `activateDomain`（confirm）呼叫 `builder_activate_domain`（單一交易：舊的 active 降回 verified、這筆 active、寫 `primary_domain`）。移除會從 Vercel 專案移掉並清掉 `primary_domain`。同一網域只能屬於一個租戶（unique），每租戶只有一個 active（partial unique）。
+- **防搶佔（第九批審查 M1）**：除了 Vercel verified＋DNS 沒 misconfigured，**還必須**通過這個租戶專屬的 TXT `_gather-verify.<網域>` = `gather-verify=<隨機 token>`（每個網站、每次加入都不同），才會轉 verified。pending 7 天沒驗證 → cron 從 Vercel 專案移除並刪除（釋放）。曾驗證過的網域被移除後 7 天冷卻期內只有原網站能加回（`builder_domain_releases`，只增不改）；pending 的移除／過期不給冷卻期（不讓搶佔者拿冷卻期卡住真正的擁有者）。已知限制：別人搶先加入、還在 pending 的網域，真正的擁有者最多要等 7 天（或請平台刪除）。
 - **adapter**（`lib/domains/adapter.ts`）：`createVercelDomainAdapter`（`VERCEL_DOMAINS_TOKEN`、`VERCEL_DOMAINS_PROJECT_ID`、`VERCEL_DOMAINS_TEAM_ID`）與 `createMockDomainAdapter`（`DOMAIN_ADAPTER=mock`，本機／e2e）。🔴 測試與驗收從未呼叫 Vercel API（Vercel adapter 只用假 fetch 測請求形狀）。沒設 env 時後台顯示「平台尚未設定網域 API」，新增會被拒。
 
 ## MCP OAuth 2.1（第九批）
@@ -45,7 +46,7 @@
 - refresh token：30 天、每次使用就輪替（條件更新只成功一次）；已輪替的再出現（或 client 不符）→ 視為外洩、撤銷整個授權（真 DB：併發 5 次只成功 1 次、其餘觸發撤銷）。
 - 撤銷：店主後台「MCP 連線」列出這個網站的授權（client 名稱、店主、scopes、最後使用）可撤銷；`/oauth/revoke`；成員停用立即失效。
 - 限流：註冊每 IP 每小時 20、token 每 IP 每 10 分鐘 120（`builder_rate_hit`）。CORS：metadata、register、token、revoke 允許任意 origin（不帶 credentials）。
-- 已知限制：scope 不足時回工具錯誤而不是 HTTP 403 `insufficient_scope`（無狀態 server 在解析工具前不知道需要哪個 scope）；CIMD 的 DNS 檢查與實際連線之間有 DNS rebinding 的時間差（另有不跟隨轉址、5 秒、16KB 限制）。
+- **第九批審查修正**：401 只要求 `site:read`、沒帶 scope 只給 `site:read`；OAuth token 的 scope 不足 → handler 把工具的 `[forbidden] 權限不足：需要 scope「X」` 轉成 HTTP 403＋`insufficient_scope`＋`scope="X"`（step-up；手動 token 維持工具錯誤）。同意頁列出全部網站 scope（分讀取／修改／危險，寫入與危險預設不勾，店主可勾比請求更多的權限）。refresh token 從同意起絕對壽命 90 天。CIMD 抓取：連線釘選在檢查過的 IP（https.request 的 lookup＋原主機名 SNI，消除 DNS rebinding）、IPv6 保留段黑名單、每 IP 限流、錯誤不回傳對方內容。授權請求沒帶 redirect_uri 時 token 端點也可不帶（`builder_oauth_codes.redirect_explicit`）。
 
 ## 內容模型：草稿／發布快照／版本
 
@@ -90,6 +91,8 @@
   平台後台限定的動作（手動調整上限、平台 token、建站）仍只限 admin actor。
 - **頁面共用**：`app/admin/t/[slug]/*` 的頁面與 `app/api/admin/tenants/[slug]/*` 的 route 改用 `lib/backoffice.ts`（`requireBackoffice`／`backofficeForm`），`app/owner/t/[slug]/*`、`app/api/owner/tenants/[slug]/*` 只是 re-export 同一支（單元測試檢查每支都有對應）。入口由 middleware 依路徑設 `x-gb-bo`（客戶端送的會被刪）。店主不是這個網站的啟用中成員 → 404。店主專用分頁：內容編輯、成員、MCP 連線（發行／撤銷自己網站的 token、OAuth 授權列表）、稽核紀錄。
 - **以店主身分檢視**：平台擁有者帶 admin cookie 開 `/owner/t/<slug>` → viewer 權限、頁面顯示唯讀橫幅、每次檢視寫稽核 `admin.view_as_owner`；所有表單送出一律拒絕。
+- **第九批審查修正**：TOTP 啟用／停用都要重新輸入密碼；啟用時發 8 組一次性復原碼（只存 sha256，`builder_owner_use_recovery` 原子用一次，真 DB 併發 4 次只成功 1 次）；平台擁有者可在「店主成員」重設某位店主的二步驟（confirm＋稽核＋登出所有裝置）。登入另有只看 email 的門檻（每小時 20 次，超過延遲 1.5 秒、不鎖死）。重新邀請改角色也保留至少一位 owner。手動 MCP token 記錄建立者，停用／降級成員時提示並可一鍵撤銷他建立的 token。重設密碼、登出所有裝置會一併撤銷這個帳號的所有 OAuth 授權；每位成員在「帳號」頁看得到並能撤銷自己同意過的授權。「以店主身分檢視」的 API 存取（含 GET 下載名單）也寫稽核。
+- **信件 log（L12）**：沒設 `RESEND_API_KEY` 時，正式環境（`NODE_ENV=production`）只記「未寄出」，不記內容（邀請／重設／登入連結）；本機開發才印內容（`MAIL_LOG_BODIES=1` 可在本機 next start 時強制印出）。
 - **CSRF／cookie**：`/owner`、`/api/owner` 的 POST 由 middleware 檢查 Origin（同 `/admin`）；店主與平台後台 cookie 都是 host-only，啟用子網域後租戶網站拿不到。
 
 ## 平台收費與自動開站（第九批：/build）
@@ -106,9 +109,9 @@
 
 - **計價**（`lib/platform/pricing.ts`，唯一入口）：必備 `core`（月費＝平台基本費）＋`sections-basic`；勾選的模組依 `requires` 自動帶入依賴；建置費＝`priceSetup` 合計、月費＝`priceMonthly` 合計；首次付款＝建置費＋第一個月。加購只算租戶還沒有的模組。🔴 價格只由 server 算：/build 表單只讀 modules／brandName／slug／themePreset／email，JSON 輸入是 strict（多送 price／total 直接拒絕）。
 - **平台訂單** `builder_platform_orders`（與租戶的 `builder_orders` 完全分開）：kind `new_site`／`add_modules`／`renewal`；`order_no` GP-台北日期-6 碼；存取金鑰只存 sha256（付款頁 `/build/orders/<編號>?k=`，no-referrer、noindex）。同一個網址代號同時只能有一張進行中的開站單（partial unique）、同一期續費單只一張（partial unique）。代號檢查：格式、保留字、已存在網站、進行中訂單；過期的待付款單在新單建立前先處理掉（有付款紀錄的先回查）。
-- **平台金流**（`lib/platform/payment.ts`）：平台自己的 PChomePay 帳號，env `PLATFORM_PCHOMEPAY_APP_ID`／`_SECRET`／`_SANDBOX`。🔴 沒設＝/build 只能試算、顯示「尚未開放付款」（正式站現況，老闆決定後才設）。sandbox 金鑰只在平台網址是 localhost，或帶後台產生的 1 小時測試簽章（`/build?t=`）時能結帳，**sandbox 訂單一律開 is_test 網站**。付款只開信用卡（holdHours 1，不給 ATM）。notify `/api/platform/pay/notify`：只取 `order_id` → 用平台憑證權威回查（回查環境必須等於建單環境）→ `status`=S 且金額相符才標記；回查失敗／無法辨識回 500 讓 PChomePay 重送；金額不符警示平台（每張只警示一次）。逾期前（cron）先回查：已付照常開站、失敗／處理中才標 expired、回查失敗這次不動。逾期後才付款也會接受並開站（代號被占用 → 開站失敗＋警示，人工處理）。
+- **平台金流**（`lib/platform/payment.ts`）：平台自己的 PChomePay 帳號，env `PLATFORM_PCHOMEPAY_APP_ID`／`_SECRET`／`_SANDBOX`。🔴 沒設＝/build 只能試算、顯示「尚未開放付款」（正式站現況，老闆決定後才設）。sandbox 金鑰只在平台網址是 localhost，或帶後台產生的 1 小時測試簽章（`/build?t=`）時能結帳，**sandbox 訂單一律開 is_test 網站**。付款只開信用卡（holdHours 1，不給 ATM）。notify `/api/platform/pay/notify`：只取 `order_id` → 用平台憑證權威回查（回查環境必須等於建單環境）→ `status`=S 且金額相符才標記；回查失敗／無法辨識回 500 讓 PChomePay 重送；金額不符警示平台（每張只警示一次）。逾期前（cron）先回查：已付照常開站、失敗／處理中才標 expired、回查失敗這次不動。逾期後才付款也會接受並開站；**代號已被占用（另一張進行中的單或已存在的網站）→ 標 `paid_needs_attention`（已收款、需人工處理）、notify 回成功（不讓 PChomePay 無限重送）、立即警示平台並寄信給付款人說明會人工處理**（第九批審查 M2）。cron 也會回查 14 天內「逾期但已建立付款」的單；釋放過期代號前回查是處理中（P）時不釋放。
 - **自動開站**（`provisionPlatformOrder`）：`claimPlatformProvision` 條件式宣告（樂觀鎖 attempts＋狀態；10 分鐘未完成可重新宣告）。開站：`createSite`（系統身分、`platform_order_id` 寫進 `builder_tenants`，**unique＝一張平台訂單只開一個站**；重試時先用訂單找回已建的站）→ 開所選模組＋版型 → 首頁草稿（有 `GEMINI_API_KEY` 用 AI 產生標語／介紹／特色，否則模板文字；每個區塊 props 都經 schema 驗證，**不自動發布**，店主確認後發布）→ `builder_tenant_billing`（已購模組、月費、付到）→ 店主 owner 帳號邀請信（設定密碼，7 天）＋「網站已開好」信（網址、店主後台、MCP 連線說明）。**不發 MCP token**：引導店主在後台用 OAuth 連線或自己發行 token。失敗 → `failed`＋錯誤，cron 與付款頁重新整理會重試，第 3 次起（或代號被占用）警示平台。真 DB 測：同一張單併發 6 次 notify 只開一站。
-- **加購**（店主後台「方案與加購」、MCP `create_build_checkout` 帶 site）：同樣走平台訂單 → 付款 → `provisionAddon` 開通（已開的不動）＋月費與已購模組只加一次（以已購清單判斷，重試冪等）。🔴 經 /build 開的站，店主／token 不能直接 `enable_module` 未購買的付費模組（`enableModule` 檢查 `builder_tenant_billing.modules`，提示去加購）；平台後台不受限。
+- **加購**（店主後台「方案與加購」、MCP `create_build_checkout` 帶 site）：同樣走平台訂單 → 付款 → `provisionAddon` 開通（已開的不動）；**月費＝已購模組集合的 priceMonthly 合計重算（不累加，第九批審查 L11）**；已有含重疊模組、未逾期的待付款加購單時拒絕再建。🔴 經 /build 開的站，店主／token 不能直接 `enable_module` 未購買的付費模組（`enableModule` 檢查 `builder_tenant_billing.modules`，提示去加購）；平台後台不受限。
 - **月費（第一版：每月寄帳單連結）**：PChomePay 沒有定期定額扣款，所以不做自動扣款。到期前 7 天 cron 建續費單（kind=renewal，涵蓋下一期）並寄付款連結給店主；過期 → `past_due`（寬限 7 天，網站照常）→ 寬限結束 → `suspended`：`builder_tenants.status=suspended`（前台 404、資料全部保留）。店主到後台「付月費並恢復網站」（新的一期從付款時起算）→ 付款後恢復。停止續費（confirm）→ 不再寄帳單、到期後停站。
 - **MCP**：`get_build_quote`（報價，帶 site＝加購試算）、`create_build_checkout`（回傳付款連結，🔴 agent 不能代付）、`get_build_status`（訂單編號＋存取金鑰；平台 token 或該網站 token 免金鑰）。
 

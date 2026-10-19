@@ -28,6 +28,7 @@ describe.skipIf(!enabled)("平台訂單與自動開站（整合）", () => {
     for (const k of ["PLATFORM_PCHOMEPAY_APP_ID", "PLATFORM_PCHOMEPAY_SECRET", "PLATFORM_PCHOMEPAY_SANDBOX"] as const) if (process.env[k] === undefined) delete process.env[k];
     await db.from("builder_tenants").delete().like("slug", `itbuild-%${ts}%`);
     await db.from("builder_platform_orders").delete().like("contact_email", `%${ts}%`);
+    await db.from("builder_tenants").delete().like("slug", `itbuild-late-${ts}%`);
     await db.from("builder_owner_users").delete().like("email", `%${ts}%`);
     expect((await db.from("builder_platform_orders").select("id").like("contact_email", `%${ts}%`)).data).toEqual([]);
   });
@@ -73,5 +74,36 @@ describe.skipIf(!enabled)("平台訂單與自動開站（整合）", () => {
     const start = new Date(Date.now() + 30 * 86400_000).toISOString();
     await ins(start);
     await expect(ins(start)).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("第九批審查 M2：逾期後才付款、代號已被新單占用 → 真 DB 唯一索引衝突時標 paid_needs_attention、notify 200、不重開站", async () => {
+    clearPchomepayTokenCache();
+    const slug2 = `itbuild-late-${ts}`;
+    const paid = new Map<string, number>();
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      const u = new URL(url);
+      const j = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+      if (u.pathname === "/v1/token") return j({ token: "t", expired_timestamp: Math.floor(Date.now() / 1000) + 1800 });
+      if (u.pathname === "/v1/payment" && init.method === "POST") return j({ payment_url: "https://sandbox-pay.example/x" });
+      const id = decodeURIComponent(u.pathname.split("/").pop()!);
+      return j(paid.has(id) ? { status: "S", amount: paid.get(id) } : { status: "F" });
+    };
+    const sent: string[] = [];
+    const deps: PlatformDeps = { store, baseUrl: "https://itest.example", previewSecret: process.env.PREVIEW_SECRET!, fetchImpl, gemini: null, sendMail: async (_to, subject) => void sent.push(subject) };
+    const a = await createBuildOrder(deps, { modules: [], brandName: "逾期", slug: slug2, email: `late-a-${ts}@example.com` }, { by: "itest", allowSandbox: true });
+    await startPlatformCheckout(deps, { orderNo: a.order.order_no, accessKey: a.accessKey });
+    await db.from("builder_platform_orders").update({ status: "expired" }).eq("id", a.order.id);
+    const b = await createBuildOrder(deps, { modules: [], brandName: "新的人", slug: slug2, email: `late-b-${ts}@example.com` }, { by: "itest", allowSandbox: true });
+    const gwA = (await store.getPlatformOrderByNo(a.order.order_no))!.gateway_order_no!;
+    paid.set(gwA, a.order.amount_total);
+    const body = new URLSearchParams({ notify_type: "order_confirm", notify_message: JSON.stringify({ order_id: gwA }) }).toString();
+    const r = await handlePlatformNotify(deps, body);
+    expect(r).toMatchObject({ status: 200, outcome: "paid_needs_attention" });
+    expect((await store.getPlatformOrderById(a.order.id))!).toMatchObject({ status: "paid_needs_attention", paid_amount: a.order.amount_total });
+    expect((await store.getPlatformOrderById(b.order.id))!.status).toBe("pending_payment");
+    expect((await handlePlatformNotify(deps, body)).status).toBe(200);
+    expect(sent.filter((x) => x.includes("平台訂單需要處理"))).toHaveLength(1);
+    expect(sent.some((x) => x.includes("已收到你的付款"))).toBe(true);
+    expect((await db.from("builder_tenants").select("id").eq("slug", slug2)).data).toEqual([]);
   });
 });

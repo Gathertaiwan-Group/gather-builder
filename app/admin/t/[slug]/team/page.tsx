@@ -56,7 +56,20 @@ export default async function TeamPage({ params, searchParams }: { params: Promi
                       <label className="flex items-center gap-1">
                         <input type="checkbox" name="confirm" /> 確認
                       </label>
+                      <label className="flex items-center gap-1">
+                        <input type="checkbox" name="revokeTokens" /> 停用／降級時一併撤銷他建立的 MCP token
+                      </label>
                       <button className="rounded border px-2" type="submit">更新</button>
+                    </form>
+                  )}
+                  {bo.role === "admin" && m.totp && (
+                    <form action={act} method="post" className="mt-1 flex items-center gap-1 text-xs">
+                      <input type="hidden" name="action" value="reset_totp" />
+                      <input type="hidden" name="membershipId" value={m.id} />
+                      <label className="flex items-center gap-1">
+                        <input type="checkbox" name="confirm" required /> 已確認本人身分
+                      </label>
+                      <button className="rounded border px-2" type="submit">重設二步驟驗證</button>
                     </form>
                   )}
                 </td>

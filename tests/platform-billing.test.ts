@@ -20,6 +20,7 @@ import {
   sweepPlatformBilling,
   requestRenewalOrder,
   verifyBuildTestToken,
+  monthlyFor,
   type PlatformDeps,
 } from "@/lib/services/platform-billing";
 import { ownerActor } from "@/lib/services/owners";
@@ -172,7 +173,7 @@ describe("付款權威確認才開站", () => {
     expect(st).toMatchObject({ status: "paid", provisionState: "done", ownerUrl: "https://builder.example/owner/t/lin-pay" });
   });
 
-  it("開站失敗可重試且不重複開站：代號在付款期間被占用 → failed＋警示；cron 重試不會多建", async () => {
+  it("開站時代號已被占用 → paid_needs_attention＋警示＋通知付款人；cron 重試不會多建", async () => {
     const store = newStore();
     const e = env(store);
     const r = await createBuildOrder(e.deps, input("lin-fail"), { by: "t", allowSandbox: true });
@@ -180,11 +181,14 @@ describe("付款權威確認才開站", () => {
     const gw = (await store.getPlatformOrderByNo(r.order.order_no))!.gateway_order_no!;
     await createSite(ctxFor(store), { slug: "lin-fail", name: "搶先的人" });
     e.pc.st.status.set(gw, { status: "S", amount: r.order.amount_total });
-    expect((await e.notify(gw)).outcome).toBe("provision_failed");
+    // 第九批審查 M2：重試也不會成功 → paid_needs_attention、notify 回 200（不讓金流無限重送）、警示平台＋寄信給付款人
+    expect(await e.notify(gw)).toMatchObject({ status: 200, outcome: "paid_needs_attention" });
     const o = (await store.getPlatformOrderByNo(r.order.order_no))!;
-    expect(o).toMatchObject({ status: "paid", provision_state: "failed" });
+    expect(o).toMatchObject({ status: "paid_needs_attention", provision_state: "failed" });
     expect(o.provision_error).toMatch(/網址代號/);
     expect(e.sent.some((m) => m.subject.includes("平台訂單需要處理"))).toBe(true);
+    expect(e.sent.some((m) => m.to === "boss@example.com" && m.subject.includes("已收到你的付款"))).toBe(true);
+    expect((await e.notify(gw)).status).toBe(200);
     await sweepPlatformBilling(e.deps);
     expect((await store.listTenants()).filter((t) => t.slug === "lin-fail")).toHaveLength(1);
   });
@@ -253,8 +257,15 @@ describe("加購與月費", () => {
     expect((await store.listTenantModules(s.t.id)).find((m) => m.module_id === "blog")?.status).not.toBe("disabled");
     expect((await store.getTenantBilling(s.t.id))!.monthly_amount).toBe(before + 200);
     await expect(createAddonOrder(s.ctx, { modules: ["blog"] })).rejects.toThrow(/都已經開通/);
+    // 第九批審查 L11：月費＝已購模組集合重算（不是累加）
+    const bb = (await store.getTenantBilling(s.t.id))!;
+    expect(bb.monthly_amount).toBe(monthlyFor(bb.modules));
+    // 重疊的待付款加購單 → 拒絕
+    await createAddonOrder(s.ctx, { modules: ["newsletter"] });
+    await expect(createAddonOrder(s.ctx, { modules: ["newsletter", "search"] })).rejects.toThrow(/待付款加購單/);
+    await expect(createAddonOrder(s.ctx, { modules: ["search"] })).resolves.toBeTruthy();
     // 平台後台不受付費限制
-    await expect(enableModule(ctxFor(store), { site: "lin-addon", moduleId: "newsletter" })).resolves.toBeTruthy();
+    await expect(enableModule(ctxFor(store), { site: "lin-addon", moduleId: "ai-chat" })).resolves.toBeTruthy();
   });
 
   it("續約：到期前 7 天建續費單並寄帳單（同一期只一張）；過期進寬限；寬限結束停站（不刪資料）；付款後恢復", async () => {
@@ -303,3 +314,33 @@ describe("加購與月費", () => {
     await expect(setRenewal(editor, { cancel: false })).rejects.toMatchObject({ code: "forbidden" });
   });
 });
+
+describe("第九批審查 M2：逾期後才付款", () => {
+  it("逾期單之後才付款、代號已被新單占用 → paid_needs_attention（notify 200、警示、通知付款人）；sweep 會回查逾期但有付款的單；處理中（P）不釋放代號", async () => {
+    const store = newStore();
+    const e = env(store);
+    const a = await createBuildOrder(e.deps, input("lin-late"), { by: "t", allowSandbox: true });
+    await startPlatformCheckout(e.deps, { orderNo: a.order.order_no, accessKey: a.accessKey });
+    const gwA = (await store.getPlatformOrderByNo(a.order.order_no))!.gateway_order_no!;
+    // 過期了、但回查是處理中（P）→ 不釋放代號，別人不能搶
+    await store.updatePlatformOrder(a.order.id, { expires_at: new Date(Date.now() - 1000).toISOString() });
+    e.pc.st.status.set(gwA, { status: "P", amount: a.order.amount_total });
+    await expect(createBuildOrder(e.deps, input("lin-late", { email: "b@example.com" }), { by: "t", allowSandbox: true })).rejects.toMatchObject({ code: "conflict" });
+    // 回查失敗 → 標 expired；新的人拿到代號
+    e.pc.st.status.set(gwA, { status: "F" });
+    const b = await createBuildOrder(e.deps, input("lin-late", { email: "b@example.com" }), { by: "t", allowSandbox: true });
+    expect((await store.getPlatformOrderById(a.order.id))!.status).toBe("expired");
+    // A 其實後來付款成功了（金流回查變 S）→ sweep 回查逾期單 → 撞代號 → paid_needs_attention
+    e.pc.st.status.set(gwA, { status: "S", amount: a.order.amount_total });
+    const r = await sweepPlatformBilling(e.deps);
+    expect(r.settled).toBe(1);
+    expect((await store.getPlatformOrderById(a.order.id))!).toMatchObject({ status: "paid_needs_attention", paid_amount: a.order.amount_total });
+    expect((await store.getPlatformOrderById(b.order.id))!.status).toBe("pending_payment");
+    expect(e.sent.filter((m) => m.subject.includes("平台訂單需要處理"))).toHaveLength(1);
+    expect(e.sent.some((m) => m.to === "boss@example.com" && m.text.includes("已被使用"))).toBe(true);
+    // 之後的 notify 都回 200（不無限重送）、不重複警示
+    expect(await e.notify(gwA)).toMatchObject({ status: 200 });
+    expect(e.sent.filter((m) => m.subject.includes("平台訂單需要處理"))).toHaveLength(1);
+  });
+});
+

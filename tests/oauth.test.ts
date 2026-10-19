@@ -11,10 +11,14 @@ import { ctxFor, newStore } from "./helpers";
 import { makeShop } from "./shop-helpers";
 import { createSite } from "@/lib/services/sites";
 import { handleMcp } from "@/lib/mcp/handler";
-import { inviteOwnerInternal, ownerAcceptInvite } from "@/lib/services/owners";
+import { inviteOwnerInternal, ownerAcceptInvite, ownerForgotPassword, ownerResetPassword } from "@/lib/services/owners";
 import {
+  GRANT_MAX_AGE_S,
   OAuthError,
   approveAuthorization,
+  parseScopes,
+  privateAddress,
+  wwwAuthenticate,
   authenticateOAuthAccess,
   authorizationServerMetadata,
   oauthConfig,
@@ -266,5 +270,86 @@ describe("MCP 端點：兩種 token 並存", () => {
     const r4 = await handleMcp(mcpReq(`gboa_${"A".repeat(43)}`, init), store);
     expect(r4.status).toBe(401);
     expect(r4.headers.get("www-authenticate")).toContain('error="invalid_token"');
+  });
+});
+
+describe("第九批審查 OAuth（M3／M4／L5／L13）", () => {
+  it("M3：重設密碼、登出所有裝置 → 這個帳號的 OAuth 授權全部撤銷；refresh 有 90 天絕對壽命", async () => {
+    const store = newStore();
+    const s = await setup(store);
+    const a = await authorize(store, s);
+    const t = await exchange(store, s.client.client_id, a.code, a.verifier);
+    const sent: string[] = [];
+    const d = { store, ipSecret: "x", baseUrl: "http://test.local", sendMail: async (_t: string, _s: string, text: string) => void sent.push(text) };
+    await ownerForgotPassword(d, { email: s.user.email, ip: "1.1.1.1" });
+    await ownerResetPassword(d, { token: decodeURIComponent(/owner\/reset\?t=(\S+)/.exec(sent[0]!)![1]!), password: "new-password-77", ip: "1.1.1.1" });
+    expect(await authenticateOAuthAccess(store, t.access_token, cfg.resource)).toBeNull();
+    await expect(tokenEndpoint(store, cfg, params({ grant_type: "refresh_token", refresh_token: t.refresh_token, client_id: s.client.client_id }), null)).rejects.toMatchObject({ error: "invalid_grant" });
+    expect((await store.getOAuthGrant(a.grantId))!.revoked_reason).toBe("password_reset");
+    // 登出所有裝置同理（store 層）
+    const b = await authorize(store, s);
+    const tb = await exchange(store, s.client.client_id, b.code, b.verifier);
+    expect(await store.revokeOAuthGrantsForUser(s.user.id, "logout_all")).toBe(1);
+    expect(await authenticateOAuthAccess(store, tb.access_token, cfg.resource)).toBeNull();
+    // 90 天絕對壽命：授權超過 90 天 → refresh 拒絕；新發的 refresh 到期日不超過授權＋90 天
+    const c = await authorize(store, s);
+    const tc = await exchange(store, s.client.client_id, c.code, c.verifier);
+    const rt = (await store.getOAuthTokenByHash(createHash("sha256").update(tc.refresh_token).digest("hex")))!;
+    expect(Date.parse(rt.expires_at)).toBeLessThanOrEqual(Date.parse((await store.getOAuthGrant(c.grantId))!.created_at) + GRANT_MAX_AGE_S * 1000);
+    const old: Store = { ...store, getOAuthGrant: async (id: string) => ({ ...(await store.getOAuthGrant(id))!, created_at: new Date(Date.now() - 91 * 86400_000).toISOString() }) };
+    await expect(tokenEndpoint(old, cfg, params({ grant_type: "refresh_token", refresh_token: tc.refresh_token, client_id: s.client.client_id }), null)).rejects.toMatchObject({ error: "invalid_grant" });
+  });
+
+  it("M4：401 只要求 site:read；沒帶 scope 只給 site:read；scope 不足 → HTTP 403 insufficient_scope 並帶所需 scope；手動 token 維持工具錯誤", async () => {
+    expect(wwwAuthenticate(cfg)).toContain('scope="site:read"');
+    expect(parseScopes("")).toEqual(["site:read"]);
+    const store = newStore();
+    const s = await setup(store);
+    const a = await authorize(store, s, { scope: "site:read" }, ["site:read"]);
+    const t = await exchange(store, s.client.client_id, a.code, a.verifier);
+    const call = (tok: string) => new Request("http://test.local/api/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tok}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_orders", arguments: {} } }) });
+    const r = await handleMcp(call(t.access_token), store);
+    expect(r.status).toBe(403);
+    expect(r.headers.get("www-authenticate")).toMatch(/error="insufficient_scope", resource_metadata="[^"]+", scope="orders:read"/);
+    const ok = await handleMcp(new Request("http://test.local/api/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${t.access_token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "get_site", arguments: {} } }) }), store);
+    expect(ok.status).toBe(200);
+    const site = await createSite(ctxFor(store), { slug: "oa-static-ro", name: "x" });
+    const ro = await store.insertToken({ tenant_id: (await store.getTenantBySlug("oa-static-ro"))!.id, name: "ro", token_hash: createHash("sha256").update("gbt_readonly_static_token_123456").digest("hex"), token_prefix: "gbt_read", scopes: ["site:read"] });
+    expect(ro && site).toBeTruthy();
+    const st = await handleMcp(call("gbt_readonly_static_token_123456"), store);
+    expect(st.status).toBe(200); // 手動 token 不做 step-up
+    // 同意頁可以授權比請求更多的 scope（店主自己勾）；viewer 角色仍被角色上限擋
+    const b = await authorize(store, s, { scope: "site:read" }, ["site:read", "content:write"]);
+    const tb = await exchange(store, s.client.client_id, b.code, b.verifier);
+    expect(tb.scope.split(" ").sort()).toEqual(["content:write", "site:read"]);
+  });
+
+  it("L5：IPv6 黑名單（IPv4-compatible、mapped、NAT64、6to4、ULA、link-local）；抓取前限流；錯誤不回傳對方內容", async () => {
+    for (const a of ["::1", "::", "::127.0.0.1", "::ffff:10.0.0.1", "::ffff:8.8.8.8", "64:ff9b::a00:1", "2002:a00:1::1", "fc00::1", "fd12::1", "fe80::1", "ff02::1", "2001:db8::1", "2001::1", "10.1.2.3", "100.64.0.1", "169.254.169.254"]) expect(privateAddress(a), a).toBe(true);
+    for (const a of ["2606:4700:4700::1111", "93.184.216.34", "8.8.8.8"]) expect(privateAddress(a), a).toBe(false);
+    const store = newStore();
+    let fetched = 0;
+    const fetcher = async () => (fetched++, { ok: true, status: 200, contentType: "text/html", text: "<html>SECRET-INTERNAL-PAGE</html>" });
+    await expect(resolveClient(store, "https://c.example/m.json", { fetcher, resolver: async () => ["93.184.216.34"], beforeFetch: async () => { throw new OAuthError("temporarily_unavailable", "太頻繁", 429); } })).rejects.toMatchObject({ error: "temporarily_unavailable" });
+    expect(fetched).toBe(0);
+    const e = await resolveClient(store, "https://c.example/m.json", { fetcher, resolver: async () => ["93.184.216.34"] }).catch((x) => x);
+    expect(String(e.description)).not.toContain("SECRET");
+    await expect(resolveClient(store, "https://v6.example/m.json", { fetcher, resolver: async () => ["::ffff:192.168.1.1"] })).rejects.toThrow(/內部位址/);
+  });
+
+  it("L13：授權請求沒帶 redirect_uri（只註冊一個）→ token 端點可以不帶；帶了錯的仍拒絕", async () => {
+    const store = newStore();
+    const s = await setup(store);
+    const { verifier, challenge } = pkce();
+    const v = await validateAuthorize(store, cfg, params({ response_type: "code", client_id: s.client.client_id, code_challenge: challenge, code_challenge_method: "S256" }));
+    if (!v.ok) throw v.error;
+    const r = await approveAuthorization(store, cfg, { user: s.user, tenantId: s.tenant.id, req: v.req, scopes: ["site:read"] });
+    const code = new URL(r.redirect).searchParams.get("code")!;
+    await expect(tokenEndpoint(store, cfg, params({ grant_type: "authorization_code", client_id: s.client.client_id, code, code_verifier: verifier, redirect_uri: "http://localhost:1/x" }), null)).rejects.toMatchObject({ error: "invalid_grant" });
+    const v2 = await validateAuthorize(store, cfg, params({ response_type: "code", client_id: s.client.client_id, code_challenge: challenge, code_challenge_method: "S256" }));
+    if (!v2.ok) throw v2.error;
+    const r2 = await approveAuthorization(store, cfg, { user: s.user, tenantId: s.tenant.id, req: v2.req, scopes: ["site:read"] });
+    const t = await tokenEndpoint(store, cfg, params({ grant_type: "authorization_code", client_id: s.client.client_id, code: new URL(r2.redirect).searchParams.get("code")!, code_verifier: verifier }), null);
+    expect(t.access_token).toMatch(/^gboa_/);
   });
 });

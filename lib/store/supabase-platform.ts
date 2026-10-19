@@ -23,6 +23,12 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
       if (r.error?.code === "23505") throw new ServiceError("conflict", "資料重複：這個網域已被使用");
       return must(r, "insertTenantDomain") as TenantDomainRow;
     },
+    async insertDomainRelease(row) {
+      must(await db.from("builder_domain_releases").insert(row), "insertDomainRelease");
+    },
+    async latestDomainRelease(domain) {
+      return must(await db.from("builder_domain_releases").select("tenant_id, released_at").eq("domain", domain).order("released_at", { ascending: false }).limit(1).maybeSingle(), "latestDomainRelease") as { tenant_id: string; released_at: string } | null;
+    },
     async listTenantDomains(tenantId) {
       return (must(await db.from("builder_tenant_domains").select("*").eq("tenant_id", tenantId).order("created_at"), "listTenantDomains") ?? []) as TenantDomainRow[];
     },
@@ -65,6 +71,10 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
     async updateOwnerUser(id, patch) {
       const rows = (must(await db.from("builder_owner_users").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id).select("*"), "updateOwnerUser") ?? []) as OwnerUserRow[];
       return rows[0] ?? null;
+    },
+    async useOwnerRecoveryCode(userId, hash) {
+      if (!isUuid(userId) || !/^[0-9a-f]{64}$/.test(hash)) return false;
+      return must(await db.rpc("builder_owner_use_recovery", { p_user: userId, p_hash: hash }), "useOwnerRecoveryCode") === true;
     },
     async claimTotpStep(userId, step) {
       const rows = (must(await db.from("builder_owner_users").update({ totp_last_step: step }).eq("id", userId).or(`totp_last_step.is.null,totp_last_step.lt.${Math.floor(step)}`).select("id"), "claimTotpStep") ?? []) as { id: string }[];
@@ -171,11 +181,13 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
     },
     async listPlatformOrdersForSweep(nowIso, staleBeforeIso, limit) {
       const a = (must(await db.from("builder_platform_orders").select("*").eq("status", "pending_payment").lte("expires_at", nowIso).limit(limit), "sweepPending") ?? []) as PlatformOrderRow[];
+      // 第九批審查 M2：逾期但已建立付款的單（14 天內）也要回查——客人可能逾期後才付款
+      const c = (must(await db.from("builder_platform_orders").select("*").eq("status", "expired").not("gateway_order_no", "is", null).gt("expires_at", new Date(Date.parse(nowIso) - 14 * 86400_000).toISOString()).limit(limit), "sweepExpiredPaid") ?? []) as PlatformOrderRow[];
       const b = (must(
         await db.from("builder_platform_orders").select("*").eq("status", "paid").lt("provision_attempts", 10).or(`provision_state.in.(none,failed),and(provision_state.eq.provisioning,provision_claimed_at.lt.${staleBeforeIso})`).limit(limit),
         "sweepProvision",
       ) ?? []) as PlatformOrderRow[];
-      return [...a, ...b];
+      return [...a, ...b, ...c];
     },
     async getTenantBilling(tenantId) {
       return must(await db.from("builder_tenant_billing").select("*").eq("tenant_id", tenantId).maybeSingle(), "getTenantBilling") as TenantBillingRow | null;
@@ -219,6 +231,15 @@ export function createSupabasePlatformStore(db: SupabaseClient): PlatformStore {
     },
     async touchOAuthGrant(id, nowIso) {
       must(await db.from("builder_oauth_grants").update({ last_used_at: nowIso }).eq("id", id), "touchOAuthGrant");
+    },
+    async revokeOAuthGrantsForUser(userId, reason) {
+      if (!isUuid(userId)) return 0;
+      const nowIso = new Date().toISOString();
+      const grants = (must(await db.from("builder_oauth_grants").update({ revoked_at: nowIso, revoked_reason: reason }).eq("user_id", userId).is("revoked_at", null).select("id"), "revokeOAuthGrantsForUser") ?? []) as { id: string }[];
+      // 所有 token（含先前已撤銷授權底下殘留的）一併撤銷
+      const all = (must(await db.from("builder_oauth_grants").select("id").eq("user_id", userId), "listUserGrants") ?? []) as { id: string }[];
+      if (all.length) must(await db.from("builder_oauth_tokens").update({ revoked_at: nowIso }).in("grant_id", all.map((g) => g.id)).is("revoked_at", null), "revokeUserTokens");
+      return grants.length;
     },
     async revokeOAuthGrant(id, reason) {
       if (!isUuid(id)) return false;

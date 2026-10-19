@@ -37,6 +37,16 @@ function sameOriginPost(req: NextRequest): boolean {
  *    店主後台 /owner 與 /api/owner 由頁面／route 自己驗 session（DB session，可撤銷），這裡只做 Origin 檢查。
  */
 export async function middleware(req: NextRequest) {
+  const res = await route(req);
+  // 第九批審查 L6：後台、店主後台、OAuth 同意頁不准被嵌入（防 clickjacking）
+  if (/^\/(admin|owner|oauth|build\/orders)(\/|$)/.test(req.nextUrl.pathname)) {
+    res.headers.set("content-security-policy", "frame-ancestors 'none'");
+    res.headers.set("x-frame-options", "DENY");
+  }
+  return res;
+}
+
+async function route(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const headers = new Headers(req.headers);
   for (const h of INTERNAL_HEADERS) headers.delete(h);

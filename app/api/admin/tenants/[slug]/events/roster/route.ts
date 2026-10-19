@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const bo = await backofficeForRequest(req, slug);
-  if (!bo || bo.viewAs) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // 以店主身分檢視（唯讀）也可以下載，存取已在 backofficeForRequest 寫稽核；匯出本身另寫個資查看紀錄
+  if (!bo) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const sessionId = new URL(req.url).searchParams.get("session") ?? "";
   try {
     const r = await exportRegistrationsCsv(bo.ctx, { site: slug, sessionId });

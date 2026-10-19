@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { logUnsentMail } from "../mail";
 import { z } from "zod";
 import type { Mailer } from "../mail";
 import type { GeminiFn } from "../ai/gemini";
@@ -67,7 +68,7 @@ function newOrderNo() {
 
 async function mail(deps: { sendMail?: Mailer }, to: string, subject: string, text: string) {
   if (!deps.sendMail) {
-    console.log(`[platform-billing] RESEND_API_KEY 未設定，未寄出「${subject}」給 ${to.replace(/(.{2}).*@/, "$1***@")}：\n${text}`);
+    logUnsentMail("platform-billing", to, subject, text);
     return;
   }
   try {
@@ -134,7 +135,8 @@ async function releaseStaleSlug(deps: PlatformDeps, rawSlug: string) {
   for (const o of stale) {
     if (o.gateway_order_no) {
       const r = await settleFromQuery(deps, o);
-      if (r === "paid" || r === "already_paid" || r === "query_failed" || r === "unknown" || r === "missing_amount") continue;
+      // 第九批審查 M2：回查是處理中（P，客人可能正在付款）也不釋放代號
+      if (r === "paid" || r === "already_paid" || r === "query_failed" || r === "unknown" || r === "missing_amount" || r === "pending" || r === "paid_needs_attention") continue;
     }
     await deps.store.updatePlatformOrder(o.id, { status: "expired" }, { status: ["pending_payment"] });
   }
@@ -209,6 +211,10 @@ export async function createAddonOrder(ctx: ServiceContext, input: { site?: stri
   const owned = [...new Set([...billing.modules, ...enabled])];
   const q = getBuildQuote({ modules: input.modules, existing: owned, existingMonthly: billing.monthly_amount });
   if (!q.lines.length) throw new ServiceError("invalid", "選的模組都已經開通了");
+  // 第九批審查 L11：已有含重疊模組、還沒逾期的待付款加購單 → 拒絕（請先付款或等它逾期），避免重複收費
+  const pendingAddons = (await ctx.store.listPlatformOrders({ tenantId: tenant.id, kind: "add_modules", status: ["pending_payment"], limit: 20 })).filter((o) => Date.parse(o.expires_at) > Date.now());
+  const overlap = pendingAddons.find((o) => o.modules.some((m) => q.lines.some((l) => l.id === m)));
+  if (overlap) throw new ServiceError("conflict", `已有包含 ${overlap.modules.filter((m) => q.lines.some((l) => l.id === m)).join("、")} 的待付款加購單 ${overlap.order_no}，請先完成付款（或等 2 小時後逾期）再加購`);
   const accessKey = randomBytes(24).toString("base64url");
   const order = await ctx.store.insertPlatformOrder({
     order_no: newOrderNo(),
@@ -310,6 +316,7 @@ export async function handlePlatformNotify(deps: PlatformDeps, rawBody: string):
 export async function settleFromQuery(deps: PlatformDeps, orderIn: PlatformOrderRow): Promise<string> {
   const order = (await deps.store.getPlatformOrderById(orderIn.id)) ?? orderIn;
   if (!order.gateway_order_no) return "no_payment";
+  if (order.status === "paid_needs_attention") return "already_paid";
   if (order.status === "paid") {
     if (order.provision_state !== "done") await provisionPlatformOrder(deps, order.id);
     return "already_paid";
@@ -331,11 +338,30 @@ export async function settleFromQuery(deps: PlatformDeps, orderIn: PlatformOrder
     return "amount_mismatch";
   }
   // 條件式轉換：只有真正轉換成功的那一次往下開站（逾期後才付款也接受，網址被占用時開站失敗並警示）
-  const moved = await deps.store.updatePlatformOrder(order.id, { status: "paid", paid_at: new Date().toISOString(), paid_amount: Math.round(q.amount) }, { status: ["pending_payment", "expired"] });
+  let moved: PlatformOrderRow | null;
+  try {
+    moved = await deps.store.updatePlatformOrder(order.id, { status: "paid", paid_at: new Date().toISOString(), paid_amount: Math.round(q.amount) }, { status: ["pending_payment", "expired"] });
+  } catch (e) {
+    // 第九批審查 M2：逾期後才付款、代號已被另一張進行中的單占用（live_slug 唯一索引）→ 不丟錯（避免無限重送）：
+    // 標 paid_needs_attention（已收款）、立即警示平台、寄信告訴付款人會人工處理
+    if (!(e instanceof ServiceError && e.code === "conflict")) throw e;
+    return markNeedsAttention(deps, order, Math.round(q.amount), "逾期後才付款，網址代號已被另一張訂單使用，無法自動開站");
+  }
   if (!moved) return "already_paid";
   await deps.store.insertAudit({ tenant_id: order.tenant_id, actor: "pchomepay:platform", action: "platform_order.paid", payload: { orderNo: order.order_no, amount: q.amount, sandbox: order.sandbox, wasExpired: order.status === "expired" } });
   const p = await provisionPlatformOrder(deps, order.id);
+  if (p.attention) return "paid_needs_attention";
   return p.ok ? "paid" : "provision_failed";
+}
+
+/** 已收款但無法自動開站：paid_needs_attention＋警示平台（一次）＋寄信給付款人（回 notify 成功，不讓金流無限重送） */
+async function markNeedsAttention(deps: PlatformDeps, order: PlatformOrderRow, paidAmount: number | null, reason: string): Promise<string> {
+  const moved = await deps.store.updatePlatformOrder(order.id, { status: "paid_needs_attention", ...(paidAmount !== null ? { paid_at: new Date().toISOString(), paid_amount: paidAmount } : {}), provision_error: reason.slice(0, 300) }, { status: ["pending_payment", "expired", "paid"] });
+  if (!moved) return "already_paid";
+  await deps.store.insertAudit({ tenant_id: order.tenant_id, actor: "pchomepay:platform", action: "platform_order.paid_needs_attention", payload: { orderNo: order.order_no, reason } });
+  await alertPlatform(deps, moved, `🔴 已收款但無法自動開站：${reason}。請聯絡客人改網址代號後人工開站，或到 PChomePay 後台退款。`);
+  await mail(deps, order.contact_email, `【Gather Builder】已收到你的付款（訂單 ${order.order_no}）`, `你好，\n\n我們已收到你的付款 ${twd(paidAmount ?? order.amount_total)}（訂單 ${order.order_no}），但${reason.includes("代號") ? `你選的網址代號「${order.slug}」已被使用` : "系統無法自動建立網站"}。\n我們會在 1 個工作天內與你聯絡，協助更換網址代號後開站，或全額退款。不需要再付款。`);
+  return "paid_needs_attention";
 }
 
 async function alertPlatform(deps: PlatformDeps, order: PlatformOrderRow, reason: string) {
@@ -348,7 +374,7 @@ async function alertPlatform(deps: PlatformDeps, order: PlatformOrderRow, reason
  * 開站／加購開通／續費（冪等、可重試）：先條件式宣告，同時只有一個在跑；每一步都可重跑。
  * 失敗 → provision_state=failed＋錯誤（cron 與付款頁重新整理會重試；第 3 次起警示平台）。
  */
-export async function provisionPlatformOrder(deps: PlatformDeps, orderId: string): Promise<{ ok: boolean; tenant?: TenantRow; error?: string }> {
+export async function provisionPlatformOrder(deps: PlatformDeps, orderId: string): Promise<{ ok: boolean; tenant?: TenantRow; error?: string; attention?: boolean }> {
   const claimed = await deps.store.claimPlatformProvision(orderId, new Date(Date.now() - PROVISION_STALE_MS).toISOString());
   if (!claimed) {
     // 沒宣告到：已完成，或另一個 notify／cron 正在開（併發）→ 都不算失敗（整合測試抓到：併發時誤報 provision_failed）
@@ -364,9 +390,21 @@ export async function provisionPlatformOrder(deps: PlatformDeps, orderId: string
     const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
     console.error(`[platform-billing] 開站失敗 order=${claimed.order_no} 第 ${claimed.provision_attempts} 次`, msg);
     await deps.store.updatePlatformOrder(claimed.id, { provision_state: "failed", provision_error: msg }, { provision_state: ["provisioning"] });
-    if (claimed.provision_attempts >= 3 || /網址代號/.test(msg)) await alertPlatform(deps, claimed, `付款成功但開站／開通失敗（第 ${claimed.provision_attempts} 次）：${msg}`);
+    if (e instanceof SlugTakenError) {
+      // 第九批審查 M2：代號被占用 → 重試也不會成功：轉 paid_needs_attention、通知平台與付款人
+      await markNeedsAttention(deps, claimed, null, msg);
+      return { ok: false, error: msg, attention: true };
+    }
+    if (claimed.provision_attempts >= 3) await alertPlatform(deps, claimed, `付款成功但開站／開通失敗（第 ${claimed.provision_attempts} 次）：${msg}`);
     return { ok: false, error: msg };
   }
+}
+
+class SlugTakenError extends Error {}
+
+/** 已購模組集合的月費（模組註冊表 priceMonthly 合計） */
+export function monthlyFor(moduleIds: string[]): number {
+  return [...new Set(moduleIds)].reduce((a, id) => a + (getModule(id)?.priceMonthly ?? 0), 0);
 }
 
 function systemCtx(deps: PlatformDeps): ServiceContext {
@@ -386,7 +424,10 @@ async function provisionNewSite(deps: PlatformDeps, order: PlatformOrderRow): Pr
     } catch (e) {
       // 併發或重試：同一張單已經開過（platform_order_id unique）→ 沿用；否則是網址被別人用掉
       tenant = await deps.store.getTenantByPlatformOrder(order.id);
-      if (!tenant) throw new Error(e instanceof ServiceError && e.code === "conflict" ? `網址代號「${order.slug}」已被使用，無法開站（需人工改代號或退款）` : e instanceof Error ? e.message : String(e));
+      if (!tenant) {
+        if (e instanceof ServiceError && e.code === "conflict") throw new SlugTakenError(`網址代號「${order.slug}」已被使用，無法開站（需人工改代號或退款）`);
+        throw e instanceof Error ? e : new Error(String(e));
+      }
     }
     tenant = tenant ?? (await deps.store.getTenantByPlatformOrder(order.id));
     if (!tenant) throw new Error("開站後找不到網站");
@@ -423,10 +464,11 @@ async function provisionAddon(deps: PlatformDeps, order: PlatformOrderRow): Prom
     const status = await adjustModuleStatus(deps.store, tenant.id, id, m.settingsSchema.safeParse({}).success ? "enabled" : "pending_setup");
     await deps.store.upsertTenantModule({ tenant_id: tenant.id, module_id: id, status, config: {}, enabled_at: now });
   }
-  // 月費與已購模組只加一次：以「這張單的模組是否已在 billing.modules」判斷（重試不重複加）
+  // 第九批審查 L11：月費以「已購買的模組集合」重算（不累加；重試、重疊都不會重複計費）
   const b = await deps.store.getTenantBilling(tenant.id);
-  if (b && !order.modules.every((id) => b.modules.includes(id))) {
-    await deps.store.updateTenantBilling(tenant.id, { modules: [...new Set([...b.modules, ...order.modules])], monthly_amount: b.monthly_amount + order.amount_monthly });
+  if (b) {
+    const purchased = [...new Set([...b.modules, ...order.modules])];
+    await deps.store.updateTenantBilling(tenant.id, { modules: purchased, monthly_amount: monthlyFor(purchased) });
   }
   await deps.store.insertAudit({ tenant_id: tenant.id, actor: "system:provision", action: "module.enable_paid", payload: { orderNo: order.order_no, modules: order.modules } });
   return tenant;
@@ -573,6 +615,12 @@ export async function sweepPlatformBilling(deps: PlatformDeps, nowMs = Date.now(
   for (const o of await deps.store.listPlatformOrdersForSweep(nowIso, new Date(nowMs - PROVISION_STALE_MS).toISOString(), 100)) {
     if (o.status === "paid") {
       if ((await provisionPlatformOrder(deps, o.id)).ok) out.provisioned++;
+      continue;
+    }
+    if (o.status === "expired") {
+      // 第九批審查 M2：逾期但已建立付款的單 → 回查；逾期後才付款的照常處理（開站或 paid_needs_attention）
+      const r = await settleFromQuery(deps, o);
+      if (r === "paid" || r === "paid_needs_attention") out.settled++;
       continue;
     }
     // 逾期前先權威回查：已付 → 開站；回查失敗／無法辨識 → 這次不動

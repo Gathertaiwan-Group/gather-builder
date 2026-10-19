@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { getDomainAdapter, type DomainAdapter } from "../domains/adapter";
+import { randomBytes } from "node:crypto";
+import { getDomainAdapter, getTxtVerifier, ownershipTxt, OWNERSHIP_TXT_PREFIX, type DomainAdapter, type TxtVerifier } from "../domains/adapter";
 import { classifyHost, hostConfigFromEnv, normalizeHost } from "../host-routing";
 import { siteBase } from "../site-url";
 import type { Store, TenantDomainRow } from "../store/types";
@@ -11,6 +12,10 @@ import { ServiceError, audit, requireFormCredential, requireScope, resolveTenant
  * 🔴 只有平台後台或店主 owner 角色能新增／啟用／移除（requireFormCredential）；MCP 只能讀狀態。
  * 🔴 只有 active 的網域會被 middleware 對應到租戶；pending／verified 都不生效。
  */
+/** pending 網域 7 天沒驗證就過期釋放；移除／過期後 7 天內只有原租戶能再加回（第九批審查 M1） */
+export const PENDING_DOMAIN_TTL_MS = 7 * 86400_000;
+export const DOMAIN_COOLDOWN_MS = 7 * 86400_000;
+
 export const domainInput = z
   .string()
   .trim()
@@ -61,27 +66,33 @@ export async function addDomain(ctx: ServiceContext, input: { site?: string | nu
   if ((await ctx.store.listTenantDomains(tenant.id)).length >= 5) throw new ServiceError("invalid", "每個網站最多 5 個網域");
   const existing = await ctx.store.getDomainByName(domain);
   if (existing) throw new ServiceError("conflict", existing.tenant_id === tenant.id ? "這個網域已經加過了" : "這個網域已被其他網站使用");
+  const rel = await ctx.store.latestDomainRelease(domain);
+  if (rel && rel.tenant_id !== tenant.id && Date.parse(rel.released_at) > Date.now() - DOMAIN_COOLDOWN_MS) throw new ServiceError("conflict", "這個網域剛從其他網站移除，7 天冷卻期內只有原網站能再加回");
   const a = adapterOr(adapter);
   const r = await a.add(domain);
   if (r.error && !r.records.length) throw new ServiceError("invalid", `無法加入網域：${r.error}`);
-  const row = await ctx.store.insertTenantDomain({ tenant_id: tenant.id, domain, dns_records: r.records, created_by: ctx.actor.label });
+  const token = randomBytes(18).toString("hex");
+  const row = await ctx.store.insertTenantDomain({ tenant_id: tenant.id, domain, dns_records: [...r.records, ownershipTxt(domain, token)], verify_token: token, created_by: ctx.actor.label });
   if (r.error) await ctx.store.updateTenantDomain(tenant.id, row.id, { last_error: r.error.slice(0, 300) });
   await audit(ctx, tenant.id, "domain.add", { domain, adapter: a.name });
-  return { ...summary(row), note: "請到網域的 DNS 管理介面設定下列記錄，生效後按「重新檢查」（系統每天也會自動檢查）。驗證完成後按「啟用」才會成為正式網址。" };
+  return { ...summary(row), note: "請到網域的 DNS 管理介面設定下列記錄（包含 Gather 專屬的 _gather-verify TXT），生效後按「重新檢查」（系統每天也會自動檢查；7 天內沒驗證會自動釋放）。驗證完成後按「啟用」才會成為正式網址。" };
 }
 
-/** 檢查一筆 pending／verified 網域（後台按鈕、cron 共用；不需 confirm） */
-export async function checkDomainRow(store: Store, d: TenantDomainRow, adapter: DomainAdapter): Promise<TenantDomainRow> {
-  const r = await adapter.check(d.domain);
+/**
+ * 檢查一筆 pending／verified 網域（後台按鈕、cron 共用；不需 confirm）。
+ * 🔴 必須同時通過：這個租戶專屬的 TXT（_gather-verify）＋ Vercel verified＋DNS 沒有 misconfigured。
+ */
+export async function checkDomainRow(store: Store, d: TenantDomainRow, adapter: DomainAdapter, txt: TxtVerifier = getTxtVerifier()): Promise<TenantDomainRow> {
+  const [r, owned] = await Promise.all([adapter.check(d.domain), txt(`${OWNERSHIP_TXT_PREFIX}.${d.domain}`, d.verify_token)]);
   const nowIso = new Date().toISOString();
-  const ok = r.verified && r.configured;
+  const ok = owned && r.verified && r.configured;
   const next = await store.updateTenantDomain(
     d.tenant_id,
     d.id,
     {
       last_checked_at: nowIso,
-      last_error: ok ? null : (r.error ?? (r.verified ? "DNS 還沒指到平台（A／CNAME 記錄未生效）" : "網域所有權尚未驗證（TXT 記錄未生效）")).slice(0, 300),
-      dns_records: r.records.length ? r.records : d.dns_records,
+      last_error: ok ? null : (!owned ? "Gather 所有權驗證 TXT（_gather-verify）還沒生效" : (r.error ?? (r.verified ? "DNS 還沒指到平台（A／CNAME 記錄未生效）" : "網域所有權尚未驗證（Vercel TXT 記錄未生效）"))).slice(0, 300),
+      dns_records: r.records.length ? [...r.records, ownershipTxt(d.domain, d.verify_token)] : d.dns_records,
       ...(ok && d.status === "pending" ? { status: "verified" as const, verified_at: nowIso } : {}),
     },
     d.status === "pending" ? ["pending"] : undefined,
@@ -90,12 +101,12 @@ export async function checkDomainRow(store: Store, d: TenantDomainRow, adapter: 
   return next ?? d;
 }
 
-export async function checkDomain(ctx: ServiceContext, input: { site?: string | null; domainId: string }, adapter?: DomainAdapter | null) {
+export async function checkDomain(ctx: ServiceContext, input: { site?: string | null; domainId: string }, adapter?: DomainAdapter | null, txt?: TxtVerifier) {
   requireFormCredential(ctx, "自有網域");
   const tenant = await resolveTenant(ctx, input.site);
   const d = await ctx.store.getTenantDomain(tenant.id, input.domainId);
   if (!d) throw new ServiceError("not_found", "找不到這個網域");
-  return summary(await checkDomainRow(ctx.store, d, adapterOr(adapter)));
+  return summary(await checkDomainRow(ctx.store, d, adapterOr(adapter), txt));
 }
 
 export async function activateDomain(ctx: ServiceContext, input: { site?: string | null; domainId: string; confirm?: boolean }) {
@@ -118,18 +129,31 @@ export async function removeDomain(ctx: ServiceContext, input: { site?: string |
   if (input.confirm !== true) throw new ServiceError("confirm_required", `移除 ${d.domain}${d.status === "active" ? "（目前的正式網址，移除後改回子網域）" : ""}？請確認後以 confirm: true 呼叫。`);
   await adapterOr(adapter).remove(d.domain);
   await ctx.store.deleteTenantDomain(tenant.id, d.id);
+  // 冷卻期只保護「曾經驗證過」的網域（pending 的移除不給保護，避免搶佔者拿冷卻期卡住真正的擁有者）
+  if (d.status !== "pending") await ctx.store.insertDomainRelease({ domain: d.domain, tenant_id: tenant.id, reason: "removed" });
   await audit(ctx, tenant.id, "domain.remove", { domain: d.domain, wasActive: d.status === "active" });
   return { removed: d.domain };
 }
 
-/** 每日 cron：輪詢 pending 網域的驗證狀態（沒設定 adapter 就略過） */
-export async function sweepPendingDomains(store: Store, adapter: DomainAdapter | null = getDomainAdapter(), limit = 50) {
-  if (!adapter) return { checked: 0, verified: 0 };
+/** 每日 cron：輪詢 pending 網域的驗證狀態；7 天沒驗證 → 從 Vercel 專案移除並釋放（記冷卻期）。沒設定 adapter 就略過 */
+export async function sweepPendingDomains(store: Store, adapter: DomainAdapter | null = getDomainAdapter(), limit = 50, txt?: TxtVerifier, nowMs = Date.now()) {
+  if (!adapter) return { checked: 0, verified: 0, expired: 0 };
   let verified = 0;
+  let expired = 0;
   const rows = await store.listPendingDomains(limit);
   for (const d of rows) {
-    const after = await checkDomainRow(store, d, adapter).catch((e) => (console.error("[domains] check", e), d));
-    if (after.status === "verified") verified++;
+    const after = await checkDomainRow(store, d, adapter, txt).catch((e) => (console.error("[domains] check", e), d));
+    if (after.status === "verified") {
+      verified++;
+      continue;
+    }
+    if (Date.parse(d.created_at) <= nowMs - PENDING_DOMAIN_TTL_MS) {
+      await adapter.remove(d.domain).catch((e) => console.error("[domains] remove expired", e));
+      if (await store.deleteTenantDomain(d.tenant_id, d.id)) {
+        await store.insertAudit({ tenant_id: d.tenant_id, actor: "system:domains", action: "domain.expired", payload: { domain: d.domain } });
+        expired++;
+      }
+    }
   }
-  return { checked: rows.length, verified };
+  return { checked: rows.length, verified, expired };
 }

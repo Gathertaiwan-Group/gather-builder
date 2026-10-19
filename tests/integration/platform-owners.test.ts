@@ -58,6 +58,12 @@ describe.skipIf(!enabled)("店主帳號（整合）", () => {
     const steps = await Promise.all(Array.from({ length: 4 }, () => store.claimTotpStep(inv.userId, 123456)));
     expect(steps.filter(Boolean)).toHaveLength(1);
     expect(await store.claimTotpStep(inv.userId, 123455)).toBe(false);
+    // 第九批審查 L7：復原碼 RPC——同一組併發 4 次只成功 1 次
+    const h = "c".repeat(64);
+    await store.updateOwnerUser(inv.userId, { totp_recovery_hashes: [h, "d".repeat(64)] });
+    const used = await Promise.all(Array.from({ length: 4 }, () => store.useOwnerRecoveryCode(inv.userId, h)));
+    expect(used.filter(Boolean)).toHaveLength(1);
+    expect((await store.getOwnerUserById(inv.userId))!.totp_recovery_hashes).toEqual(["d".repeat(64)]);
     // 跨租戶
     expect(await store.getTenantUser(tb.id, inv.userId)).toBeNull();
     expect((await store.getTenantUser(ta.id, inv.userId))!.status).toBe("active");

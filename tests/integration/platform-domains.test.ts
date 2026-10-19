@@ -10,7 +10,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createServiceClient, createSupabaseStore } from "@/lib/store/supabase";
 import { createSite } from "@/lib/services/sites";
 import { activateDomain, addDomain, checkDomain } from "@/lib/services/domains";
-import { createMockDomainAdapter } from "@/lib/domains/adapter";
+import { mockTxtVerifier, createMockDomainAdapter } from "@/lib/domains/adapter";
 import { storeRoutingLookup } from "@/lib/domain-routing";
 import { adminActor } from "@/lib/tokens";
 import type { ServiceContext } from "@/lib/services/context";
@@ -42,11 +42,11 @@ describe.skipIf(!enabled)("自有網域（整合）", () => {
     const ta = (await store.getTenantBySlug(slugA))!;
     const tb = (await store.getTenantBySlug(slugB))!;
     // DB 層也擋：直接插同網域 → 23505
-    expect((await db.from("builder_tenant_domains").insert({ tenant_id: tb.id, domain: `a1-${ts}.test`, created_by: "it" })).error?.code).toBe("23505");
+    expect((await db.from("builder_tenant_domains").insert({ tenant_id: tb.id, domain: `a1-${ts}.test`, created_by: "it", verify_token: "x" })).error?.code).toBe("23505");
     const lookup = storeRoutingLookup(store);
     expect(await lookup.byDomain(`a1-${ts}.test`)).toBeNull();
-    await checkDomain(ctx, { site: slugA, domainId: d1.id }, mock);
-    await checkDomain(ctx, { site: slugA, domainId: d2.id }, mock);
+    await checkDomain(ctx, { site: slugA, domainId: d1.id }, mock, mockTxtVerifier);
+    await checkDomain(ctx, { site: slugA, domainId: d2.id }, mock, mockTxtVerifier);
     expect(await lookup.byDomain(`a1-${ts}.test`)).toBeNull(); // verified 但未啟用
     await activateDomain(ctx, { site: slugA, domainId: d1.id, confirm: true });
     expect(await lookup.byDomain(`a1-${ts}.test`)).toEqual({ slug: slugA, primaryDomain: `a1-${ts}.test` });

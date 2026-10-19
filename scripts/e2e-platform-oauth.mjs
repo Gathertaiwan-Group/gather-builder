@@ -84,8 +84,11 @@ export async function runOAuthPart({ base, slug, ok, req, jar, rest }) {
   await c2.connect(new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider }));
   const site = await c2.callTool({ name: "get_site", arguments: {} });
   ok("用 OAuth token 呼叫 get_site（綁授權的網站）", !site.isError && JSON.stringify(site.content).includes(slug));
-  const forbidden = await c2.callTool({ name: "list_orders", arguments: {} });
-  ok("沒授權的 scope（orders:read）被拒", forbidden.isError === true && JSON.stringify(forbidden.content).includes("forbidden"));
+  // scope 不足 → HTTP 403 insufficient_scope（step-up）；SDK 會嘗試加授權（這裡沒有人同意，所以最後失敗）
+  const raw = await fetch(mcpUrl, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${provider.st.tokens.access_token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "list_orders", arguments: {} } }) });
+  ok("沒授權的 scope（orders:read）→ 403 insufficient_scope＋所需 scope（step-up）", raw.status === 403 && /error="insufficient_scope".*scope="orders:read"/.test(raw.headers.get("www-authenticate") ?? ""));
+  const stepUp = await c2.callTool({ name: "list_orders", arguments: {} }).then(() => "ok", (e) => String(e?.message ?? e));
+  ok("SDK 收到 403 後嘗試加授權（upscoping）", /403|upscop|Unauthorized/i.test(stepUp), stepUp.slice(0, 80));
 
   /* access token 過期 → SDK 自動 refresh（輪替） */
   const oldRefresh = provider.st.tokens.refresh_token;

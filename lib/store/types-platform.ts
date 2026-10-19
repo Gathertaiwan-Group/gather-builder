@@ -16,6 +16,8 @@ export interface TenantDomainRow {
   status: DomainStatus;
   verify_method: "vercel";
   dns_records: DnsRecord[];
+  /** 這個租戶×網域專屬的所有權驗證 token（TXT _gather-verify.<網域> = gather-verify=<token>） */
+  verify_token: string;
   last_checked_at: string | null;
   last_error: string | null;
   verified_at: string | null;
@@ -26,7 +28,10 @@ export interface TenantDomainRow {
 }
 
 export interface DomainStore {
-  insertTenantDomain(row: Pick<TenantDomainRow, "tenant_id" | "domain" | "dns_records" | "created_by">): Promise<TenantDomainRow>;
+  insertTenantDomain(row: Pick<TenantDomainRow, "tenant_id" | "domain" | "dns_records" | "created_by" | "verify_token">): Promise<TenantDomainRow>;
+  /** 移除／過期釋放紀錄（冷卻期判斷用；只增不改） */
+  insertDomainRelease(row: { domain: string; tenant_id: string; reason: "removed" | "expired" }): Promise<void>;
+  latestDomainRelease(domain: string): Promise<{ tenant_id: string; released_at: string } | null>;
   listTenantDomains(tenantId: string): Promise<TenantDomainRow[]>;
   getTenantDomain(tenantId: string, id: string): Promise<TenantDomainRow | null>;
   getDomainByName(domain: string): Promise<TenantDomainRow | null>;
@@ -52,6 +57,8 @@ export interface OwnerUserRow {
   totp_secret_enc: string | null;
   totp_enabled_at: string | null;
   totp_last_step: number | null;
+  /** 一次性復原碼（sha256） */
+  totp_recovery_hashes: string[];
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -96,7 +103,9 @@ export interface OwnerStore {
   insertOwnerUser(row: Pick<OwnerUserRow, "email" | "name" | "password_hash">): Promise<OwnerUserRow>;
   getOwnerUserByEmail(email: string): Promise<OwnerUserRow | null>;
   getOwnerUserById(id: string): Promise<OwnerUserRow | null>;
-  updateOwnerUser(id: string, patch: Partial<Pick<OwnerUserRow, "name" | "password_hash" | "status" | "totp_secret_enc" | "totp_enabled_at" | "last_login_at">>): Promise<OwnerUserRow | null>;
+  updateOwnerUser(id: string, patch: Partial<Pick<OwnerUserRow, "name" | "password_hash" | "status" | "totp_secret_enc" | "totp_enabled_at" | "last_login_at" | "totp_recovery_hashes">>): Promise<OwnerUserRow | null>;
+  /** 原子：復原碼存在才移除並回 true（每組只能用一次） */
+  useOwnerRecoveryCode(userId: string, hash: string): Promise<boolean>;
   /** 條件式：totp_last_step 為 null 或小於 step 才寫入（同一組碼只能用一次） */
   claimTotpStep(userId: string, step: number): Promise<boolean>;
   insertTenantUser(row: Pick<TenantUserRow, "tenant_id" | "user_id" | "role" | "status" | "invited_by">): Promise<TenantUserRow>;
@@ -121,7 +130,8 @@ export interface OwnerStore {
 /* ------------------------------------------------------------------ 平台訂單與月費 */
 
 export type PlatformOrderKind = "new_site" | "add_modules" | "renewal";
-export type PlatformOrderStatus = "pending_payment" | "paid" | "expired" | "cancelled";
+/** paid_needs_attention＝已收款但無法自動開站（例如逾期後才付款、代號已被占用）：需人工處理（第九批審查 M2） */
+export type PlatformOrderStatus = "pending_payment" | "paid" | "expired" | "cancelled" | "paid_needs_attention";
 export type ProvisionState = "none" | "provisioning" | "done" | "failed";
 
 export interface PlatformOrderRow {
@@ -230,6 +240,8 @@ export interface OAuthCodeRow {
   grant_id: string;
   client_id: string;
   redirect_uri: string;
+  /** 授權請求是否明確帶了 redirect_uri（沒帶＝client 只註冊一個、由伺服器帶入；token 端點也允許不帶） */
+  redirect_explicit: boolean;
   code_challenge: string;
   scopes: string[];
   resource: string;
@@ -261,9 +273,11 @@ export interface OAuthStore {
   getOAuthGrant(id: string): Promise<OAuthGrantRow | null>;
   listOAuthGrants(opts: { tenantId?: string; userId?: string; limit: number }): Promise<OAuthGrantRow[]>;
   touchOAuthGrant(id: string, nowIso: string): Promise<void>;
+  /** 撤銷這個店主帳號的所有授權（重設密碼、登出所有裝置）；回傳撤銷筆數 */
+  revokeOAuthGrantsForUser(userId: string, reason: string): Promise<number>;
   /** 撤銷授權＋底下所有 token（冪等）；回傳是否真的由未撤銷改為撤銷 */
   revokeOAuthGrant(id: string, reason: string): Promise<boolean>;
-  insertOAuthCode(row: Pick<OAuthCodeRow, "code_hash" | "grant_id" | "client_id" | "redirect_uri" | "code_challenge" | "scopes" | "resource" | "expires_at">): Promise<void>;
+  insertOAuthCode(row: Pick<OAuthCodeRow, "code_hash" | "grant_id" | "client_id" | "redirect_uri" | "redirect_explicit" | "code_challenge" | "scopes" | "resource" | "expires_at">): Promise<void>;
   getOAuthCodeByHash(hash: string): Promise<OAuthCodeRow | null>;
   /** 原子：未使用、未過期才標 used_at 並回傳（一次性） */
   consumeOAuthCode(hash: string, nowIso: string): Promise<OAuthCodeRow | null>;

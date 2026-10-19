@@ -10,9 +10,13 @@
 | 怎麼拿 | 客戶端加入端點網址 → 自動 discovery → 瀏覽器開店主登入頁 → 選網站與權限 → 同意 | 店主後台「MCP 連線」發行（`gbt_`），或平台後台／`issue_site_token`；平台 token（`gbp_`）只有平台後台能發 |
 | 綁定 | 一個網站＋你勾選的 scopes＋這個 MCP 端點（audience）；權限不會超過你在該網站的角色（檢視者只能讀） | 一個網站（或平台）＋發行時選的 scopes |
 | 有效期 | access token 1 小時（客戶端自動用 refresh token 換新，refresh 30 天、每次輪替） | 直到撤銷 |
-| 撤銷 | 店主後台「MCP 連線 → OAuth 授權 → 撤銷授權」（立即 401）；成員被停用也立即失效 | 後台撤銷，立即 401 |
+| 撤銷 | 店主後台「MCP 連線 → OAuth 授權 → 撤銷授權」（owner）；每位成員在「帳號」頁可撤銷自己同意過的授權；**重設密碼、登出所有裝置會撤銷這個帳號所有授權**；成員被停用也立即失效；refresh token 從同意起最多 90 天 | 後台撤銷，立即 401；停用／降級成員時可一鍵撤銷他建立的 token |
 
-**兩者不互相干擾**：手動 token 帶上來就直接 200，伺服器不回 401，客戶端不會走 OAuth；只有沒帶或無效的 token 才回 401＋`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp", scope="…"`（RFC 9728），支援 OAuth 的客戶端從這裡開始。⚠️ 少數客戶端（曾有 Cursor 的回報）只要偵測到 OAuth discovery 就會忽略自訂 header：遇到這種客戶端請改用 OAuth 連線。
+**兩者不互相干擾**：手動 token 帶上來就直接 200，伺服器不回 401，客戶端不會走 OAuth；只有沒帶或無效的 token 才回 401＋`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp", scope="site:read"`（RFC 9728；只要求最小的讀取權限），支援 OAuth 的客戶端從這裡開始。
+
+> ⚠️ **部分客戶端（例如 Cursor）只要看到 OAuth discovery（`/.well-known/oauth-*`）就會忽略你設定的 `Authorization` header、改走 OAuth**。遇到這種客戶端，請直接用 ① OAuth 連線（不要再設手動 token header）。
+
+**權限遞增（step-up）**：OAuth 一開始只需要 `site:read`。用 OAuth token 呼叫需要更多權限的工具時，伺服器回 **HTTP 403**＋`WWW-Authenticate: Bearer error="insufficient_scope", scope="<需要的 scope>", resource_metadata="…"`，支援 step-up 的客戶端會再開一次同意頁請你加授權。手動 token 不做 step-up（照舊回工具錯誤 `[forbidden]`）。同意頁把權限分成「讀取」「修改」「危險」（退款／取消訂單 orders:write、儲值金 wallet:adjust、點數 points:adjust、停用會員 members:write、發布 publish），寫入與危險權限預設不勾。
 
 ### OAuth 規格與端點
 
@@ -23,12 +27,12 @@
 | `GET /.well-known/oauth-protected-resource/api/mcp`（也有根路徑版） | RFC 9728：`resource`＝`<平台>/api/mcp`、`authorization_servers`＝[`<平台>`]、`scopes_supported`（網站 scopes，不含 platform:sites） |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414：`code_challenge_methods_supported: ["S256"]`、`client_id_metadata_document_supported: true`、`registration_endpoint`、`authorization_response_iss_parameter_supported: true`、public client（`none`） |
 | `POST /oauth/register` | RFC 7591 動態註冊（規格標為向下相容；只收 public client，redirect_uri 只接受 https、`http://localhost／127.0.0.1／[::1]`、原生 app scheme） |
-| `GET /oauth/authorize` | 授權＋PKCE（只接受 S256，沒帶拒絕）；`resource` 必須是本端點；client_id 可以是 Client ID Metadata Document 的 https 網址（伺服器取回文件，SSRF 防護：只連公開位址、不跟隨轉址、5 秒、16KB）。redirect_uri 精確比對（loopback IP 127.0.0.1／[::1] 的 port 依 OAuth 2.1 §8.4.2 可變）；client 或 redirect_uri 不對時**不導回** |
+| `GET /oauth/authorize` | 授權＋PKCE（只接受 S256，沒帶拒絕）；`resource` 必須是本端點；沒帶 `scope`＝只請求 `site:read`；client_id 可以是 Client ID Metadata Document 的 https 網址（伺服器取回文件，SSRF 防護：只連檢查過的公開 IP（連線釘選在那個 IP，防 DNS rebinding）、IPv4／IPv6 私網與保留段黑名單、不跟隨轉址、5 秒、16KB、每 IP 每 10 分鐘 20 次、錯誤不回傳對方內容）。redirect_uri 精確比對（loopback IP 127.0.0.1／[::1] 的 port 依 OAuth 2.1 §8.4.2 可變）；client 或 redirect_uri 不對時**不導回** |
 | `POST /oauth/authorize/decision` | 店主同意／拒絕（同源 Origin＋綁 session 的 CSRF token）；回應帶 `code`、`state`、`iss`（RFC 9207） |
-| `POST /oauth/token` | `authorization_code`（一次性、2 分鐘、client／redirect_uri／PKCE 都要相符；重用 → 撤銷整個授權）、`refresh_token`（輪替；舊的再出現＝重用 → 撤銷整個授權） |
+| `POST /oauth/token` | `authorization_code`（一次性、2 分鐘、client／redirect_uri／PKCE 都要相符——授權請求沒帶 redirect_uri（client 只註冊一個）時這裡也可以不帶；重用 → 撤銷整個授權）、`refresh_token`（輪替；舊的再出現＝重用 → 撤銷整個授權） |
 | `POST /oauth/revoke` | RFC 7009；refresh token → 撤銷整個授權、access token → 撤銷那一個 |
 
-scope 名稱與手動 token 完全一樣（見下表）。工具因 scope 不足而失敗時回工具錯誤 `[forbidden]`（不是 HTTP 403 step-up），需要更多權限時請到店主後台撤銷後重新授權並勾選。
+scope 名稱與手動 token 完全一樣（見下表）。同意頁、後台、OAuth 端點都帶 `Content-Security-Policy: frame-ancestors 'none'`／`X-Frame-Options: DENY`（不能被嵌入）。
 
 ### 在 Claude Code 連線
 

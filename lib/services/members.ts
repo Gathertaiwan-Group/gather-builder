@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { logUnsentMail } from "../mail";
 import { siteBase } from "../site-url";
 import { z } from "zod";
 import { getModule } from "@/modules/registry";
@@ -125,7 +126,7 @@ function siteUrl(deps: MemberDeps, tenant: TenantRow, path: string) {
 /** 寄信；沒設 RESEND_API_KEY 時不報錯，把內容（含連結）寫進 server log 方便本機測試 */
 async function deliver(deps: MemberDeps, to: string, subject: string, text: string) {
   if (!deps.sendMail) {
-    console.log(`[members] RESEND_API_KEY 未設定，未寄出「${subject}」給 ${to.replace(/(.{2}).*@/, "$1***@")}：\n${text}`);
+    logUnsentMail("members", to, subject, text);
     return;
   }
   try {

@@ -64,3 +64,13 @@ export async function sendMailWithId(to: string, subject: string, text: string, 
     return { id: null, skipped: false };
   }
 }
+
+/**
+ * 沒設 RESEND_API_KEY 時的替代：記一筆「未寄出」。第九批審查 L12：🔴 正式環境（NODE_ENV=production）不把信件內容
+ * （可能含登入／重設密碼／邀請連結）寫進 log；本機開發（或明確設 MAIL_LOG_BODIES=1，只限本機）才印出內容。
+ */
+export function logUnsentMail(tag: string, to: string, subject: string, text: string) {
+  const masked = to.replace(/(.{2}).*@/, "$1***@");
+  const showBody = process.env.NODE_ENV !== "production" || process.env.MAIL_LOG_BODIES === "1";
+  console.log(`[${tag}] RESEND_API_KEY 未設定，未寄出「${subject}」給 ${masked}${showBody ? `：\n${text}` : "（正式環境不記錄內容）"}`);
+}

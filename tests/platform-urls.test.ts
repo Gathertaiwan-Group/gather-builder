@@ -16,7 +16,7 @@ import { classifyHost, decideRoute, hostConfigFromEnv, type HostConfig } from "@
 import { storeRoutingLookup } from "@/lib/domain-routing";
 import { siteBase, siteCookiePath, siteUrl } from "@/lib/site-url";
 import { clearMemberCookie, setMemberCookie } from "@/lib/site-request";
-import { createMockDomainAdapter, createVercelDomainAdapter, isApex, pointingRecords } from "@/lib/domains/adapter";
+import { mockTxtVerifier, createMockDomainAdapter, createVercelDomainAdapter, isApex, pointingRecords } from "@/lib/domains/adapter";
 import { activateDomain, addDomain, checkDomain, listDomains, removeDomain, sweepPendingDomains } from "@/lib/services/domains";
 import type { Store, TenantRow } from "@/lib/store/types";
 import type { Actor } from "@/lib/tokens";
@@ -71,7 +71,7 @@ describe("Host 解析", () => {
     // 自有網域：加入 → 驗證 → 啟用後才生效
     const d = await addDomain(s.ctx, { site: "lin-bakery", domain: "shop.lin.test" }, s.mock);
     expect(await route(s.store, "shop.lin.test", "/")).toEqual({ type: "notfound" }); // pending
-    await checkDomain(s.ctx, { site: "lin-bakery", domainId: d.id }, s.mock);
+    await checkDomain(s.ctx, { site: "lin-bakery", domainId: d.id }, s.mock, mockTxtVerifier);
     expect((await s.store.getTenantDomain(s.a.id, d.id))!.status).toBe("verified");
     expect(await route(s.store, "shop.lin.test", "/")).toEqual({ type: "notfound" }); // verified 但未啟用
     await activateDomain(s.ctx, { site: "lin-bakery", domainId: d.id, confirm: true });
@@ -151,7 +151,7 @@ describe("網址與 cookie", () => {
     const pv = await previewChanges(s.ctx, { site: "lin-bakery" });
     expect(pv.previewUrl).toMatch(/^http:\/\/lin-bakery\.sites\.example\/\?preview=/);
     const d = await addDomain(s.ctx, { site: "lin-bakery", domain: "www.lin.test" }, s.mock);
-    await checkDomain(s.ctx, { site: "lin-bakery", domainId: d.id }, s.mock);
+    await checkDomain(s.ctx, { site: "lin-bakery", domainId: d.id }, s.mock, mockTxtVerifier);
     await activateDomain(s.ctx, { site: "lin-bakery", domainId: d.id, confirm: true });
     expect((await previewChanges(s.ctx, { site: "lin-bakery" })).previewUrl).toMatch(/^http:\/\/www\.lin\.test\/\?preview=/);
     expect((await listDomains(s.ctx, { site: "lin-bakery" })).siteUrl).toBe("http://www.lin.test"); // ctx.baseUrl 是 http（本機）→ 同協定
@@ -182,12 +182,12 @@ describe("自有網域服務（mock adapter，不打 Vercel）", () => {
     await expect(addDomain(s.ctx, { site: "lin-bakery", domain: "bad domain" }, s.mock)).rejects.toMatchObject({ code: "invalid" });
     const r = await addDomain(s.ctx, { site: "lin-bakery", domain: "https://Shop.Lin.Example/path" }, s.mock);
     expect(r.domain).toBe("shop.lin.example");
-    expect(r.dnsRecords.map((x) => x.type)).toEqual(["CNAME", "TXT"]);
+    expect(r.dnsRecords.map((x) => x.type)).toEqual(["CNAME", "TXT", "TXT"]); // 指向＋Vercel 驗證＋Gather 專屬所有權 TXT
     s.mock.force.set("shop.lin.example", false);
     await expect(activateDomain(s.ctx, { site: "lin-bakery", domainId: r.id, confirm: true })).rejects.toThrow(/驗證中/);
-    expect((await checkDomain(s.ctx, { site: "lin-bakery", domainId: r.id }, s.mock)).status).toBe("pending");
+    expect((await checkDomain(s.ctx, { site: "lin-bakery", domainId: r.id }, s.mock, mockTxtVerifier)).status).toBe("pending");
     s.mock.force.set("shop.lin.example", true);
-    expect((await sweepPendingDomains(s.store, s.mock)).verified).toBe(1);
+    expect((await sweepPendingDomains(s.store, s.mock, 50, mockTxtVerifier)).verified).toBe(1);
     await expect(activateDomain(s.ctx, { site: "lin-bakery", domainId: r.id })).rejects.toMatchObject({ code: "confirm_required" });
     await activateDomain(s.ctx, { site: "lin-bakery", domainId: r.id, confirm: true });
     expect((await s.store.getTenantBySlug("lin-bakery"))!.primary_domain).toBe("shop.lin.example");
@@ -220,5 +220,38 @@ describe("自有網域服務（mock adapter，不打 Vercel）", () => {
       "GET https://api.vercel.com/v9/projects/prj_test/domains/shop.lin.tw?teamId=team_test",
       "GET https://api.vercel.com/v6/domains/shop.lin.tw/config?teamId=team_test",
     ]);
+  });
+});
+
+describe("第九批審查 M1：自有網域不能被搶佔", () => {
+  it("必須同時通過租戶專屬 TXT 與 Vercel 驗證；別的網站的 TXT 不算；冷卻期；pending 7 天過期釋放", async () => {
+    const s = await twoSites();
+    // B 先加了 A 的網域（搶佔），Vercel 也說 verified，但 B 拿不出 A 的 DNS 控制權 → 一直 pending
+    const txtRecords = new Map<string, string>(); // 網域擁有者真正設定的 TXT
+    const txt = async (name: string, expected: string) => txtRecords.get(name) === `gather-verify=${expected}`;
+    const b = await addDomain(s.ctx, { site: "other-shop", domain: "shop.lin.test" }, s.mock);
+    expect(b.dnsRecords.some((r) => r.type === "TXT" && r.name === "_gather-verify.shop.lin.test")).toBe(true);
+    expect((await checkDomain(s.ctx, { site: "other-shop", domainId: b.id }, s.mock, txt)).status).toBe("pending");
+    expect((await checkDomain(s.ctx, { site: "other-shop", domainId: b.id }, s.mock, txt)).lastError).toMatch(/_gather-verify/);
+    // 7 天沒驗證 → 自動過期釋放
+    const later = Date.now() + 8 * 86400_000;
+    expect((await sweepPendingDomains(s.store, s.mock, 50, txt, later)).expired).toBe(1);
+    expect(await s.store.getDomainByName("shop.lin.test")).toBeNull();
+    // 過期釋放的 pending 網域沒有冷卻期（不讓搶佔者拿冷卻期卡住真正的擁有者）→ A 可以馬上加入並用自己的 TXT 驗證
+    const a0 = await addDomain(s.ctx, { site: "lin-bakery", domain: "shop.lin.test" }, s.mock);
+    const t0 = a0.dnsRecords.find((r) => r.name === "_gather-verify.shop.lin.test")!;
+    expect(t0.value).not.toBe(b.dnsRecords.find((r) => r.name === "_gather-verify.shop.lin.test")!.value); // 每個網站的 token 不同
+    txtRecords.set(t0.name, t0.value);
+    expect((await checkDomain(s.ctx, { site: "lin-bakery", domainId: a0.id }, s.mock, txt)).status).toBe("verified");
+    // 換一個網域示範正常流程：A 加入 → 設定自己的 TXT → 驗證成功
+    const a = await addDomain(s.ctx, { site: "lin-bakery", domain: "www.lin.test" }, s.mock);
+    const mine = a.dnsRecords.find((r) => r.name === "_gather-verify.www.lin.test")!;
+    expect((await checkDomain(s.ctx, { site: "lin-bakery", domainId: a.id }, s.mock, txt)).status).toBe("pending");
+    txtRecords.set(mine.name, mine.value);
+    expect((await checkDomain(s.ctx, { site: "lin-bakery", domainId: a.id }, s.mock, txt)).status).toBe("verified");
+    // 移除後 7 天內只有原租戶能加回
+    await removeDomain(s.ctx, { site: "lin-bakery", domainId: a.id, confirm: true }, s.mock);
+    await expect(addDomain(s.ctx, { site: "other-shop", domain: "www.lin.test" }, s.mock)).rejects.toThrow(/冷卻期/);
+    await expect(addDomain(s.ctx, { site: "lin-bakery", domain: "www.lin.test" }, s.mock)).resolves.toMatchObject({ status: "pending" });
   });
 });

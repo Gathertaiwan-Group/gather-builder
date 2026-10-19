@@ -21,6 +21,8 @@ import { scopesForRole } from "./owners";
  */
 export const ACCESS_TTL_S = 3600;
 export const REFRESH_TTL_S = 30 * 86400;
+/** 第九批審查 M3：refresh token 的絕對壽命（從使用者同意算起），到期要重新授權 */
+export const GRANT_MAX_AGE_S = 90 * 86400;
 export const CODE_TTL_MS = 2 * 60_000;
 export const SPEC_URL = "https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization";
 
@@ -92,10 +94,17 @@ export function authorizationServerMetadata(cfg: OAuthConfig) {
   };
 }
 
-/** 401 的 WWW-Authenticate（RFC 9728 §5.1；scope 列出網站可用的 scope，consent 頁可再取消勾選） */
-export function wwwAuthenticate(cfg: OAuthConfig, error?: "invalid_token") {
-  const parts = [`resource_metadata="${cfg.issuer}/.well-known/oauth-protected-resource/api/mcp"`, `scope="${TENANT_SCOPES.join(" ")}"`];
+/** 第九批審查 M4：401 只要求最小的讀取 scope；需要寫入時由 403 insufficient_scope 帶所需 scope 做 step-up */
+export const MIN_SCOPES: Scope[] = ["site:read"];
+/** 同意頁的危險權限（金流退款／取消、儲值金、點數、會員停用、發布上線） */
+export const DANGEROUS_SCOPES: Scope[] = ["orders:write", "wallet:adjust", "points:adjust", "members:write", "publish"];
+
+/** WWW-Authenticate（RFC 9728 §5.1／RFC 6750 §3） */
+export function wwwAuthenticate(cfg: OAuthConfig, error?: "invalid_token" | "insufficient_scope", scopes: string[] = MIN_SCOPES) {
+  const parts = [`resource_metadata="${cfg.issuer}/.well-known/oauth-protected-resource/api/mcp"`, `scope="${scopes.join(" ")}"`];
   if (error) parts.unshift(`error="${error}"`);
+  // header 只能是 ASCII
+  if (error === "insufficient_scope") parts.push(`error_description="this operation requires scope ${scopes.join(" ")}"`);
   return `Bearer ${parts.join(", ")}`;
 }
 
@@ -167,37 +176,86 @@ export async function registerClient(store: Store, body: unknown, opts: { ipHash
   return { client_id: row.client_id, client_id_issued_at: Math.floor(Date.parse(row.created_at) / 1000), redirect_uris: row.redirect_uris, ...metadata };
 }
 
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^22[4-9]\.|^2[3-5]\d\./];
-function privateAddress(addr: string): boolean {
+const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^192\.0\.0\./, /^192\.0\.2\./, /^198\.(1[89])\./, /^198\.51\.100\./, /^203\.0\.113\./, /^(22[4-9]|2[3-5]\d)\./];
+
+/** 把 IPv6 展開成 8 組 16 進位（支援 :: 與結尾內嵌 IPv4） */
+function expandV6(a: string): number[] | null {
+  let s = a.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0]!;
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const p = v4[1]!.split(".").map(Number);
+    s = s.slice(0, -v4[1]!.length) + `${((p[0]! << 8) | p[1]!).toString(16)}:${((p[2]! << 8) | p[3]!).toString(16)}`;
+  }
+  const [head, tail] = s.includes("::") ? s.split("::") : [s, null];
+  const h = head ? head.split(":").filter(Boolean) : [];
+  const t = tail ? tail.split(":").filter(Boolean) : [];
+  const fill = tail === null ? 0 : 8 - h.length - t.length;
+  if (fill < 0) return null;
+  const all = [...h, ...Array(fill).fill("0"), ...t].map((x) => parseInt(x, 16));
+  return all.length === 8 && all.every((n) => Number.isFinite(n) && n >= 0 && n <= 0xffff) ? all : null;
+}
+
+/**
+ * 第九批審查 L5：不可連的位址（私網、loopback、link-local、保留段；IPv6 含 ::/96 IPv4-compatible、::ffff:0:0/96 mapped、
+ * 64:ff9b::/96 NAT64、2002::/16 6to4、fc00::/7 ULA、fe80::/10、ff00::/8 multicast、2001:db8::/32 文件用）
+ */
+export function privateAddress(addr: string): boolean {
   if (isIP(addr) === 4) return PRIVATE_V4.some((r) => r.test(addr));
-  const a = addr.toLowerCase();
-  return a === "::1" || a === "::" || a.startsWith("fe80") || a.startsWith("fc") || a.startsWith("fd") || a.startsWith("::ffff:") || a.startsWith("ff");
+  const g = expandV6(addr);
+  if (!g) return true;
+  if (g.slice(0, 6).every((x) => x === 0)) return true; // ::/96（含 ::、::1、IPv4-compatible）
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return true; // ::ffff:0:0/96
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return true; // 64:ff9b::/96
+  if (g[0] === 0x2002) return true; // 6to4
+  if ((g[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7
+  if ((g[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10
+  if ((g[0]! & 0xff00) === 0xff00) return true; // multicast
+  if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // 文件用
+  if (g[0] === 0x2001 && g[1]! < 0x0200) return true; // 2001::/23 IETF 協定保留（含 Teredo 2001::/32）
+  return false;
 }
 
 export type CimdFetcher = (url: string) => Promise<{ ok: boolean; status: number; contentType: string; text: string }>;
 export type HostResolver = (host: string) => Promise<string[]>;
 
 const defaultResolver: HostResolver = async (host) => (await dnsLookup(host, { all: true })).map((x) => x.address);
-const defaultFetcher: CimdFetcher = async (url) => {
-  const res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(5000), headers: { accept: "application/json" }, cache: "no-store" });
-  const reader = res.body?.getReader();
-  let text = "";
-  let size = 0;
-  if (reader) {
-    const dec = new TextDecoder();
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 16_384) {
-        await reader.cancel();
-        throw new Error("too large");
-      }
-      text += dec.decode(value, { stream: true });
-    }
-  }
-  return { ok: res.ok, status: res.status, contentType: res.headers.get("content-type") ?? "", text };
-};
+
+/**
+ * 第九批審查 L5：用「檢查過的那個 IP」直接連線（https.request 的 lookup 只回傳檢查過的位址；SNI／Host 仍是原本的主機名），
+ * 消除「檢查時解析一次、連線時又解析一次」的 DNS rebinding 時間差。不跟隨轉址、5 秒、16KB。
+ */
+function pinnedFetcher(resolver: HostResolver): CimdFetcher {
+  return async (url) => {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^\[|\]$/g, "");
+    const addrs = isIP(host) ? [host] : await resolver(host);
+    const ip = addrs.find((a) => !privateAddress(a));
+    if (!ip || addrs.some(privateAddress)) throw new Error("private");
+    const { request } = await import("node:https");
+    return await new Promise((resolve, reject) => {
+      const r = request(
+        { protocol: "https:", hostname: u.hostname, servername: isIP(host) ? undefined : host, port: u.port || 443, path: `${u.pathname}${u.search}`, method: "GET", headers: { accept: "application/json" }, timeout: 5000, lookup: (_h: string, _o: unknown, cb: (e: Error | null, a: string, f: number) => void) => cb(null, ip, isIP(ip)) },
+        (res) => {
+          let size = 0;
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => {
+            size += c.length;
+            if (size > 16_384) {
+              r.destroy(new Error("too large"));
+              return;
+            }
+            chunks.push(c);
+          });
+          res.on("end", () => resolve({ ok: (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300, status: res.statusCode ?? 0, contentType: String(res.headers["content-type"] ?? ""), text: Buffer.concat(chunks).toString("utf8") }));
+          res.on("error", reject);
+        },
+      );
+      r.on("timeout", () => r.destroy(new Error("timeout")));
+      r.on("error", reject);
+      r.end();
+    });
+  };
+}
 
 /** CIMD（draft-ietf-oauth-client-id-metadata-document-00）：client_id 是 https 網址（要有路徑）→ 取回文件驗證；24 小時快取 */
 export function isCimdClientId(id: string): boolean {
@@ -209,7 +267,7 @@ export function isCimdClientId(id: string): boolean {
   }
 }
 
-export async function resolveClient(store: Store, clientId: string, deps: { fetcher?: CimdFetcher; resolver?: HostResolver } = {}): Promise<OAuthClientRow> {
+export async function resolveClient(store: Store, clientId: string, deps: { fetcher?: CimdFetcher; resolver?: HostResolver; beforeFetch?: () => Promise<void> } = {}): Promise<OAuthClientRow> {
   if (typeof clientId !== "string" || !clientId || clientId.length > 500) throw new OAuthError("invalid_client", "缺少 client_id", 401);
   const existing = await store.getOAuthClient(clientId);
   if (existing?.disabled_at) throw new OAuthError("invalid_client", "這個 client 已被停用", 401);
@@ -218,15 +276,19 @@ export async function resolveClient(store: Store, clientId: string, deps: { fetc
   const u = new URL(clientId);
   // 🔴 SSRF：只連公開位址（IP 字面值與 DNS 解析結果都要檢查；不跟隨轉址、5 秒、16KB）
   const host = u.hostname.replace(/^\[|\]$/g, "");
-  const addrs = isIP(host) ? [host] : await (deps.resolver ?? defaultResolver)(host).catch(() => []);
+  const resolver = deps.resolver ?? defaultResolver;
+  const addrs = isIP(host) ? [host] : await resolver(host).catch(() => []);
   if (!addrs.length || addrs.some(privateAddress)) throw new OAuthError("invalid_client", "client metadata 文件的網址不能是內部位址", 401);
+  // 第九批審查 L5：抓取外部文件要限流（由呼叫端注入，例如每 IP 每 10 分鐘次數）
+  if (deps.beforeFetch) await deps.beforeFetch();
   let doc: Record<string, unknown>;
   try {
-    const r = await (deps.fetcher ?? defaultFetcher)(clientId);
-    if (!r.ok || !/json/i.test(r.contentType)) throw new Error(`HTTP ${r.status}`);
+    const r = await (deps.fetcher ?? pinnedFetcher(resolver))(clientId);
+    if (!r.ok || !/json/i.test(r.contentType)) throw new Error("bad");
     doc = JSON.parse(r.text) as Record<string, unknown>;
-  } catch (e) {
-    throw new OAuthError("invalid_client", `無法取得 client metadata 文件（${e instanceof Error ? e.message.slice(0, 80) : "錯誤"}）`, 401);
+  } catch {
+    // 🔴 不回傳對方的回應內容或錯誤細節（避免被拿來探測內部服務）
+    throw new OAuthError("invalid_client", "無法取得或解析 client metadata 文件", 401);
   }
   if (doc.client_id !== clientId) throw new OAuthError("invalid_client", "client metadata 文件的 client_id 必須與網址完全相同", 401);
   const uris = Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [];
@@ -251,6 +313,8 @@ export async function resolveClient(store: Store, clientId: string, deps: { fetc
 export interface AuthorizeRequest {
   client: OAuthClientRow;
   redirectUri: string;
+  /** 請求有沒有帶 redirect_uri（L13） */
+  redirectExplicit: boolean;
   state: string | null;
   codeChallenge: string;
   scopes: Scope[];
@@ -259,7 +323,8 @@ export interface AuthorizeRequest {
 
 export function parseScopes(raw: unknown): Scope[] {
   const list = typeof raw === "string" ? raw.split(/\s+/).filter(Boolean) : [];
-  if (!list.length) return [...TENANT_SCOPES];
+  // 第九批審查 M4：沒帶 scope → 最小權限（不是全部）
+  if (!list.length) return [...MIN_SCOPES];
   return [...new Set(list.filter((s): s is Scope => isScope(s) && (TENANT_SCOPES as string[]).includes(s)))];
 }
 
@@ -267,7 +332,7 @@ export function parseScopes(raw: unknown): Scope[] {
  * 驗證授權請求。🔴 client 或 redirect_uri 不對 → 絕不導回（直接顯示錯誤，防 open redirect）；
  * 其他錯誤（缺 PKCE、不支援的 response_type、resource 不對）→ 帶 error 導回 redirect_uri。
  */
-export async function validateAuthorize(store: Store, cfg: OAuthConfig, p: URLSearchParams, deps: { fetcher?: CimdFetcher; resolver?: HostResolver } = {}): Promise<{ ok: true; req: AuthorizeRequest } | { ok: false; redirect: string | null; error: OAuthError }> {
+export async function validateAuthorize(store: Store, cfg: OAuthConfig, p: URLSearchParams, deps: { fetcher?: CimdFetcher; resolver?: HostResolver; beforeFetch?: () => Promise<void> } = {}): Promise<{ ok: true; req: AuthorizeRequest } | { ok: false; redirect: string | null; error: OAuthError }> {
   let client: OAuthClientRow;
   try {
     client = await resolveClient(store, p.get("client_id") ?? "", deps);
@@ -286,7 +351,7 @@ export async function validateAuthorize(store: Store, cfg: OAuthConfig, p: URLSe
   if (!resource || resource !== normalizeResource(cfg.resource)) return back(new OAuthError("invalid_target", `resource 必須是 ${cfg.resource}`));
   const scopes = parseScopes(p.get("scope"));
   if (!scopes.length) return back(new OAuthError("invalid_scope", "沒有可授權的 scope"));
-  return { ok: true, req: { client, redirectUri, state, codeChallenge: challenge, scopes, resource: cfg.resource } };
+  return { ok: true, req: { client, redirectUri, redirectExplicit: p.get("redirect_uri") !== null, state, codeChallenge: challenge, scopes, resource: cfg.resource } };
 }
 
 export function errorRedirect(cfg: OAuthConfig, redirectUri: string, e: OAuthError, state: string | null) {
@@ -303,11 +368,12 @@ export async function approveAuthorization(store: Store, cfg: OAuthConfig, input
   const m = await store.getTenantUser(input.tenantId, input.user.id);
   if (!m || m.status !== "active" || input.user.status !== "active") throw new OAuthError("access_denied", "你不是這個網站的啟用中成員");
   const allowed = new Set(scopesForRole(m.role));
-  const scopes = input.req.scopes.filter((s) => input.scopes.includes(s) && allowed.has(s));
+  // 授權＝店主在同意頁勾選的（可以比 client 請求的多或少；token 回應的 scope 會告訴 client 實際拿到什麼）∩ 角色允許
+  const scopes = [...new Set(input.scopes)].filter((s): s is Scope => (TENANT_SCOPES as string[]).includes(s) && allowed.has(s as Scope));
   if (!scopes.length) throw new OAuthError("invalid_scope", "至少要授權一個 scope（檢視者只能授權讀取權限）");
   const grant = await store.insertOAuthGrant({ client_id: input.req.client.client_id, user_id: input.user.id, tenant_id: input.tenantId, scopes, resource: input.req.resource });
   const code = `gbac_${b64url(randomBytes(32))}`;
-  await store.insertOAuthCode({ code_hash: sha256(code), grant_id: grant.id, client_id: input.req.client.client_id, redirect_uri: input.req.redirectUri, code_challenge: input.req.codeChallenge, scopes, resource: input.req.resource, expires_at: new Date(Date.now() + CODE_TTL_MS).toISOString() });
+  await store.insertOAuthCode({ code_hash: sha256(code), grant_id: grant.id, client_id: input.req.client.client_id, redirect_uri: input.req.redirectUri, redirect_explicit: input.req.redirectExplicit, code_challenge: input.req.codeChallenge, scopes, resource: input.req.resource, expires_at: new Date(Date.now() + CODE_TTL_MS).toISOString() });
   await store.insertAudit({ tenant_id: input.tenantId, actor: `owner:${input.user.email}`, action: "oauth.consent", payload: { grantId: grant.id, client: input.req.client.client_name ?? input.req.client.client_id, scopes } });
   const u = new URL(input.req.redirectUri);
   u.searchParams.set("code", code);
@@ -330,12 +396,14 @@ async function issuePair(store: Store, grant: OAuthGrantRow, scopes: string[], p
   const refresh = `gbor_${b64url(randomBytes(32))}`;
   const now = Date.now();
   await store.insertOAuthToken({ token_hash: sha256(access), kind: "access", grant_id: grant.id, client_id: grant.client_id, scopes, resource: grant.resource, parent_id: parentId, expires_at: new Date(now + ACCESS_TTL_S * 1000).toISOString() });
-  await store.insertOAuthToken({ token_hash: sha256(refresh), kind: "refresh", grant_id: grant.id, client_id: grant.client_id, scopes, resource: grant.resource, parent_id: parentId, expires_at: new Date(now + REFRESH_TTL_S * 1000).toISOString() });
+  const refreshExp = Math.min(now + REFRESH_TTL_S * 1000, Date.parse(grant.created_at) + GRANT_MAX_AGE_S * 1000);
+  await store.insertOAuthToken({ token_hash: sha256(refresh), kind: "refresh", grant_id: grant.id, client_id: grant.client_id, scopes, resource: grant.resource, parent_id: parentId, expires_at: new Date(refreshExp).toISOString() });
   return { access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL_S, refresh_token: refresh, scope: scopes.join(" ") };
 }
 
 async function grantStillValid(store: Store, grant: OAuthGrantRow | null): Promise<boolean> {
   if (!grant || grant.revoked_at) return false;
+  if (Date.parse(grant.created_at) + GRANT_MAX_AGE_S * 1000 <= Date.now()) return false;
   const [user, m] = await Promise.all([store.getOwnerUserById(grant.user_id), store.getTenantUser(grant.tenant_id, grant.user_id)]);
   return !!user && user.status === "active" && !!m && m.status === "active";
 }
@@ -369,7 +437,9 @@ export async function tokenEndpoint(store: Store, cfg: OAuthConfig, form: URLSea
       throw new OAuthError("invalid_grant", "授權碼無效、已使用或已過期");
     }
     if (c.client_id !== clientId) throw new OAuthError("invalid_grant", "授權碼不是發給這個 client 的");
-    if ((form.get("redirect_uri") ?? "") !== c.redirect_uri) throw new OAuthError("invalid_grant", "redirect_uri 與授權請求不符");
+    // 授權請求有帶 redirect_uri → token 請求必須帶一樣的；沒帶（伺服器用唯一註冊的那個）→ 可以不帶，帶了就要相同（L13）
+    const givenRedirect = form.get("redirect_uri");
+    if (c.redirect_explicit ? givenRedirect !== c.redirect_uri : givenRedirect !== null && givenRedirect !== c.redirect_uri) throw new OAuthError("invalid_grant", "redirect_uri 與授權請求不符");
     if (!pkceOk(form.get("code_verifier") ?? "", c.code_challenge)) throw new OAuthError("invalid_grant", "PKCE 驗證失敗（code_verifier 不符）");
     const grant = await store.getOAuthGrant(c.grant_id);
     if (!grant || !(await grantStillValid(store, grant))) throw new OAuthError("invalid_grant", "授權已撤銷");

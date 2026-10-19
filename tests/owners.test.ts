@@ -17,8 +17,10 @@ import {
   OWNER_LOGIN_FAILED,
   OWNER_SESSION_IDLE_MS,
   OWNER_SESSION_ABSOLUTE_MS,
+  adminResetTotp,
   beginTotpSetup,
   confirmTotpSetup,
+  disableTotp,
   getOwnerSession,
   inviteOwnerInternal,
   inviteTeamMember,
@@ -147,11 +149,14 @@ describe("TOTP 二步驟", () => {
     const store = newStore();
     const shop = await makeShop(store, "own-totp");
     const a = await onboard(store, shop.tenant, "t@example.com", "owner");
-    const { secret } = await beginTotpSetup(store, a.user);
-    await expect(confirmTotpSetup(store, a.user, "000000")).rejects.toThrow(/驗證碼錯誤/);
+    await expect(beginTotpSetup(store, a.user, "wrong-password")).rejects.toThrow(/密碼錯誤/);
+    const { secret } = await beginTotpSetup(store, a.user, "correct-horse-1");
+    await expect(confirmTotpSetup(store, a.user, "000000", "correct-horse-1")).rejects.toThrow(/驗證碼錯誤/);
     const t0 = Date.now() - 60_000; // 用兩個時間步以前的碼啟用，留下「最後用過的時間步」
     expect(verifyTotp(secret, totpCode(secret))).not.toBeNull();
-    await confirmTotpSetup(store, a.user, totpCode(secret, t0 + 30_000));
+    await expect(confirmTotpSetup(store, a.user, totpCode(secret, t0 + 30_000), "nope")).rejects.toThrow(/密碼錯誤/);
+    const en = await confirmTotpSetup(store, a.user, totpCode(secret, t0 + 30_000), "correct-horse-1");
+    expect(en.recoveryCodes).toHaveLength(8);
     const r = await ownerLogin(a.d, { email: "t@example.com", password: "correct-horse-1", ip: "3.3.3.3" });
     expect(r.kind).toBe("mfa");
     if (r.kind !== "mfa") return;
@@ -166,6 +171,70 @@ describe("TOTP 二步驟", () => {
     await expect(ownerVerifyMfa(a.d, { ticket: r2.ticket, code, ip: "3.3.3.3" })).rejects.toThrow(/已使用過/);
     // TOTP 秘密 DB 只存密文
     expect((await store.getOwnerUserById(a.user.id))!.totp_secret_enc).not.toContain(secret);
+    // 第九批審查 L7：復原碼只存雜湊、每組只能用一次
+    const fresh = (await store.getOwnerUserById(a.user.id))!;
+    expect(fresh.totp_recovery_hashes).toHaveLength(8);
+    expect(JSON.stringify(fresh.totp_recovery_hashes)).not.toContain(en.recoveryCodes[0]!);
+    const r3 = await ownerLogin(a.d, { email: "t@example.com", password: "correct-horse-1", ip: "3.3.3.3" });
+    if (r3.kind !== "mfa") throw new Error();
+    expect((await ownerVerifyMfa(a.d, { ticket: r3.ticket, code: en.recoveryCodes[0]!.toUpperCase(), ip: "3.3.3.3" })).kind).toBe("session");
+    const r4 = await ownerLogin(a.d, { email: "t@example.com", password: "correct-horse-1", ip: "3.3.3.3" });
+    if (r4.kind !== "mfa") throw new Error();
+    await expect(ownerVerifyMfa(a.d, { ticket: r4.ticket, code: en.recoveryCodes[0]!, ip: "3.3.3.3" })).rejects.toThrow(/已使用過/);
+    expect((await store.getOwnerUserById(a.user.id))!.totp_recovery_hashes).toHaveLength(7);
+    // 停用要密碼＋驗證碼
+    await expect(disableTotp(store, a.user, totpCode(secret, Date.now() + 30_000), "nope")).rejects.toThrow(/密碼錯誤/);
+  });
+
+  it("L7：平台擁有者可重設店主的二步驟（要 confirm、寫稽核、登出所有裝置）；店主自己不行", async () => {
+    const store = newStore();
+    const shop = await makeShop(store, "own-totp-reset");
+    const a = await onboard(store, shop.tenant, "lost@example.com", "owner");
+    const { secret } = await beginTotpSetup(store, a.user, "correct-horse-1");
+    await confirmTotpSetup(store, a.user, totpCode(secret), "correct-horse-1");
+    await expect(adminResetTotp({ ...ctxFor(store), actor: ownerActor(a.user, a.m) }, { site: "own-totp-reset", membershipId: a.m.id, confirm: true })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(adminResetTotp(ctxFor(store), { site: "own-totp-reset", membershipId: a.m.id })).rejects.toMatchObject({ code: "confirm_required" });
+    await adminResetTotp(ctxFor(store), { site: "own-totp-reset", membershipId: a.m.id, confirm: true });
+    expect((await store.getOwnerUserById(a.user.id))!).toMatchObject({ totp_enabled_at: null, totp_recovery_hashes: [] });
+    expect(await getOwnerSession(store, a.token)).toBeNull();
+    expect((await store.listAudit(shop.tenant.id, 10)).some((x) => x.action === "owner.totp_admin_reset")).toBe(true);
+  });
+});
+
+describe("第九批審查 L8／L9／L10", () => {
+  it("L8：重新邀請把唯一的 owner 改成 editor → 拒絕", async () => {
+    const store = newStore();
+    const shop = await makeShop(store, "own-l8");
+    const o = await onboard(store, shop.tenant, "solo@example.com", "owner");
+    await expect(inviteOwnerInternal(o.d, shop.tenant, { email: "solo@example.com", role: "editor", by: "t" })).rejects.toThrow(/至少要有一位/);
+  });
+
+  it("L9：同一個 email 跨 IP 每小時超過 20 次 → 延遲（不鎖死；密碼對仍可登入）", async () => {
+    const store = newStore();
+    const shop = await makeShop(store, "own-l9");
+    const a = await onboard(store, shop.tenant, "l9@example.com", "owner");
+    const d = { ...a.d, slowdownMs: 120 };
+    for (let i = 0; i < 20; i++) await expect(ownerLogin(d, { email: "l9@example.com", password: "nope-nope", ip: `10.0.${i}.1` })).rejects.toThrow(OWNER_LOGIN_FAILED);
+    const t0 = Date.now();
+    const ok = await ownerLogin(d, { email: "l9@example.com", password: "correct-horse-1", ip: "10.9.9.9" });
+    expect(ok.kind).toBe("session");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100);
+  });
+
+  it("L10：停用成員時列出並可一鍵撤銷他建立的手動 MCP token", async () => {
+    const store = newStore();
+    const shop = await makeShop(store, "own-l10");
+    const o = await onboard(store, shop.tenant, "boss10@example.com", "owner");
+    const o2 = await onboard(store, shop.tenant, "co10@example.com", "owner");
+    const c2 = { ...ctxFor(store), actor: ownerActor(o2.user, o2.m) };
+    const tok = await issueOwnerSiteToken(c2, { site: "own-l10", name: "co 的 Claude", scopes: ["site:read"] });
+    expect((await store.getToken(tok.id))!.created_by).toBe(`owner-user:${o2.user.id}`);
+    const c1 = { ...ctxFor(store), actor: ownerActor(o.user, o.m) };
+    const r1 = await updateTeamMember(c1, { site: "own-l10", membershipId: o2.m.id, role: "editor" });
+    expect(r1).toMatchObject({ memberTokens: 1, revokedTokens: 0 });
+    const r2 = await updateTeamMember(c1, { site: "own-l10", membershipId: o2.m.id, status: "disabled", confirm: true, revokeTokens: true });
+    expect(r2).toMatchObject({ memberTokens: 1, revokedTokens: 1 });
+    expect(await authenticateBearer(store, `Bearer ${tok.token}`)).toBeNull();
   });
 });
 

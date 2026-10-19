@@ -33,7 +33,7 @@ describe("MCP 路由認證", () => {
 
     const r0 = await handleMcp(mcpReq(), store);
     expect(r0.status).toBe(401);
-    expect(r0.headers.get("www-authenticate")).toMatch(/^Bearer resource_metadata="http:\/\/test\.local\/\.well-known\/oauth-protected-resource\/api\/mcp", scope="site:read /);
+    expect(r0.headers.get("www-authenticate")).toMatch(/^Bearer resource_metadata="http:\/\/test\.local\/\.well-known\/oauth-protected-resource\/api\/mcp", scope="site:read"$/);
     const bad = await handleMcp(mcpReq("gbt_wrongwrongwrongwrongwrong"), store);
     expect(bad.status).toBe(401);
     expect(bad.headers.get("www-authenticate")).toMatch(/^Bearer error="invalid_token", resource_metadata=/);

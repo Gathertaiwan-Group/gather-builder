@@ -7,6 +7,7 @@ import { baseUrlFrom } from "../runtime";
 import { clientIp } from "../client-ip";
 import { ServiceError } from "../errors";
 import { formObject } from "../site-request";
+import { FLASH_COOKIE } from "../adminServer";
 import {
   OWNER_COOKIE,
   OWNER_MFA_COOKIE,
@@ -156,20 +157,34 @@ export async function handleOwnerAccount(req: Request) {
   try {
     const f = await formObject(req);
     if (f.action === "totp_begin") {
-      await beginTotpSetup(store, s.user);
+      await beginTotpSetup(store, s.user, f.password);
       return to(req, "/owner/account", { ok: "請用驗證器 App 掃描或輸入金鑰，再輸入 6 位數驗證碼完成啟用" });
     }
     if (f.action === "totp_confirm") {
-      await confirmTotpSetup(store, s.user, f.code ?? "");
-      return to(req, "/owner/account", { ok: "已啟用二步驟驗證" });
+      const r = await confirmTotpSetup(store, s.user, f.code ?? "", f.password);
+      const res = to(req, "/owner/account", { ok: "已啟用二步驟驗證。請立刻把下面的復原碼存到安全的地方（只顯示這一次）" });
+      // 復原碼只顯示一次：短效 httpOnly cookie（path /owner），不放網址
+      res.cookies.set(FLASH_COOKIE, r.recoveryCodes.join(" "), { httpOnly: true, secure: secure(), sameSite: "strict", path: "/owner", maxAge: 120 });
+      return res;
     }
     if (f.action === "totp_disable") {
-      await disableTotp(store, s.user, f.code ?? "");
+      await disableTotp(store, s.user, f.code ?? "", f.password);
       return to(req, "/owner/account", { ok: "已停用二步驟驗證" });
+    }
+    if (f.action === "revoke_grant") {
+      const g = await store.getOAuthGrant(f.grantId ?? "");
+      // 只能撤銷自己同意過的授權（任何角色都可以）
+      if (!g || g.user_id !== s.user.id) throw new ServiceError("not_found", "找不到這個授權");
+      await store.revokeOAuthGrant(g.id, "revoked_by_user");
+      await store.insertAudit({ tenant_id: g.tenant_id, actor: `owner:${s.user.email}`, action: "oauth.revoke", payload: { grantId: g.id, by: "self" } });
+      return to(req, "/owner/account", { ok: "已撤銷這個 AI agent 授權" });
     }
     if (f.action === "logout_all") {
       const n = await store.revokeOwnerSessionsForUser(s.user.id);
-      const res = to(req, "/owner/login", { ok: `已登出所有裝置（${n} 個 session）` });
+      // 第九批審查 M3：登出所有裝置也撤銷這個帳號同意過的所有 OAuth 授權
+      const g = await store.revokeOAuthGrantsForUser(s.user.id, "logout_all");
+      await store.insertAudit({ tenant_id: null, actor: `owner:${s.user.email}`, action: "owner.logout_all", payload: { sessions: n, oauthGrants: g } });
+      const res = to(req, "/owner/login", { ok: `已登出所有裝置（${n} 個 session、${g} 個 AI agent 授權）` });
       res.cookies.set(OWNER_COOKIE, "", { httpOnly: true, secure: secure(), sameSite: "lax", path: "/", maxAge: 0 });
       return res;
     }

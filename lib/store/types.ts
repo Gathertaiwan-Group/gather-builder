@@ -110,6 +110,8 @@ export interface TokenRow {
   token_hash: string;
   token_prefix: string;
   scopes: string[];
+  /** 建立者（第九批審查 L10：owner-user:<店主帳號 id>；平台後台／MCP 發的是 null） */
+  created_by?: string | null;
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;

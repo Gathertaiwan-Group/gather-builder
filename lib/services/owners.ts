@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { logUnsentMail } from "../mail";
 import { z } from "zod";
 import type { Mailer } from "../mail";
 import { burnPasswordCheck, hashPassword, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, verifyPassword } from "../members/password";
@@ -30,6 +31,8 @@ export const MFA_TTL_MS = 5 * 60_000;
 export const OWNER_RATE = {
   loginIp: { limit: 30, window: 15 * 60 },
   loginEmailIp: { limit: 10, window: 15 * 60 },
+  /** 第九批審查 L9：只看 email（跨 IP）：每小時 20 次，超過只延遲、不鎖死（避免被拿來鎖住特定店主） */
+  loginEmail: { limit: 20, window: 3600 },
   mfaTicket: { limit: 5, window: 5 * 60 },
   forgotIp: { limit: 5, window: 3600 },
   forgotEmail: { limit: 3, window: 3600 },
@@ -60,6 +63,8 @@ const parseOr = <T extends z.ZodType>(s: T, v: unknown): z.output<T> => {
   return r.data;
 };
 
+export const OWNER_LOGIN_SLOWDOWN_MS = 1500;
+
 export interface OwnerDeps {
   store: Store;
   /** IP 雜湊金鑰（PREVIEW_SECRET） */
@@ -67,6 +72,8 @@ export interface OwnerDeps {
   /** 平台網址（店主後台在平台 host） */
   baseUrl: string;
   sendMail?: Mailer;
+  /** 測試用：覆寫超過 email 門檻時的延遲 */
+  slowdownMs?: number;
 }
 
 async function limit(deps: OwnerDeps, bucket: string, key: string, rule: { limit: number; window: number }) {
@@ -76,7 +83,7 @@ async function limit(deps: OwnerDeps, bucket: string, key: string, rule: { limit
 
 async function deliver(deps: OwnerDeps, to: string, subject: string, text: string) {
   if (!deps.sendMail) {
-    console.log(`[owners] RESEND_API_KEY 未設定，未寄出「${subject}」給 ${to.replace(/(.{2}).*@/, "$1***@")}：\n${text}`);
+    logUnsentMail("owners", to, subject, text);
     return;
   }
   try {
@@ -125,6 +132,9 @@ export async function ownerLogin(deps: OwnerDeps, input: { email: unknown; passw
   const email = typeof input.email === "string" ? input.email.trim().toLowerCase().slice(0, 254) : "";
   const password = typeof input.password === "string" ? input.password.slice(0, MAX_PASSWORD_LENGTH) : "";
   await limit(deps, "owner-login-email-ip", `${sha256(email).slice(0, 32)}:${ipKey}`, OWNER_RATE.loginEmailIp);
+  if (email && !(await deps.store.rateHit("owner-login-email", sha256(email).slice(0, 32), OWNER_RATE.loginEmail.window, OWNER_RATE.loginEmail.limit)).allowed) {
+    await new Promise((r) => setTimeout(r, deps.slowdownMs ?? OWNER_LOGIN_SLOWDOWN_MS));
+  }
   const user = email ? await deps.store.getOwnerUserByEmail(email) : null;
   if (!user?.password_hash) {
     await burnPasswordCheck(password);
@@ -150,8 +160,15 @@ export async function ownerVerifyMfa(deps: OwnerDeps, input: { ticket: string | 
   if (!t) throw new ServiceError("unauthorized", "登入逾時，請重新輸入密碼");
   const user = await deps.store.getOwnerUserById(t.user_id);
   if (!user || user.status !== "active" || !user.totp_secret_enc) throw new ServiceError("unauthorized", "登入逾時，請重新輸入密碼");
-  const step = verifyTotp(decryptSecret(user.totp_secret_enc, `owner-totp:${user.id}`), typeof input.code === "string" ? input.code.trim() : "");
-  if (step === null || !(await deps.store.claimTotpStep(user.id, step))) throw new ServiceError("unauthorized", "驗證碼錯誤或已使用過");
+  const code = typeof input.code === "string" ? input.code.trim() : "";
+  if (RECOVERY_RE.test(code)) {
+    // 第九批審查 L7：一次性復原碼（用掉就失效）
+    if (!(await deps.store.useOwnerRecoveryCode(user.id, sha256(code.toLowerCase())))) throw new ServiceError("unauthorized", "驗證碼錯誤或已使用過");
+    await deps.store.insertAudit({ tenant_id: null, actor: `owner:${user.email}`, action: "owner.totp_recovery_used", payload: { left: Math.max(0, user.totp_recovery_hashes.length - 1) } });
+  } else {
+    const step = verifyTotp(decryptSecret(user.totp_secret_enc, `owner-totp:${user.id}`), code);
+    if (step === null || !(await deps.store.claimTotpStep(user.id, step))) throw new ServiceError("unauthorized", "驗證碼錯誤或已使用過");
+  }
   if (!(await deps.store.consumeOwnerToken(hash, "mfa", nowIso))) throw new ServiceError("unauthorized", "登入逾時，請重新輸入密碼");
   return createSession(deps, user, input.ip, input.userAgent ?? null);
 }
@@ -181,8 +198,10 @@ export async function ownerResetPassword(deps: OwnerDeps, input: { token: unknow
   if (!t) throw new ServiceError("invalid", OWNER_TOKEN_INVALID);
   await deps.store.updateOwnerUser(t.user_id, { password_hash: await hashPassword(password) });
   const revoked = await deps.store.revokeOwnerSessionsForUser(t.user_id);
-  await deps.store.insertAudit({ tenant_id: null, actor: `owner-user:${t.user_id}`, action: "owner.password_reset", payload: { revokedSessions: revoked } });
-  return { message: "密碼已更新，所有裝置都已登出，請重新登入。" };
+  // 第九批審查 M3：重設密碼＝帳號可能外洩 → 這個帳號同意過的 OAuth 授權（access／refresh token）一併撤銷
+  const grants = await deps.store.revokeOAuthGrantsForUser(t.user_id, "password_reset");
+  await deps.store.insertAudit({ tenant_id: null, actor: `owner-user:${t.user_id}`, action: "owner.password_reset", payload: { revokedSessions: revoked, revokedOAuthGrants: grants } });
+  return { message: "密碼已更新，所有裝置與 AI agent 授權都已登出，請重新登入。" };
 }
 
 /** 接受邀請：設定密碼（帳號還沒有密碼時必填）→ 這個網站的成員 invited → active */
@@ -229,6 +248,10 @@ export async function inviteOwnerInternal(deps: OwnerDeps, tenant: TenantRow, in
       m = (await deps.store.getTenantUser(tenant.id, user.id))!;
     }
   } else if (m.status === "disabled" || m.role !== input.role) {
+    // 第九批審查 L8：重新邀請改角色也要保留至少一位啟用中的 owner
+    if (m.role === "owner" && m.status === "active" && input.role !== "owner" && (await deps.store.listTenantUsers(tenant.id)).filter((x) => x.role === "owner" && x.status === "active").length <= 1) {
+      throw new ServiceError("invalid", "網站至少要有一位啟用中的擁有者（owner）");
+    }
     m = (await deps.store.updateTenantUser(tenant.id, m.id, { role: input.role, ...(m.status === "disabled" ? { status: "invited" as const } : {}) }))!;
   }
   const raw = rawToken("gbi");
@@ -274,7 +297,7 @@ async function activeOwners(store: Store, tenantId: string) {
   return (await store.listTenantUsers(tenantId)).filter((m) => m.role === "owner" && m.status === "active");
 }
 
-export async function updateTeamMember(ctx: ServiceContext, input: { site?: string | null; membershipId: string; role?: string; status?: "active" | "disabled"; confirm?: boolean }) {
+export async function updateTeamMember(ctx: ServiceContext, input: { site?: string | null; membershipId: string; role?: string; status?: "active" | "disabled"; confirm?: boolean; revokeTokens?: boolean }) {
   requireTeamAdmin(ctx);
   const tenant = await resolveTenant(ctx, input.site);
   const m = await ctx.store.getTenantUserById(tenant.id, input.membershipId);
@@ -286,37 +309,78 @@ export async function updateTeamMember(ctx: ServiceContext, input: { site?: stri
   if (losesOwner && (await activeOwners(ctx.store, tenant.id)).length <= 1) throw new ServiceError("invalid", "網站至少要有一位啟用中的擁有者（owner）");
   if (status === "active" && m.status === "invited") throw new ServiceError("invalid", "成員還沒接受邀請");
   const next = await ctx.store.updateTenantUser(tenant.id, m.id, { role, status });
-  await audit(ctx, tenant.id, "team.update", { membershipId: m.id, role, status });
-  return { id: m.id, role: next?.role ?? role, status: next?.status ?? status };
+  // 第九批審查 L10：停用或降級時，列出（並可一鍵撤銷）這位成員建立的手動 MCP token
+  const downgraded = status === "disabled" || (m.role === "owner" && role !== "owner") || (m.role === "editor" && role === "viewer");
+  const own = downgraded ? (await ctx.store.listTokens(tenant.id)).filter((t) => !t.revoked_at && t.created_by === `owner-user:${m.user_id}`) : [];
+  let revokedTokens = 0;
+  if (own.length && input.revokeTokens) for (const t of own) if (await ctx.store.revokeToken(t.id)) revokedTokens++;
+  await audit(ctx, tenant.id, "team.update", { membershipId: m.id, role, status, revokedTokens });
+  return { id: m.id, role: next?.role ?? role, status: next?.status ?? status, memberTokens: own.length, revokedTokens };
 }
 
-/* ------------------------------------------------------------------ TOTP（自己的帳號） */
+/* ------------------------------------------------------------------ TOTP（自己的帳號；第九批審查 L7：啟用／停用都要重新輸入密碼，啟用時發一次性復原碼） */
 
-export async function beginTotpSetup(store: Store, user: OwnerUserRow) {
+export const RECOVERY_RE = /^[a-z0-9]{4}-[a-z0-9]{4}$/i;
+const RECOVERY_COUNT = 8;
+
+async function requirePassword(user: OwnerUserRow, password: unknown) {
+  const ok = !!user.password_hash && typeof password === "string" && (await verifyPassword(password.slice(0, MAX_PASSWORD_LENGTH), user.password_hash));
+  if (!ok) throw new ServiceError("unauthorized", "密碼錯誤");
+}
+
+function newRecoveryCodes(): string[] {
+  const A = "abcdefghjkmnpqrstuvwxyz23456789";
+  return Array.from({ length: RECOVERY_COUNT }, () => {
+    let r = "";
+    for (const b of randomBytes(8)) r += A[b % A.length];
+    return `${r.slice(0, 4)}-${r.slice(4)}`;
+  });
+}
+
+export async function beginTotpSetup(store: Store, user: OwnerUserRow, password: unknown) {
   if (user.totp_enabled_at) throw new ServiceError("conflict", "已啟用二步驟驗證");
+  await requirePassword(user, password);
   const secret = newTotpSecret();
   await store.updateOwnerUser(user.id, { totp_secret_enc: encryptSecret(secret, `owner-totp:${user.id}`) });
   return { secret, otpauthUri: otpauthUri(secret, user.email) };
 }
 
-export async function confirmTotpSetup(store: Store, user: OwnerUserRow, code: string) {
+export async function confirmTotpSetup(store: Store, user: OwnerUserRow, code: string, password: unknown) {
   const fresh = await store.getOwnerUserById(user.id);
   if (!fresh?.totp_secret_enc || fresh.totp_enabled_at) throw new ServiceError("invalid", "請先產生二步驟驗證金鑰");
+  await requirePassword(fresh, password);
   const step = verifyTotp(decryptSecret(fresh.totp_secret_enc, `owner-totp:${user.id}`), code.trim());
   if (step === null || !(await store.claimTotpStep(user.id, step))) throw new ServiceError("invalid", "驗證碼錯誤");
-  await store.updateOwnerUser(user.id, { totp_enabled_at: new Date().toISOString() });
+  const codes = newRecoveryCodes();
+  await store.updateOwnerUser(user.id, { totp_enabled_at: new Date().toISOString(), totp_recovery_hashes: codes.map((c) => sha256(c)) });
   await store.insertAudit({ tenant_id: null, actor: `owner:${user.email}`, action: "owner.totp_enable", payload: {} });
-  return { enabled: true };
+  return { enabled: true, recoveryCodes: codes };
 }
 
-export async function disableTotp(store: Store, user: OwnerUserRow, code: string) {
+export async function disableTotp(store: Store, user: OwnerUserRow, code: string, password: unknown) {
   const fresh = await store.getOwnerUserById(user.id);
   if (!fresh?.totp_enabled_at || !fresh.totp_secret_enc) throw new ServiceError("invalid", "尚未啟用二步驟驗證");
+  await requirePassword(fresh, password);
   const step = verifyTotp(decryptSecret(fresh.totp_secret_enc, `owner-totp:${user.id}`), code.trim());
   if (step === null || !(await store.claimTotpStep(user.id, step))) throw new ServiceError("invalid", "驗證碼錯誤");
-  await store.updateOwnerUser(user.id, { totp_enabled_at: null, totp_secret_enc: null });
+  await store.updateOwnerUser(user.id, { totp_enabled_at: null, totp_secret_enc: null, totp_recovery_hashes: [] });
   await store.insertAudit({ tenant_id: null, actor: `owner:${user.email}`, action: "owner.totp_disable", payload: {} });
   return { enabled: false };
+}
+
+/** 平台擁有者重設某位店主的二步驟驗證（店主遺失手機與復原碼時）：只限平台後台、寫稽核、撤銷該帳號所有 session */
+export async function adminResetTotp(ctx: ServiceContext, input: { site?: string | null; membershipId: string; confirm?: boolean }) {
+  if (ctx.actor.kind !== "admin") throw new ServiceError("forbidden", "只有平台擁有者可以重設店主的二步驟驗證");
+  const tenant = await resolveTenant(ctx, input.site);
+  const m = await ctx.store.getTenantUserById(tenant.id, input.membershipId);
+  if (!m) throw new ServiceError("not_found", "找不到這位成員");
+  const u = await ctx.store.getOwnerUserById(m.user_id);
+  if (!u?.totp_enabled_at) throw new ServiceError("invalid", "這位成員沒有啟用二步驟驗證");
+  if (input.confirm !== true) throw new ServiceError("confirm_required", `重設 ${u.email} 的二步驟驗證（確認過本人身分了嗎？）。請確認後以 confirm: true 呼叫。`);
+  await ctx.store.updateOwnerUser(u.id, { totp_enabled_at: null, totp_secret_enc: null, totp_recovery_hashes: [] });
+  const n = await ctx.store.revokeOwnerSessionsForUser(u.id);
+  await audit(ctx, tenant.id, "owner.totp_admin_reset", { email: u.email, revokedSessions: n });
+  return { email: u.email, reset: true };
 }
 
 /* ------------------------------------------------------------------ MCP token（店主自己網站的） */
@@ -329,7 +393,7 @@ export async function issueOwnerSiteToken(ctx: ServiceContext, input: { site?: s
   const scopes = [...new Set(input.scopes)].filter((s): s is Scope => (TENANT_SCOPES as string[]).includes(s));
   if (!scopes.length || scopes.length !== new Set(input.scopes).size) throw new ServiceError("invalid", "請選擇有效的 scope（不能有平台級 scope）");
   const tok = generateToken("tenant");
-  const row = await ctx.store.insertToken({ tenant_id: tenant.id, name, token_hash: tok.hash, token_prefix: tok.prefix, scopes });
+  const row = await ctx.store.insertToken({ tenant_id: tenant.id, name, token_hash: tok.hash, token_prefix: tok.prefix, scopes, created_by: ctx.actor.userId ? `owner-user:${ctx.actor.userId}` : null });
   await audit(ctx, tenant.id, "token.issue", { tokenId: row.id, name, scopes, by: "owner" });
   return { id: row.id, token: tok.raw, prefix: tok.prefix, scopes };
 }

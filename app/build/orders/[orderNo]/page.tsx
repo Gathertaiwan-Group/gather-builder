@@ -10,7 +10,7 @@ export const metadata = { title: "訂單狀態｜Gather Builder", referrer: "no-
 
 const twd = (n: number) => `NT$${n.toLocaleString("en-US")}`;
 const KIND = { new_site: "開站", add_modules: "加購模組", renewal: "月費續約" } as const;
-const STATUS = { pending_payment: "待付款", paid: "已付款", expired: "已逾期", cancelled: "已取消" } as const;
+const STATUS = { pending_payment: "待付款", paid: "已付款", expired: "已逾期", cancelled: "已取消", paid_needs_attention: "已付款（需人工處理）" } as const;
 
 export default async function OrderPage({ params, searchParams }: { params: Promise<{ orderNo: string }>; searchParams: Promise<{ k?: string; err?: string }> }) {
   const [{ orderNo }, sp] = await Promise.all([params, searchParams]);

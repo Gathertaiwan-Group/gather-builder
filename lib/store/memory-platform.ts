@@ -9,6 +9,7 @@ const now = () => new Date().toISOString();
 /** 第九批的記憶體實作（語意與 migrations 0038+ 的 SQL 一致）。attach(store) 後才能改租戶的 primary_domain。 */
 export function createMemoryPlatformStore() {
   const domains = new Map<string, TenantDomainRow>();
+  const releases: { domain: string; tenant_id: string; reason: string; released_at: string }[] = [];
   const users = new Map<string, OwnerUserRow>();
   const members = new Map<string, TenantUserRow>();
   const sessions = new Map<string, OwnerSessionRow>();
@@ -26,6 +27,13 @@ export function createMemoryPlatformStore() {
       const r: TenantDomainRow = { ...clone(row), id: randomUUID(), status: "pending", verify_method: "vercel", last_checked_at: null, last_error: null, verified_at: null, activated_at: null, created_at: now(), updated_at: now() };
       domains.set(r.id, r);
       return clone(r);
+    },
+    async insertDomainRelease(row) {
+      releases.push({ ...row, released_at: now() });
+    },
+    async latestDomainRelease(domain) {
+      const r = releases.filter((x) => x.domain === domain).at(-1);
+      return r ? { tenant_id: r.tenant_id, released_at: r.released_at } : null;
     },
     async listTenantDomains(tenantId) {
       return clone([...domains.values()].filter((d) => d.tenant_id === tenantId).sort((a, b) => a.created_at.localeCompare(b.created_at)));
@@ -66,7 +74,7 @@ export function createMemoryPlatformStore() {
 
     async insertOwnerUser(row) {
       if ([...users.values()].some((u) => u.email === row.email)) throw new ServiceError("conflict", "資料重複");
-      const u: OwnerUserRow = { ...clone(row), id: randomUUID(), status: "active", totp_secret_enc: null, totp_enabled_at: null, totp_last_step: null, last_login_at: null, created_at: now(), updated_at: now() };
+      const u: OwnerUserRow = { ...clone(row), id: randomUUID(), status: "active", totp_secret_enc: null, totp_enabled_at: null, totp_last_step: null, totp_recovery_hashes: [], last_login_at: null, created_at: now(), updated_at: now() };
       users.set(u.id, u);
       return clone(u);
     },
@@ -82,6 +90,12 @@ export function createMemoryPlatformStore() {
       const next = { ...u, ...clone(patch), updated_at: now() };
       users.set(id, next);
       return clone(next);
+    },
+    async useOwnerRecoveryCode(userId, hash) {
+      const u = users.get(userId);
+      if (!u || !u.totp_recovery_hashes.includes(hash)) return false;
+      users.set(userId, { ...u, totp_recovery_hashes: u.totp_recovery_hashes.filter((h) => h !== hash) });
+      return true;
     },
     async claimTotpStep(userId, step) {
       const u = users.get(userId);
@@ -182,6 +196,9 @@ export function createMemoryPlatformStore() {
       if (where?.gatewayIsNull && o.gateway_order_no) return null;
       if (where?.alertedIsNull && o.alerted_at) return null;
       if (patch.gateway_order_no && [...porders.values()].some((x) => x.id !== id && x.gateway_order_no === patch.gateway_order_no)) throw new ServiceError("conflict", "資料重複");
+      // ＝ builder_platform_orders_live_slug（partial unique）：轉成進行中狀態時，同代號不能已有別張進行中的開站單
+      const liveSt = (st: string) => st === "pending_payment" || st === "paid";
+      if (patch.status && liveSt(patch.status) && !liveSt(o.status) && o.kind === "new_site" && [...porders.values()].some((x) => x.id !== id && x.kind === "new_site" && x.slug === o.slug && liveSt(x.status))) throw new ServiceError("conflict", "資料重複");
       const next = { ...o, ...clone(patch), updated_at: now() };
       porders.set(id, next);
       return clone(next);
@@ -199,7 +216,8 @@ export function createMemoryPlatformStore() {
       return clone([...porders.values()].filter((o) => (!opts.tenantId || o.tenant_id === opts.tenantId) && (!opts.status || opts.status.includes(o.status)) && (!opts.kind || o.kind === opts.kind)).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, opts.limit));
     },
     async listPlatformOrdersForSweep(nowIso, staleBeforeIso, limit) {
-      return clone([...porders.values()].filter((o) => (o.status === "pending_payment" && o.expires_at <= nowIso) || (o.status === "paid" && o.provision_attempts < 10 && (o.provision_state === "none" || o.provision_state === "failed" || (o.provision_state === "provisioning" && (o.provision_claimed_at ?? "") < staleBeforeIso)))).slice(0, limit));
+      const since = new Date(Date.parse(nowIso) - 14 * 86400_000).toISOString();
+      return clone([...porders.values()].filter((o) => (o.status === "pending_payment" && o.expires_at <= nowIso) || (o.status === "expired" && !!o.gateway_order_no && o.expires_at > since) || (o.status === "paid" && o.provision_attempts < 10 && (o.provision_state === "none" || o.provision_state === "failed" || (o.provision_state === "provisioning" && (o.provision_claimed_at ?? "") < staleBeforeIso)))).slice(0, limit));
     },
     async getTenantBilling(tenantId) {
       return clone(billing.get(tenantId) ?? null);
@@ -247,6 +265,11 @@ export function createMemoryPlatformStore() {
     async touchOAuthGrant(id, nowIso) {
       const g = ogrants.get(id);
       if (g) ogrants.set(id, { ...g, last_used_at: nowIso });
+    },
+    async revokeOAuthGrantsForUser(userId, reason) {
+      let n = 0;
+      for (const g of [...ogrants.values()]) if (g.user_id === userId && !g.revoked_at && (await store.revokeOAuthGrant(g.id, reason))) n++;
+      return n;
     },
     async revokeOAuthGrant(id, reason) {
       const g = ogrants.get(id);

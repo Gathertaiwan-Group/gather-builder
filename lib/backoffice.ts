@@ -96,7 +96,10 @@ function cookieFrom(req: Request) {
 /** API route 用（GET 下載等）：沒有身分回 null */
 export async function backofficeForRequest(req: Request, slug: string): Promise<Backoffice | null> {
   const r = await resolve(slug, req.headers, cookieFrom(req), req);
-  return r.ok ? r.bo : null;
+  if (!r.ok) return null;
+  // 第九批審查 L15：「以店主身分檢視」的 API 存取（含 GET 下載名單）也寫稽核
+  if (r.bo.viewAs) await r.bo.ctx.store.insertAudit({ tenant_id: r.bo.tenant.id, actor: "admin", action: "admin.view_as_owner", payload: { method: req.method, path: new URL(req.url).pathname } }).catch(() => undefined);
+  return r.bo;
 }
 
 /**
